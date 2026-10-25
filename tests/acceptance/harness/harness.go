@@ -209,6 +209,22 @@ func (c *Cluster) Get(t *testing.T, version, kind, name string) *unstructured.Un
 	return object
 }
 
+// List reads every object of a kind in the acceptance namespace.
+func (c *Cluster) List(t *testing.T, version, kind string) []*unstructured.Unstructured {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	list, err := c.resource(t, version, kind).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list %s in %s: %v", kind, version, err)
+	}
+	objects := make([]*unstructured.Unstructured, 0, len(list.Items))
+	for index := range list.Items {
+		objects = append(objects, &list.Items[index])
+	}
+	return objects
+}
+
 // resource returns the client for a kind, namespace-scoped when the kind is.
 func (c *Cluster) resource(t *testing.T, version, kind string) dynamic.ResourceInterface {
 	t.Helper()

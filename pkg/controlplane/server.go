@@ -1,0 +1,737 @@
+package controlplane
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/client-go/dynamic"
+
+	"github.com/tsic404/kos/api"
+)
+
+// Verb names what a request does, so one decision covers reads, writes and
+// previews (C-12, C-22).
+type Verb string
+
+const (
+	// VerbRead lists or reads objects.
+	VerbRead Verb = "read"
+	// VerbCreate creates an object.
+	VerbCreate Verb = "create"
+	// VerbUpdate rewrites an object.
+	VerbUpdate Verb = "update"
+	// VerbDelete removes an object.
+	VerbDelete Verb = "delete"
+	// VerbPlan previews a desired object set.
+	VerbPlan Verb = "plan"
+	// VerbApply installs a desired object set.
+	VerbApply Verb = "apply"
+)
+
+// Request is what the authorization seam judges.
+type Request struct {
+	Verb Verb
+	Ref  ObjectRef
+}
+
+// Authorizer decides whether a request may run. C-59 owns the rule and this API
+// only carries its outcome, so a kernel write and an extension page action get
+// the same answer.
+type Authorizer interface {
+	Decide(ctx context.Context, request Request) error
+}
+
+// AllowAll authorizes every request; it is the default until role evaluation
+// arrives (C-59).
+type AllowAll struct{}
+
+// Decide implements Authorizer.
+func (AllowAll) Decide(context.Context, Request) error { return nil }
+
+// maxBodyBytes bounds one request body so a large manifest cannot exhaust the
+// control plane.
+const maxBodyBytes = 1 << 20
+
+// defaultOperationTimeout bounds one accepted write. It is not the client's
+// timeout: work continues when the client goes away (C-12).
+const defaultOperationTimeout = 2 * time.Minute
+
+// readRetryAttempts and readRetryDelay bound the re-read after a write that lost
+// a race: a cached source lags behind the write it just observed.
+const (
+	readRetryAttempts = 5
+	readRetryDelay    = 50 * time.Millisecond
+)
+
+// Config wires the API to its environment.
+type Config struct {
+	// Dynamic writes kernel objects; required.
+	Dynamic dynamic.Interface
+	// Source reads projections; defaults to a live source over Dynamic.
+	Source ObjectSource
+	// Authorizer judges requests; defaults to AllowAll.
+	Authorizer Authorizer
+	// Now supplies the read clock; defaults to time.Now.
+	Now func() time.Time
+	// OperationTimeout bounds one accepted write; defaults to two minutes.
+	OperationTimeout time.Duration
+	// Log records the detail a user-facing message must not carry; defaults to
+	// discarding it.
+	Log *slog.Logger
+}
+
+// Server is the control plane API. It holds the cluster client and never hands
+// one to a caller (C-13, F9).
+type Server struct {
+	dynamic    dynamic.Interface
+	source     ObjectSource
+	authorizer Authorizer
+	now        func() time.Time
+	timeout    time.Duration
+	log        *slog.Logger
+	operations context.Context
+	stop       context.CancelFunc
+	mux        *http.ServeMux
+}
+
+// New builds the API surface.
+func New(config Config) (*Server, error) {
+	if config.Dynamic == nil {
+		return nil, errors.New("controlplane: a dynamic client is required")
+	}
+	server := &Server{
+		dynamic:    config.Dynamic,
+		source:     config.Source,
+		authorizer: config.Authorizer,
+		now:        config.Now,
+		timeout:    config.OperationTimeout,
+		log:        config.Log,
+	}
+	if server.source == nil {
+		server.source = NewClusterSource(config.Dynamic)
+	}
+	if server.authorizer == nil {
+		server.authorizer = AllowAll{}
+	}
+	if server.now == nil {
+		server.now = time.Now
+	}
+	if server.timeout <= 0 {
+		server.timeout = defaultOperationTimeout
+	}
+	if server.log == nil {
+		server.log = slog.New(slog.DiscardHandler)
+	}
+	server.operations, server.stop = context.WithCancel(context.Background())
+	server.mux = http.NewServeMux()
+	server.routes()
+	return server, nil
+}
+
+// routes registers the API: objects as resources, then the two request kinds
+// that take a desired set (C-12, C-62).
+func (s *Server) routes() {
+	s.mux.HandleFunc("GET /api/v1/resources/{kind}", s.handleList)
+	s.mux.HandleFunc("POST /api/v1/resources/{kind}", s.handleCreate)
+	s.mux.HandleFunc("GET /api/v1/resources/{kind}/{name}", s.handleGet)
+	s.mux.HandleFunc("PUT /api/v1/resources/{kind}/{name}", s.handleUpdate)
+	s.mux.HandleFunc("DELETE /api/v1/resources/{kind}/{name}", s.handleDelete)
+	s.mux.HandleFunc("POST /api/v1/plan-requests", s.handlePlan)
+	s.mux.HandleFunc("POST /api/v1/apply-requests", s.handleApply)
+	s.mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, notFound("没有这个接口"))
+	})
+}
+
+// Handler serves the API.
+func (s *Server) Handler() http.Handler {
+	return s.mux
+}
+
+// Close stops accepted writes that have not finished.
+func (s *Server) Close() {
+	s.stop()
+}
+
+// handleList returns one page of projections with their observation time (C-13).
+func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
+	kind := r.PathValue("kind")
+	if failure := resolveKind(kind, ""); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	query := r.URL.Query()
+	namespace := query.Get("namespace")
+	if scope, _ := api.ScopeOf(kind); scope == api.ScopeCluster && namespace != "" {
+		writeError(w, invalidField("集群作用域对象不能带 namespace"))
+		return
+	}
+	selector, failure := parseSelector(query.Get("labelSelector"))
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	size, failure := pageSize(query.Get("limit"))
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	last, failure := decodePageToken(query.Get("continue"), kind, namespace, selector.String())
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	if failure := s.authorize(r.Context(), VerbRead, kernelRef(kind, namespace, "")); failure != nil {
+		writeError(w, failure)
+		return
+	}
+
+	observed, err := s.source.List(r.Context(), kind, namespace)
+	if err != nil {
+		s.log.Error("list failed", "kind", kind, "namespace", namespace, "error", err)
+		writeError(w, internal(StageRead, "读取 "+kind+" 失败").about(kernelRef(kind, namespace, "")))
+		return
+	}
+	now := s.now()
+	projections := make([]Projection, 0, len(observed))
+	for _, item := range observed {
+		metadata, _ := item.Object["metadata"].(map[string]any)
+		if !selector.Matches(labels.Set(stringMap(metadata["labels"]))) {
+			continue
+		}
+		projections = append(projections, newProjection(refOf(item.Object, kind), item.Object, item.ObservedAt, now))
+	}
+	sortProjections(projections)
+
+	start, ok := pagePosition(projections, last)
+	if !ok {
+		writeError(w, invalidField("continue 不在本次查询的范围内，请从头读取"))
+		return
+	}
+	end := min(start+size, len(projections))
+	page := projections[start:end]
+	response := listResponse{Items: page}
+	if end < len(projections) {
+		response.Continue = encodePageToken(kind, namespace, selector.String(), page[len(page)-1].Ref.String())
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// handleGet returns one projection (C-13).
+func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
+	kind := r.PathValue("kind")
+	name := r.PathValue("name")
+	if failure := resolveKind(kind, ""); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	namespace, failure := readNamespace(r, kind)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	ref := kernelRef(kind, namespace, name)
+	if failure := s.authorize(r.Context(), VerbRead, ref); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	observed, err := s.source.Get(r.Context(), kind, namespace, name)
+	if err != nil {
+		writeError(w, s.readFailure(err, ref))
+		return
+	}
+	writeJSON(w, http.StatusOK, newProjection(refOf(observed.Object, kind), observed.Object, observed.ObservedAt, s.now()))
+}
+
+// handleCreate writes one object idempotently: the same request submitted twice
+// produces the same object and the same answer (C-12).
+func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
+	kind := r.PathValue("kind")
+	raw, failure := decodeObjectBody(r)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	object, failure := decodeObject(kind, r.URL.Query().Get("namespace"), raw)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	if failure := s.authorize(r.Context(), VerbCreate, object.Ref); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
+	defer cancel()
+
+	current, err := s.source.Get(ctx, object.Ref.Kind, object.Ref.Namespace, object.Ref.Name)
+	switch {
+	case err == nil:
+		if len(changes(current.Object, object.Object.Object)) > 0 {
+			writeError(w, (&Error{
+				Code:               CodeObjectExists,
+				Message:            "对象 " + object.Ref.String() + " 已存在且期望状态不同",
+				Stage:              StageValidate,
+				RequiresUserAction: true,
+				SideEffects:        SideEffectsNone,
+			}).about(object.Ref))
+			return
+		}
+		writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Ref: new(object.Ref), Idempotent: true})
+		return
+	case !apierrors.IsNotFound(err):
+		writeError(w, s.readFailure(err, object.Ref))
+		return
+	}
+
+	if failure := s.create(ctx, object); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Ref: new(object.Ref)})
+}
+
+// handleUpdate rewrites the client-owned fields of one object; the precondition
+// keeps two writers from overwriting each other, and the API server is the one
+// that judges it (C-05, C-12).
+func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	kind := r.PathValue("kind")
+	name := r.PathValue("name")
+	if failure := resolveKind(kind, ""); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	namespace, failure := readNamespace(r, kind)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	raw, failure := decodeObjectBody(r)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	object, failure := decodeObject(kind, namespace, raw)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	if object.Ref.Name != name {
+		writeError(w, invalidField("请求体的 metadata.name 与请求路径不一致").about(object.Ref))
+		return
+	}
+	if failure := s.authorize(r.Context(), VerbUpdate, object.Ref); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
+	defer cancel()
+
+	current, err := s.source.Get(ctx, kind, namespace, name)
+	if err != nil {
+		writeError(w, s.readFailure(err, object.Ref))
+		return
+	}
+	if len(changes(current.Object, object.Object.Object)) == 0 {
+		writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Ref: new(object.Ref), Idempotent: true})
+		return
+	}
+	precondition := r.Header.Get("If-Match")
+	if precondition == "" {
+		precondition = nestedText(raw, "metadata", "resourceVersion")
+	}
+	if precondition == "" {
+		writeError(w, invalidField("更新必须带 metadata.resourceVersion 或 If-Match").about(object.Ref))
+		return
+	}
+	if precondition != nestedText(current.Object, "metadata", "resourceVersion") {
+		writeError(w, conflict(object.Ref, "对象 "+object.Ref.String()+" 已被其他写入修改，请重新读取后再提交", current.Object))
+		return
+	}
+
+	if failure := s.update(ctx, object, precondition); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Ref: new(object.Ref)})
+}
+
+// handleDelete removes one object behind a version precondition.
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	kind := r.PathValue("kind")
+	name := r.PathValue("name")
+	if failure := resolveKind(kind, ""); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	namespace, failure := readNamespace(r, kind)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	ref := kernelRef(kind, namespace, name)
+	if failure := s.authorize(r.Context(), VerbDelete, ref); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
+	defer cancel()
+	current, err := s.source.Get(ctx, kind, namespace, name)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Ref: new(ref), Idempotent: true})
+			return
+		}
+		writeError(w, s.readFailure(err, ref))
+		return
+	}
+	precondition := r.Header.Get("If-Match")
+	if precondition == "" {
+		writeError(w, invalidField("删除必须带 If-Match 的 resourceVersion").about(ref))
+		return
+	}
+	if precondition != nestedText(current.Object, "metadata", "resourceVersion") {
+		writeError(w, conflict(ref, "对象 "+ref.String()+" 已被其他写入修改，请重新读取后再删除", current.Object))
+		return
+	}
+	if failure := s.delete(ctx, ref, precondition); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Ref: new(ref)})
+}
+
+// handlePlan answers the three deviation classes without writing anything
+// (C-62). The response is the same plan an apply of the same set produces.
+func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
+	request, failure := decodeSetRequest(r)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	plan, _, failure := s.buildPlan(r.Context(), VerbPlan, request)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	writeJSON(w, http.StatusOK, planResponse{Plan: plan})
+}
+
+// handleApply accepts a desired set and carries it out. The answer is acceptance
+// with the plan's object references; progress is read from the objects
+// themselves and a disconnected client cannot stop the work (C-12, C-13).
+func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
+	request, failure := decodeSetRequest(r)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
+	plan, desired, failure := s.buildPlan(ctx, VerbApply, request)
+	if failure != nil {
+		cancel()
+		writeError(w, failure)
+		return
+	}
+	go func() {
+		defer cancel()
+		s.execute(ctx, plan, desired)
+	}()
+	writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Plan: plan})
+}
+
+// create writes one object. A create whose object already holds the same
+// desired state is not an error: repeating a write must converge, not fork
+// (C-12).
+func (s *Server) create(ctx context.Context, object desiredObject) *Error {
+	resource, err := resourceOf(s.dynamic, object.Ref.Kind, object.Ref.Namespace)
+	if err != nil {
+		return internal(StageApply, err.Error()).about(object.Ref)
+	}
+	if _, err := resource.Create(ctx, object.Object, metav1.CreateOptions{}); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return s.writeFailure(ctx, err, object.Ref)
+		}
+		current, readErr := s.awaitObject(ctx, object.Ref)
+		if readErr != nil {
+			// The identity already exists, which is what the request asked for; a
+			// cached source that has not caught up must not turn a repeat into a
+			// failure (C-12).
+			s.log.Warn("created object not yet readable; accepting", "object", object.Ref.String(), "error", readErr)
+			return nil
+		}
+		if len(changes(current.Object, object.Object.Object)) == 0 {
+			return nil
+		}
+		return (&Error{
+			Code:               CodeObjectExists,
+			Message:            "对象 " + object.Ref.String() + " 已存在且期望状态不同",
+			Stage:              StageValidate,
+			RequiresUserAction: true,
+			SideEffects:        SideEffectsNone,
+		}).about(object.Ref)
+	}
+	return nil
+}
+
+// update rewrites the client-owned fields of an object. When the caller named a
+// precondition, the submitted object carries that version, so a write that
+// slipped in between the read and this call is refused by the API server instead
+// of being overwritten (C-05).
+func (s *Server) update(ctx context.Context, object desiredObject, expected string) *Error {
+	resource, err := resourceOf(s.dynamic, object.Ref.Kind, object.Ref.Namespace)
+	if err != nil {
+		return internal(StageApply, err.Error()).about(object.Ref)
+	}
+	current, err := resource.Get(ctx, object.Ref.Name, metav1.GetOptions{})
+	if err != nil {
+		return s.writeFailure(ctx, err, object.Ref)
+	}
+	updated := applyDesired(current, object.Object)
+	if expected != "" {
+		updated.SetResourceVersion(expected)
+	}
+	if _, err := resource.Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+		return s.writeFailure(ctx, err, object.Ref)
+	}
+	return nil
+}
+
+// delete removes one object. The version precondition makes the API server the
+// judge: an update that landed since the caller read the object stops the
+// delete instead of being destroyed by it (C-05).
+func (s *Server) delete(ctx context.Context, ref ObjectRef, expected string) *Error {
+	resource, err := resourceOf(s.dynamic, ref.Kind, ref.Namespace)
+	if err != nil {
+		return internal(StageApply, err.Error()).about(ref)
+	}
+	current, err := resource.Get(ctx, ref.Name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return s.writeFailure(ctx, err, ref)
+	}
+	uid := current.GetUID()
+	if expected == "" {
+		expected = current.GetResourceVersion()
+	}
+	if err := resource.Delete(ctx, ref.Name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &expected},
+	}); err != nil && !apierrors.IsNotFound(err) {
+		return s.writeFailure(ctx, err, ref)
+	}
+	return nil
+}
+
+// awaitObject re-reads an object another writer just created: a cached source
+// lags behind the write, so the read is retried briefly.
+func (s *Server) awaitObject(ctx context.Context, ref ObjectRef) (ObservedObject, error) {
+	var last error
+	for attempt := 0; attempt < readRetryAttempts; attempt++ {
+		observed, err := s.source.Get(ctx, ref.Kind, ref.Namespace, ref.Name)
+		if err == nil {
+			return observed, nil
+		}
+		last = err
+		select {
+		case <-ctx.Done():
+			return ObservedObject{}, ctx.Err()
+		case <-time.After(readRetryDelay):
+		}
+	}
+	return ObservedObject{}, last
+}
+
+// authorize asks the seam and renders a refusal as the contract's stable code.
+func (s *Server) authorize(ctx context.Context, verb Verb, ref ObjectRef) *Error {
+	if err := s.authorizer.Decide(ctx, Request{Verb: verb, Ref: ref}); err != nil {
+		s.log.Info("request refused", "verb", string(verb), "object", ref.String(), "reason", err)
+		return (&Error{
+			Code:               CodePermissionDenied,
+			Message:            "当前身份不能对 " + ref.String() + " 执行 " + string(verb),
+			Stage:              StageAuthorize,
+			RequiresUserAction: true,
+			SideEffects:        SideEffectsNone,
+		}).about(ref)
+	}
+	return nil
+}
+
+// readFailure turns a source error into the failure envelope. The cluster's own
+// error text stays in the log: it names endpoints and subjects a browser has no
+// business seeing (C-12).
+func (s *Server) readFailure(err error, ref ObjectRef) *Error {
+	if apierrors.IsNotFound(err) {
+		return notFound("对象 " + ref.String() + " 不存在").about(ref)
+	}
+	s.log.Error("read failed", "object", ref.String(), "error", err)
+	return internal(StageRead, "读取对象 "+ref.String()+" 失败").about(ref)
+}
+
+// writeFailure turns a cluster write error into the failure envelope. A conflict
+// carries the object as the cluster holds it now, so the caller reconciles
+// instead of repeating a blind overwrite (C-05).
+func (s *Server) writeFailure(ctx context.Context, err error, ref ObjectRef) *Error {
+	switch {
+	case apierrors.IsConflict(err):
+		s.log.Warn("write conflict", "object", ref.String(), "error", err)
+		return conflict(ref, "对象 "+ref.String()+" 已被其他写入修改，请重新读取后再提交", s.currentObject(ctx, ref))
+	case apierrors.IsInvalid(err):
+		s.log.Warn("cluster rejected fields", "object", ref.String(), "error", err)
+		return (&Error{
+			Code:               CodeInvalidField,
+			Message:            "集群拒绝了对象 " + ref.String() + " 的字段",
+			Stage:              StageValidate,
+			RequiresUserAction: true,
+			SideEffects:        SideEffectsNone,
+		}).about(ref)
+	case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
+		s.log.Error("control plane may not write", "object", ref.String(), "error", err)
+		return (&Error{
+			Code:        CodeWriteFailed,
+			Message:     "控制面没有写入对象 " + ref.String() + " 的权限，请检查控制面自身的授权",
+			Stage:       StageApply,
+			Retryable:   false,
+			SideEffects: SideEffectsNone,
+		}).about(ref)
+	default:
+		s.log.Error("write failed", "object", ref.String(), "error", err)
+		return (&Error{
+			Code:        CodeWriteFailed,
+			Message:     "写入对象 " + ref.String() + " 失败，请稍后重试",
+			Stage:       StageApply,
+			Retryable:   true,
+			SideEffects: SideEffectsNone,
+		}).about(ref)
+	}
+}
+
+// currentObject reads the object as the cluster holds it now; the conflict
+// answer carries it (C-05).
+func (s *Server) currentObject(ctx context.Context, ref ObjectRef) map[string]any {
+	observed, err := s.source.Get(ctx, ref.Kind, ref.Namespace, ref.Name)
+	if err != nil {
+		s.log.Debug("conflict object unreadable", "object", ref.String(), "error", err)
+		return nil
+	}
+	return observed.Object
+}
+
+// writeResponse answers a write with acceptance and the object reference; it
+// never claims completion (C-13).
+type writeResponse struct {
+	// Accepted is always true: a write that failed is an error response.
+	Accepted bool `json:"accepted"`
+	// Ref identifies the object a single-object write targets; a set apply
+	// names its objects through the plan instead.
+	Ref *ObjectRef `json:"ref,omitempty"`
+	// Idempotent tells that the desired state was already in place.
+	Idempotent bool `json:"idempotent,omitempty"`
+	// Plan is the diff an apply request accepted (C-62).
+	Plan *Plan `json:"plan,omitempty"`
+}
+
+// planResponse is the answer to a plan request (C-62).
+type planResponse struct {
+	Plan *Plan `json:"plan"`
+}
+
+// listResponse is one page of projections.
+type listResponse struct {
+	Items    []Projection `json:"items"`
+	Continue string       `json:"continue,omitempty"`
+}
+
+// writeJSON writes a JSON body.
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+// writeError writes the failure envelope (C-12).
+func writeError(w http.ResponseWriter, failure *Error) {
+	writeJSON(w, failure.status(), map[string]any{"error": failure})
+}
+
+// decodeObjectBody reads one object manifest as generic JSON.
+func decodeObjectBody(r *http.Request) (map[string]any, *Error) {
+	object := map[string]any{}
+	if failure := decodeBody(r, false, &object); failure != nil {
+		return nil, failure
+	}
+	if object == nil {
+		return nil, invalid("请求体必须是 JSON 对象")
+	}
+	return object, nil
+}
+
+// decodeSetRequest reads a plan or apply body.
+func decodeSetRequest(r *http.Request) (SetRequest, *Error) {
+	request := SetRequest{}
+	if failure := decodeBody(r, true, &request); failure != nil {
+		return SetRequest{}, failure
+	}
+	return request, nil
+}
+
+// decodeBody reads a bounded JSON body, rejecting unknown fields when the target
+// is the request envelope rather than an object.
+func decodeBody(r *http.Request, strict bool, target any) *Error {
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+	if err != nil {
+		return invalid("读取请求体失败")
+	}
+	if len(body) > maxBodyBytes {
+		return invalid("请求体超过 1 MiB")
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return invalid("请求体不能为空")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if strict {
+		decoder.DisallowUnknownFields()
+	}
+	if err := decoder.Decode(target); err != nil {
+		return invalid("请求体不是合法的 JSON 对象：" + err.Error())
+	}
+	return nil
+}
+
+// readNamespace reads the namespace parameter of a namespaced kind.
+func readNamespace(r *http.Request, kind string) (string, *Error) {
+	namespace := r.URL.Query().Get("namespace")
+	scope, _ := api.ScopeOf(kind)
+	if scope == api.ScopeCluster {
+		if namespace != "" {
+			return "", invalidField("集群作用域对象不能带 namespace")
+		}
+		return "", nil
+	}
+	if namespace == "" {
+		return "", invalidField("命名空间作用域对象必须给出 namespace 参数")
+	}
+	return namespace, nil
+}
+
+// stringMap converts a raw labels map for selector matching.
+func stringMap(value any) map[string]string {
+	source, _ := value.(map[string]any)
+	converted := make(map[string]string, len(source))
+	for key, item := range source {
+		if parsed, ok := item.(string); ok {
+			converted[key] = parsed
+		}
+	}
+	return converted
+}
