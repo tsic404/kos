@@ -3,7 +3,9 @@
 package harness
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -223,6 +225,133 @@ func (c *Cluster) List(t *testing.T, version, kind string) []*unstructured.Unstr
 		objects = append(objects, &list.Items[index])
 	}
 	return objects
+}
+
+// Resource resolves the client of one kind for code that runs off the test
+// goroutine. The namespace is ignored for cluster-scoped kinds.
+func (c *Cluster) Resource(version, kind, namespace string) (dynamic.ResourceInterface, error) {
+	plural, ok := c.Plurals[kind]
+	if !ok {
+		return nil, fmt.Errorf("no plural discovered for kind %q", kind)
+	}
+	resource := c.Dynamic.Resource(schema.GroupVersionResource{Group: api.Group, Version: version, Resource: plural})
+	if scope, _ := api.ScopeOf(kind); scope == api.ScopeNamespaced {
+		return resource.Namespace(namespace), nil
+	}
+	return resource.Namespace(""), nil
+}
+
+// GetObject reads one kernel object for code that runs off the test goroutine.
+func (c *Cluster) GetObject(ctx context.Context, version, kind, namespace, name string) (*unstructured.Unstructured, error) {
+	resource, err := c.Resource(version, kind, namespace)
+	if err != nil {
+		return nil, err
+	}
+	return resource.Get(ctx, name, metav1.GetOptions{})
+}
+
+// ApplyStatus writes a status only when the stored value differs, so an
+// unchanged observed state produces no write. It reports whether it wrote.
+func (c *Cluster) ApplyStatus(ctx context.Context, version, kind, namespace, name string, status map[string]any) (bool, error) {
+	resource, err := c.Resource(version, kind, namespace)
+	if err != nil {
+		return false, err
+	}
+	object, err := resource.Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return false, err
+	}
+	current, found, err := unstructured.NestedMap(object.Object, "status")
+	if err != nil {
+		return false, err
+	}
+	if found {
+		equal, err := sameJSON(current, status)
+		if err != nil {
+			return false, err
+		}
+		if equal {
+			return false, nil
+		}
+	}
+	object.Object["status"] = status
+	_, err = resource.UpdateStatus(ctx, object, metav1.UpdateOptions{})
+	return err == nil, err
+}
+
+// sameJSON compares two decoded JSON values by their encoding: the dynamic
+// client decodes integers as int64 and encoding/json as float64, so a direct
+// deep comparison would always report a difference.
+func sameJSON(left, right any) (bool, error) {
+	leftEncoded, err := json.Marshal(left)
+	if err != nil {
+		return false, err
+	}
+	rightEncoded, err := json.Marshal(right)
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(leftEncoded, rightEncoded), nil
+}
+
+// Application returns a namespaced Application with an empty status, so the
+// case's reconciler is the only status writer.
+func Application(name string, annotations map[string]string) *unstructured.Unstructured {
+	object := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": api.Group + "/" + v1beta1.GroupVersion.Version,
+		"kind":       "Application",
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": Namespace,
+			"labels":    map[string]any{markers.ManagedBy: "acceptance"},
+		},
+		"spec": map[string]any{},
+	}}
+	if len(annotations) > 0 {
+		object.SetAnnotations(annotations)
+	}
+	return object
+}
+
+// ConditionsOf reads status.conditions of a stored object; a missing list is
+// nil, not an error.
+func ConditionsOf(object *unstructured.Unstructured) ([]metav1.Condition, error) {
+	raw, found, err := unstructured.NestedSlice(object.Object, "status", "conditions")
+	if err != nil || !found {
+		return nil, err
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var conditions []metav1.Condition
+	if err := json.Unmarshal(encoded, &conditions); err != nil {
+		return nil, err
+	}
+	return conditions, nil
+}
+
+// Conditions is ConditionsOf for the test goroutine.
+func Conditions(t *testing.T, object *unstructured.Unstructured) []metav1.Condition {
+	t.Helper()
+	conditions, err := ConditionsOf(object)
+	if err != nil {
+		t.Fatalf("read conditions of %s %s: %v", object.GetKind(), object.GetName(), err)
+	}
+	return conditions
+}
+
+// StatusValue renders a status struct as the map the dynamic client writes.
+func StatusValue(status v1beta1.ObjectStatus) (map[string]any, error) {
+	encoded, err := json.Marshal(status)
+	if err != nil {
+		return nil, err
+	}
+	var value map[string]any
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
 // resource returns the client for a kind, namespace-scoped when the kind is.
