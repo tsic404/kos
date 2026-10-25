@@ -4,7 +4,7 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 归属标记、扩展接口与 ABI 的实现骨架。设计仓（意图与承诺）为
 <https://gitea.tsic.top/tsic/kos-design>，契约以 `docs/02-contracts.md` 为准。
 
-当前阶段交付内核对象模型、ABI、控制面 API 与通用调和内核；不含具体对象的调和与扩展装载。
+当前阶段交付内核对象模型、归属三态、写入路径、ABI、控制面 API 与通用调和内核；不含具体对象的调和与扩展装载。
 
 ## 布局
 
@@ -19,6 +19,9 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `pkg/state/` | C-07/C-08 状态轴：`Reconciled` 三值、失败条件与健康聚合 |
 | `pkg/reconcile/` | C-06 通用调和循环：去重工作队列、单轮时间预算与指标 |
 | `pkg/controlplane/` | 控制面 HTTP 面：资源路由、投影、统一错误包络、计划请求 |
+| `pkg/write/` | 写入路径：C-03/C-04 写入者分配表、准入判定、服务端合并提交与 409 冲突 |
+| `pkg/adoption/` | 归属动作：接管、释放、放弃与接管前的不可变快照 |
+| `pkg/serial/` | 调和循环之外显式写入动作的按对象串行门（调和轮次由 `pkg/reconcile` 串行） |
 | `tests/acceptance/TC-27/` | 读投影带观测时间，超阈值标记陈旧 |
 | `tests/acceptance/TC-28/` | 同一写请求重复提交只产生一个对象 |
 | `tests/acceptance/TC-29/` | 四类失败的错误包络，断线后操作仍到终态 |
@@ -27,6 +30,10 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `tests/acceptance/TC-105/` | 转换策略为无转换、集群无准入 webhook |
 | `tests/acceptance/TC-25/` | `Reconciled` 的 True、False、Unknown 三值 |
 | `tests/acceptance/TC-26/` | 重复调和无增量、超限单轮可被指标观察到 |
+| `tests/acceptance/TC-17/` | 接管、释放与放弃 |
+| `tests/acceptance/TC-18/` | 父对象调和器不写子对象 spec |
+| `tests/acceptance/TC-19/` | 归属标记的载体 |
+| `tests/acceptance/TC-24/` | 并发写入与角色写权限 |
 
 ## 对象模型
 
@@ -37,8 +44,8 @@ ApplicationDefinition、Provider、SystemComponent、NodeDevice 为集群作用�
 ApplicationDefinition 与 NodeDevice 没有 status 写者，因此没有 status 字段与 status 子资源；
 其余八类带 `status.phase`、`status.health.state` 与 `Reconciled` 条件。
 
-`spec` 字段由后续契约逐个加入。本阶段每类对象的 spec 为空结构：契约尚未固定字段时，
-实现不发明线格式。
+`spec` 字段由契约逐个加入：尚未固定字段的对象保持空 spec，实现不发明线格式。当前已兑现
+C-60 的 `spec.owner`（五类带所有者的对象）与 C-59 的 `Application.spec.visibility`。
 
 ## ABI
 
@@ -53,6 +60,21 @@ ApplicationDefinition 与 NodeDevice 没有 status 写者，因此没有 status 
 `pkg/markers` 固定 C-02 的九个键：归属（`managed-by`、`owner-uid`、`adopted-by`、
 `adoption-reason`）、放弃（`declined`）、释放（`released`）、有效性（`invalid`、`stale`）。
 除 `adopted-at` 用注解外一律用标签；未列入的注解不改变行为。
+
+## 写入路径
+
+`pkg/write` 把 C-03/C-04 的写入者分配写成表：主体、对象类与对象部位（`spec`、`status`、
+标记）三者查一张表，表外即拒绝，拒绝信息带上主体与对象。用户写入走服务端合并提交，字段
+管理器按主体区分，同一字段集的第二个写者拿到 409 与当前对象；不相交字段集都保留。
+
+`pkg/adoption` 是 C-02 的三个动作。接管写入归属标记，并在 `kos-system` 留下一条
+`immutable` 的 ConfigMap 记录，内容等于接管前 spec；释放移除归属标记，对象保持当前状态且
+KOS 不再写它；放弃写入 `declined`，对象留在 unmanaged，不再被列为可接管对象。
+
+`pkg/serial` 是显式门：调和循环之外的读—改—写动作（接管、释放、放弃）按对象键串行；
+调和轮次自身由 `pkg/reconcile` 的去重队列保证同一对象同时最多一轮，两层不共用锁，
+跨层并发写由服务端冲突判定收口：服务端合并提交按字段集、显式更新按 `resourceVersion`，
+都返回 409 与当前对象（C-05）。
 
 ## 控制面 API
 

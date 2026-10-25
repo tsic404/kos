@@ -62,8 +62,27 @@ type Application struct {
 	Status ObjectStatus `json:"status,omitempty"`
 }
 
+// Visibility decides who sees an application in the panel; it does not gate
+// access to its endpoints (C-59).
+type Visibility struct {
+	// Members lists local usernames that may see the application (C-59).
+	// +optional
+	Members []string `json:"members,omitempty"`
+	// AllowGuests lets users without a role see the application (C-59).
+	// +optional
+	AllowGuests bool `json:"allowGuests,omitempty"`
+}
+
 // ApplicationSpec holds the user-owned desired state of an application.
-type ApplicationSpec struct{}
+type ApplicationSpec struct {
+	// Owner is the local username of the creating session; the API writes it
+	// and only the global Owner may transfer it (C-60).
+	// +optional
+	Owner string `json:"owner,omitempty"`
+	// Visibility decides who sees the application in the panel (C-59).
+	// +optional
+	Visibility Visibility `json:"visibility,omitempty"`
+}
 
 // ApplicationList is the list form of Application.
 //
@@ -117,7 +136,12 @@ type Volume struct {
 }
 
 // VolumeSpec holds the user-owned desired state of a volume.
-type VolumeSpec struct{}
+type VolumeSpec struct {
+	// Owner is the local username of the creating session; the API writes it
+	// and only the global Owner may transfer it (C-60).
+	// +optional
+	Owner string `json:"owner,omitempty"`
+}
 
 // VolumeList is the list form of Volume.
 //
@@ -233,7 +257,12 @@ type BackupPolicy struct {
 }
 
 // BackupPolicySpec holds the user-owned backup schedule.
-type BackupPolicySpec struct{}
+type BackupPolicySpec struct {
+	// Owner is the local username of the creating session; the API writes it
+	// and only the global Owner may transfer it (C-60).
+	// +optional
+	Owner string `json:"owner,omitempty"`
+}
 
 // BackupPolicyList is the list form of BackupPolicy.
 //
@@ -262,7 +291,12 @@ type RestoreJob struct {
 }
 
 // RestoreJobSpec holds the user-owned restore request.
-type RestoreJobSpec struct{}
+type RestoreJobSpec struct {
+	// Owner is the local username of the creating session; the API writes it
+	// and only the global Owner may transfer it (C-60).
+	// +optional
+	Owner string `json:"owner,omitempty"`
+}
 
 // RestoreJobList is the list form of RestoreJob.
 //
@@ -316,7 +350,12 @@ type VolumeMigration struct {
 }
 
 // VolumeMigrationSpec holds the user-owned migration request.
-type VolumeMigrationSpec struct{}
+type VolumeMigrationSpec struct {
+	// Owner is the local username of the creating session; the API writes it
+	// and only the global Owner may transfer it (C-60).
+	// +optional
+	Owner string `json:"owner,omitempty"`
+}
 
 // VolumeMigrationList is the list form of VolumeMigration.
 //

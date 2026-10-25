@@ -38,6 +38,12 @@ spec:
             type: object
           spec:
             description: Spec is the desired state owned by the user (C-03).
+            properties:
+              owner:
+                description: |-
+                  Owner is the local username of the creating session; the API writes it
+                  and only the global Owner may transfer it (C-60).
+                type: string
             type: object
           status:
             description: Status is written by the volume reconciler (C-03, C-07).
@@ -148,6 +154,12 @@ spec:
             type: object
           spec:
             description: Spec is the desired state owned by the user (C-03).
+            properties:
+              owner:
+                description: |-
+                  Owner is the local username of the creating session; the API writes it
+                  and only the global Owner may transfer it (C-60).
+                type: string
             type: object
           status:
             description: Status is written by the volume reconciler (C-03, C-07).
