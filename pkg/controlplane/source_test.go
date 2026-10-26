@@ -47,11 +47,16 @@ func TestResourceNamesMatchTheGeneratedCRDs(t *testing.T) {
 			t.Errorf("no CRD declares kind %s", kind)
 			continue
 		}
-		if resourceNames[kind] != plural {
-			t.Errorf("%s resolves to resource %q, the CRD declares %q", kind, resourceNames[kind], plural)
+		resolved, ok := api.ResourceName(kind)
+		if !ok {
+			t.Errorf("%s has no resource name", kind)
+			continue
+		}
+		if resolved != plural {
+			t.Errorf("%s resolves to resource %q, the CRD declares %q", kind, resolved, plural)
 		}
 	}
-	if len(declared) != len(resourceNames) {
-		t.Errorf("the CRDs declare %d kinds, the control plane serves %d", len(declared), len(resourceNames))
+	if len(declared) != len(api.Kinds()) {
+		t.Errorf("the CRDs declare %d kinds, the model has %d", len(declared), len(api.Kinds()))
 	}
 }

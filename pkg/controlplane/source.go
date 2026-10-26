@@ -88,27 +88,12 @@ func resourceOf(client dynamic.Interface, kind, namespace string) (dynamic.Resou
 	return resource.Namespace(""), nil
 }
 
-// resourceNames are the resource names the generated CRDs declare. They are
-// written out rather than derived from the kind: English plurals cannot be
-// guessed, and a wrong guess reaches the wrong resource.
-var resourceNames = map[string]string{
-	"Application":           "applications",
-	"ApplicationDefinition": "applicationdefinitions",
-	"BackupPolicy":          "backuppolicies",
-	"Endpoint":              "endpoints",
-	"NodeDevice":            "nodedevices",
-	"Provider":              "providers",
-	"RestoreJob":            "restorejobs",
-	"SystemComponent":       "systemcomponents",
-	"Volume":                "volumes",
-	"VolumeMigration":       "volumemigrations",
-}
-
 // gvr is the group, version and resource of a kernel kind.
 func gvr(kind string) schema.GroupVersionResource {
+	name, _ := api.ResourceName(kind)
 	return schema.GroupVersionResource{
 		Group:    api.Group,
 		Version:  v1beta1.GroupVersion.Version,
-		Resource: resourceNames[kind],
+		Resource: name,
 	}
 }
