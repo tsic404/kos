@@ -13,6 +13,10 @@ const Group = "kos.tsic.top"
 // carries; failure conditions are separate (C-07).
 const ConditionReconciled = "Reconciled"
 
+// SystemNamespace holds the objects KOS keeps for itself: the control plane,
+// action records and adoption snapshots (C-04, C-35, C-54).
+const SystemNamespace = "kos-system"
+
 // Scope is the reach of an object kind.
 type Scope string
 

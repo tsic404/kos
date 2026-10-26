@@ -14,7 +14,9 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -25,6 +27,7 @@ import (
 	"github.com/tsic404/kos/api"
 	"github.com/tsic404/kos/api/v1beta1"
 	"github.com/tsic404/kos/pkg/markers"
+	"github.com/tsic404/kos/pkg/write"
 )
 
 // Namespace is where namespaced kernel objects of the acceptance cases live.
@@ -364,7 +367,8 @@ func (c *Cluster) resource(t *testing.T, version, kind string) dynamic.ResourceI
 	return resource.Namespace("")
 }
 
-// discoverPlurals reads the resource names the API server serves.
+// discoverPlurals reads the resource names the API server serves for the KOS
+// group and for core, so a case can name any object it writes.
 func (c *Cluster) discoverPlurals(t *testing.T) map[string]string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
@@ -377,7 +381,70 @@ func (c *Cluster) discoverPlurals(t *testing.T) map[string]string {
 	for _, crd := range list.Items {
 		plurals[crd.Spec.Names.Kind] = crd.Spec.Names.Plural
 	}
+	resources, err := c.Kube.Discovery().ServerResourcesForGroupVersion("v1")
+	if err != nil {
+		t.Fatalf("discover core v1: %v", err)
+	}
+	for _, resource := range resources.APIResources {
+		if _, exists := plurals[resource.Kind]; !exists {
+			plurals[resource.Kind] = resource.Name
+		}
+	}
 	return plurals
+}
+
+// Resources maps every kernel kind to the resource the API server serves.
+func (c *Cluster) Resources() map[schema.GroupKind]string {
+	resources := make(map[schema.GroupKind]string, len(c.Plurals))
+	for kind, plural := range c.Plurals {
+		resources[schema.GroupKind{Group: api.Group, Kind: kind}] = plural
+	}
+	return resources
+}
+
+// Writer returns the write path over this cluster.
+func (c *Cluster) Writer() *write.Writer {
+	return &write.Writer{Dynamic: c.Dynamic, Resources: c.Resources()}
+}
+
+// EnsureNamespace creates name unless the cluster already has it.
+func (c *Cluster) EnsureNamespace(t *testing.T, name string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	_, err := c.Kube.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+	}, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("create namespace %s: %v", name, err)
+	}
+}
+
+// Direct returns the client of any object class by group, version and kind.
+// A case uses it to write exactly the object it needs, without admission.
+func (c *Cluster) Direct(t *testing.T, group, version, kind, namespace string) dynamic.ResourceInterface {
+	t.Helper()
+	plural, ok := c.Plurals[kind]
+	if !ok {
+		t.Fatalf("no plural discovered for kind %q", kind)
+	}
+	resource := c.Dynamic.Resource(schema.GroupVersionResource{Group: group, Version: version, Resource: plural})
+	if namespace == "" {
+		return resource
+	}
+	return resource.Namespace(namespace)
+}
+
+// ListByLabels returns the kernel objects of kind matching selector.
+func (c *Cluster) ListByLabels(t *testing.T, version, kind, selector string) []unstructured.Unstructured {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	list, err := c.resource(t, version, kind).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		t.Fatalf("list %s by %q: %v", kind, selector, err)
+	}
+	return list.Items
 }
 
 // Flatten turns an object into path to typed-value entries so two reads can be

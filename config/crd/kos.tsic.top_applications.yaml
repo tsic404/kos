@@ -38,6 +38,27 @@ spec:
             type: object
           spec:
             description: Spec is the desired state owned by the user (C-03).
+            properties:
+              owner:
+                description: |-
+                  Owner is the local username of the creating session; the API writes it
+                  and only the global Owner may transfer it (C-60).
+                type: string
+              visibility:
+                description: Visibility decides who sees the application in the panel
+                  (C-59).
+                properties:
+                  allowGuests:
+                    description: AllowGuests lets users without a role see the application
+                      (C-59).
+                    type: boolean
+                  members:
+                    description: Members lists local usernames that may see the application
+                      (C-59).
+                    items:
+                      type: string
+                    type: array
+                type: object
             type: object
           status:
             description: Status is written by the application reconciler (C-03, C-07).
@@ -148,6 +169,27 @@ spec:
             type: object
           spec:
             description: Spec is the desired state owned by the user (C-03).
+            properties:
+              owner:
+                description: |-
+                  Owner is the local username of the creating session; the API writes it
+                  and only the global Owner may transfer it (C-60).
+                type: string
+              visibility:
+                description: Visibility decides who sees the application in the panel
+                  (C-59).
+                properties:
+                  allowGuests:
+                    description: AllowGuests lets users without a role see the application
+                      (C-59).
+                    type: boolean
+                  members:
+                    description: Members lists local usernames that may see the application
+                      (C-59).
+                    items:
+                      type: string
+                    type: array
+                type: object
             type: object
           status:
             description: Status is written by the application reconciler (C-03, C-07).
