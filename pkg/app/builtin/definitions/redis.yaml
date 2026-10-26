@@ -1,0 +1,57 @@
+apiVersion: kos.tsic.top/v1beta1
+kind: ApplicationDefinition
+metadata:
+  name: redis
+spec:
+  package:
+    digest: "sha256:a1b7400c0402dda5a0208f00c43f1f18987316a77284a9e57a9bf7100e0bacc1"
+    version: "7.4.0"
+  config:
+    - name: replicas
+      type: integer
+      default: "1"
+      minimum: "1"
+      maximum: "5"
+      description: Number of cache replicas.
+    - name: image
+      type: string
+      default: "redis:7.4"
+      description: Container image to run.
+    - name: maxMemory
+      type: string
+      default: "128mb"
+      description: Cache size limit passed to the server.
+  template: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: {{ .Name }}
+      namespace: {{ .Namespace }}
+    spec:
+      replicas: {{ .Config.replicas }}
+      selector:
+        matchLabels:
+          app: {{ .Name }}
+      template:
+        metadata:
+          labels:
+            app: {{ .Name }}
+        spec:
+          containers:
+            - name: {{ .Name }}
+              image: {{ .Config.image }}
+              args: ["--maxmemory", "{{ .Config.maxMemory }}"]
+              ports:
+                - containerPort: 6379
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: {{ .Name }}
+      namespace: {{ .Namespace }}
+    spec:
+      selector:
+        app: {{ .Name }}
+      ports:
+        - port: 6379
+          targetPort: 6379

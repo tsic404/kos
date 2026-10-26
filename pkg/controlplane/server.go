@@ -165,6 +165,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/v1/resources/{kind}/{name}", s.handleDelete)
 	s.mux.HandleFunc("POST /api/v1/plan-requests", s.handlePlan)
 	s.mux.HandleFunc("POST /api/v1/apply-requests", s.handleApply)
+	s.mux.HandleFunc("POST /api/v1/action-requests", s.handleAction)
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, notFound("没有这个接口"))
 	})
@@ -242,7 +243,12 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		object := s.projectedObject(objectType, item.Object)
-		projections = append(projections, newProjection(refOf(object, objectType), object, item.ObservedAt, now))
+		masked, failure := s.maskSensitive(r.Context(), objectType.Kind, object)
+		if failure != nil {
+			writeError(w, failure)
+			return
+		}
+		projections = append(projections, newProjection(refOf(masked, objectType), masked, item.ObservedAt, now))
 	}
 	sortProjections(projections)
 
@@ -285,7 +291,12 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	object := s.projectedObject(objectType, observed.Object)
-	writeJSON(w, http.StatusOK, newProjection(refOf(object, objectType), object, observed.ObservedAt, s.now()))
+	masked, failure := s.maskSensitive(r.Context(), objectType.Kind, object)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	writeJSON(w, http.StatusOK, newProjection(refOf(masked, objectType), masked, observed.ObservedAt, s.now()))
 }
 
 // handleCreate writes one object idempotently: the same request submitted twice
@@ -319,10 +330,22 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
 	defer cancel()
 
+	if failure := s.validateApplicationWrite(ctx, object.Object); failure != nil {
+		writeError(w, failure)
+		return
+	}
 	current, err := s.source.Get(ctx, object.Type, object.Ref.Namespace, object.Ref.Name)
 	switch {
 	case err == nil:
-		if len(changes(current.Object, object.Object.Object)) > 0 {
+		// A repeat of the same create is not a conflict, and this path never
+		// rewrites the object, so the comparison keeps the markers the stored
+		// object already carries (C-02, C-12).
+		existing, failure := withStoredAttribution(object, current.Object)
+		if failure != nil {
+			writeError(w, failure)
+			return
+		}
+		if len(changes(current.Object, existing.Object.Object)) > 0 {
 			writeError(w, (&Error{
 				Code:               CodeObjectExists,
 				Message:            "对象 " + object.Ref.String() + " 已存在且期望状态不同",
@@ -339,6 +362,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The control plane is the creator here, so this is the one place the
+	// attribution marker is written; an existing object keeps its own (C-02).
+	object = withCreationAttribution(object)
 	if failure := s.create(ctx, object); failure != nil {
 		writeError(w, failure)
 		return
@@ -387,12 +413,23 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
 	defer cancel()
 
+	if failure := s.validateApplicationWrite(ctx, object.Object); failure != nil {
+		writeError(w, failure)
+		return
+	}
 	current, err := s.source.Get(ctx, object.Type, namespace, name)
 	if err != nil {
 		writeError(w, s.readFailure(err, object.Ref))
 		return
 	}
 	if failure := validateEndpointUpdate(current.Object, object); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	// An update never changes attribution: the markers the creator or the user
+	// wrote stay, and an unmanaged object does not gain one (C-02).
+	object, failure = withStoredAttribution(object, current.Object)
+	if failure != nil {
 		writeError(w, failure)
 		return
 	}
@@ -409,7 +446,8 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if precondition != nestedText(current.Object, "metadata", "resourceVersion") {
-		writeError(w, conflict(object.Ref, "对象 "+object.Ref.String()+" 已被其他写入修改，请重新读取后再提交", current.Object))
+		writeError(w, s.conflictWith(ctx, object.Type, object.Ref,
+			"对象 "+object.Ref.String()+" 已被其他写入修改，请重新读取后再提交", current.Object))
 		return
 	}
 
@@ -456,7 +494,8 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if precondition != nestedText(current.Object, "metadata", "resourceVersion") {
-		writeError(w, conflict(ref, "对象 "+ref.String()+" 已被其他写入修改，请重新读取后再删除", current.Object))
+		writeError(w, s.conflictWith(ctx, objectType, ref,
+			"对象 "+ref.String()+" 已被其他写入修改，请重新读取后再删除", current.Object))
 		return
 	}
 	if failure := s.delete(ctx, objectType, ref, precondition); failure != nil {
@@ -625,6 +664,23 @@ func (s *Server) readFailure(err error, ref ObjectRef) *Error {
 	return internal(StageRead, "读取对象 "+ref.String()+" 失败").about(ref)
 }
 
+// conflictWith renders a conflict answer from the object the cluster holds now.
+// Every 409 leaves through here, so a stored sensitive config is masked wherever
+// it is read back (C-05, C-31); an object that cannot be masked is dropped
+// instead of served.
+func (s *Server) conflictWith(ctx context.Context, object ObjectType, ref ObjectRef, message string, current map[string]any) *Error {
+	if current != nil {
+		masked, failure := s.maskSensitive(ctx, object.Kind, current)
+		if failure != nil {
+			s.log.Warn("conflict object cannot be masked; dropping it", "object", ref.String(), "error", failure.Message)
+			current = nil
+		} else {
+			current = masked
+		}
+	}
+	return conflict(ref, message, current)
+}
+
 // writeFailure turns a cluster write error into the failure envelope. A conflict
 // carries the object as the cluster holds it now, so the caller reconciles
 // instead of repeating a blind overwrite (C-05).
@@ -632,7 +688,8 @@ func (s *Server) writeFailure(ctx context.Context, object ObjectType, err error,
 	switch {
 	case apierrors.IsConflict(err):
 		s.log.Warn("write conflict", "object", ref.String(), "error", err)
-		return conflict(ref, "对象 "+ref.String()+" 已被其他写入修改，请重新读取后再提交", s.currentObject(ctx, object, ref))
+		return s.conflictWith(ctx, object, ref, "对象 "+ref.String()+" 已被其他写入修改，请重新读取后再提交",
+			s.currentObject(ctx, object, ref))
 	case apierrors.IsInvalid(err):
 		s.log.Warn("cluster rejected fields", "object", ref.String(), "error", err)
 		return (&Error{

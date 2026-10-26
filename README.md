@@ -4,8 +4,9 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 归属标记、扩展接口与 ABI 的实现骨架。设计仓（意图与承诺）为
 <https://gitea.tsic.top/tsic/kos-design>，契约以 `docs/02-contracts.md` 为准。
 
-当前阶段交付内核对象模型、归属三态、写入路径、ABI、控制面 API、通用调和内核与扩展装载
-（包摘要、声明、九类贡献、依赖激活与可见性投影）；不含具体贡献类的语义、停用与卸载。
+当前阶段交付内核对象模型、归属三态、写入路径、ABI、控制面 API、通用调和内核、
+扩展装载（包摘要、声明、九类贡献、依赖激活与可见性投影）、应用渲染与本地账号会话；
+不含升级回滚、停用与卸载、各贡献类自身的语义与 Provider 能力验证。
 
 ## 布局
 
@@ -21,6 +22,8 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `pkg/reconcile/` | C-06 通用调和循环：去重工作队列、单轮时间预算与指标 |
 | `pkg/controlplane/` | 控制面 HTTP 面：资源路由、投影、统一错误包络、计划请求 |
 | `pkg/write/` | 写入路径：C-03/C-04 写入者分配表、准入判定、服务端合并提交与 409 冲突 |
+| `pkg/app/` | C-11/C-32/C-33 应用域：配置结构、翻译模板、能力比较、生命周期与动作记录 |
+| `pkg/app/builtin/` | 发行版内置的五份应用定义，摘要由内容计算 |
 | `pkg/identity/` | 账号与会话：本地账号、锁定计数、一次性口令、会话边界与失效、自身数据库与每日导出 |
 | `pkg/adoption/` | 归属动作：接管、释放、放弃与接管前的不可变快照 |
 | `pkg/serial/` | 调和循环之外显式写入动作的按对象串行门（调和轮次由 `pkg/reconcile` 串行） |
@@ -37,6 +40,13 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `tests/acceptance/TC-18/` | 父对象调和器不写子对象 spec |
 | `tests/acceptance/TC-19/` | 归属标记的载体 |
 | `tests/acceptance/TC-24/` | 并发写入与角色写权限 |
+| `tests/acceptance/TC-23/` | 内置定义安装到 Ready、十类对象可被发现 |
+| `tests/acceptance/TC-45/` | 同一配置的翻译结果一致、等价配置等价 |
+| `tests/acceptance/TC-46/` | 私有配置里的卷与入口字段被拒 |
+| `tests/acceptance/TC-47/` | 未知注解不改变阶段、健康与下游 |
+| `tests/acceptance/TC-54/` | 缺失能力与缺失命名空间停在 Pending，齐备后 Installing 再到 Ready |
+| `tests/acceptance/TC-55/` | 五次重试预算、退避上限与用户重试 |
+| `tests/acceptance/TC-56/` | 卸载阻塞可见、orphan 门槛与应用弃置清单 |
 | `tests/acceptance/TC-72/` | 自身数据库的每日导出与离线恢复 |
 | `tests/acceptance/TC-117/` | 登录失败同一结果、按登录名锁定与退出 |
 | `tests/acceptance/TC-118/` | 角色变更、改口令、停用与删除前置转移 |
@@ -57,8 +67,11 @@ ApplicationDefinition 与 NodeDevice 没有 status 写者，因此没有 status 
 其余八类带 `status.phase`、`status.health.state` 与 `Reconciled` 条件。
 
 `spec` 字段由契约逐个加入：尚未固定字段的对象保持空 spec，实现不发明线格式。当前已兑现
-C-60 的 `spec.owner`（五类带所有者的对象）、C-59 的 `Application.spec.visibility` 与
-C-17 的 `SystemComponent.spec.package`（工件引用与 sha256 摘要）。
+C-60 的 `spec.owner`（五类带所有者的对象）、C-59 的 `Application.spec.visibility`、
+C-17 的 `SystemComponent.spec.package`（工件引用与 sha256 摘要）、
+C-32 的 `Application.spec.definitionRef`/`namespace`/`config`/`volumes` 与定义侧
+`spec.package`/`config`/`template`/`hooks`/`chart`/`requires`，以及 C-33 的
+`status.retryCount`、`status.nextRetryAt`、`status.uninstall`。
 
 ## ABI
 
@@ -102,6 +115,7 @@ KOS 不再写它；放弃写入 `declined`，对象留在 unmanaged，不再被�
 | `DELETE` | `/api/v1/resources/{kind}/{name}` | 删除；需 `If-Match` |
 | `POST` | `/api/v1/plan-requests` | 三类差异、摘要与警告；不写任何对象 |
 | `POST` | `/api/v1/apply-requests` | 接受期望对象集后执行；进度从对象本身读取 |
+| `POST` | `/api/v1/action-requests` | 应用动作 `retry`/`orphan`；202 已接受 + 动作记录引用 |
 
 - 读投影每项带 `observedAt` 与 `stale`；陈旧阈值是 `controlplane.StaleThreshold`（2 分钟），所有来源共用。
 - 写请求返回 202 与对象引用，不返回已完成；工作在接受后继续，客户端断线不影响推进。
@@ -115,6 +129,10 @@ KOS 不再写它；放弃写入 `declined`，对象留在 unmanaged，不再被�
   （读、删）或请求体的 `apiVersion`（写）指名 API 组。未声明或未安装的类返回
   `capability_missing`（C-19、F16），对象类只在组件激活时被服务。
 - `GET`、`GET {name}`、`DELETE` 的扩展对象类通过 `apiVersion` 查询参数指名其 API 组与版本。
+- 应用写入在落库前校验配置：`spec.config` 的键必须由定义的配置结构声明，卷尺寸、存储策略、
+  主机名与端口由 Volume/Endpoint 对象持有，写进私有配置返回 `invalid_field` 并指出冲突字段（C-32、F3）。
+- 动作请求写成 `kos-system` 的一次性动作记录；应用调和器读取后删除。`retry` 只接受 Failed
+  的应用，`orphan` 只接受阻塞超过十分钟且阻塞清单非空的 Uninstalling 应用。
 
 ## 扩展装载
 
@@ -157,6 +175,34 @@ Unknown，表示尚无写者观察过该对象。失败由对象自己的失败�
 求值：无法观察不推断为 Healthy，期望副本大于零且就绪为零、必需依赖不可用或必需卷丢失
 判 Unavailable，部分就绪、非必需依赖降级、下游漂移或能力保证不足判 Degraded；暂停与
 维护停止按有效期望副本零判定。
+
+## 应用渲染与生命周期
+
+`pkg/app` 把 C-32 的包结构与 C-33 的生命周期落成可执行的规则。定义的配置结构是界面字段的
+唯一来源：类型、默认值、必填、范围、枚举与敏感标记都在这里声明，提交的值在写入前被解析、
+补默认值并按类型归一，因此显式写出默认值与省略它渲染出同样的结果。翻译模板是纯函数：
+只读应用名、声明命名空间、解析后的配置与卷声明名，不访问外部服务、不使用随机数，同一输入
+产生同一输出。渲染产物必须落在应用声明的命名空间；包声明存储类、自带卷模板或渲染
+PersistentVolumeClaim 都被判为非法包。
+
+应用调和器按 C-33 推进阶段。缺定义、缺必需能力或缺声明命名空间时停在 `Pending` 并写出对应
+原因与失败条件；前置齐备后先写 `Installing`，下一轮渲染并写入声明命名空间内的全部下游对象，
+随后进入 `Ready`。可重试失败在五次预算内保持 `Installing`，`retryCount` 递增、`nextRetryAt`
+给出下一次尝试时刻，退避从 10 秒起指数增长、上限 5 分钟；第五次失败进入 `Failed`，不再自动
+重试。用户经控制面提交 `retry` 动作重置预算并回到 `Installing`。
+
+应用调和器在应用对象上放自己的 finalizer 作为卸载门：删除请求到达后进入 `Uninstalling`，
+逐个删除渲染过的下游对象并保留卷与 PVC；仍有对象存在时把阻塞清单、起始时刻与是否超过
+10 分钟的 `stalled` 写进状态，投影因此能显示卡住与阻塞对象。`orphan` 动作放弃这些下游对象、
+释放卸载门，结果由应用调和器写入 `kos-system` 的一份不可变应用弃置清单，而不是写进即将
+消失的应用状态；清单在应用对象消失后仍可读。
+
+健康从**已存储**的对象求值：渲染出的期望文档没有 status，读它会把每个工作负载
+应用判成 Unavailable。内核没有 watch 源，阻塞与已就绪的应用都按有界间隔重新观察。
+
+C-11 的能力需求比较按固定规则执行：先取满足版本范围的最高版本，再逐项比较保证；必需能力
+完全缺失停在 `Pending`，能力存在但保证不足时照常安装并把 `能力.保证键` 列进失败条件与
+Degraded 健康。能力来源是 `pkg/app.CapabilitySource`；Provider 注册（C-47）尚未接入时默认为空。
 
 ## 账号、会话与自身数据库
 

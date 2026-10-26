@@ -1,0 +1,58 @@
+apiVersion: kos.tsic.top/v1beta1
+kind: ApplicationDefinition
+metadata:
+  name: node-exporter
+spec:
+  package:
+    digest: "sha256:00b838420435eb97cd8d8ca57128eb4152c29e786a12dec9b5971b2bdb12f51a"
+    version: "1.8.0"
+  config:
+    - name: replicas
+      type: integer
+      default: "1"
+      minimum: "1"
+      maximum: "1"
+      description: Number of exporters; one per node is the default.
+    - name: image
+      type: string
+      default: "prom/node-exporter:v1.8.2"
+      description: Container image to run.
+    - name: collectInterval
+      type: enum
+      enum: ["15s", "30s", "60s"]
+      default: "30s"
+      description: Collection interval passed to the exporter.
+  template: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: {{ .Name }}
+      namespace: {{ .Namespace }}
+    spec:
+      replicas: {{ .Config.replicas }}
+      selector:
+        matchLabels:
+          app: {{ .Name }}
+      template:
+        metadata:
+          labels:
+            app: {{ .Name }}
+        spec:
+          containers:
+            - name: {{ .Name }}
+              image: {{ .Config.image }}
+              args: ["--collector.interval={{ .Config.collectInterval }}"]
+              ports:
+                - containerPort: 9100
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: {{ .Name }}
+      namespace: {{ .Namespace }}
+    spec:
+      selector:
+        app: {{ .Name }}
+      ports:
+        - port: 9100
+          targetPort: 9100

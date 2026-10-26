@@ -101,11 +101,36 @@ func ClassOf(ref Ref, scope Scope) Class {
 		return ClassDownstream
 	case scope.Groups[ref.Group]:
 		return ClassExtension
+	case privilegedGroups[ref.Group] && !scope.Kinds[ref.GroupKind()]:
+		// A declared namespace admits a render's workloads, not objects that
+		// grant or extend rights: a RoleBinding to a cluster role must not ride
+		// in as a downstream object (C-04). A subject that declared the kind in
+		// its own scope is judged by that declaration instead.
+		return ClassForeign
+	case ref.Namespace != "" && scope.Namespaces[ref.Namespace]:
+		// A declared namespace admits the render's native objects whatever
+		// their group: apps/v1 and batch/v1 objects are downstream exactly like
+		// core ones (C-04, C-32).
+		return ClassDownstream
 	case ref.Group == "":
 		return ClassDownstream
 	default:
 		return ClassForeign
 	}
+}
+
+// privilegedGroups are the API groups whose objects grant or extend rights over
+// the cluster. A declared namespace alone does not admit them (C-04).
+var privilegedGroups = map[string]bool{
+	"rbac.authorization.k8s.io":    true,
+	"apiextensions.k8s.io":         true,
+	"admissionregistration.k8s.io": true,
+	"apiregistration.k8s.io":       true,
+	"certificates.k8s.io":          true,
+	"flowcontrol.apiserver.k8s.io": true,
+	"node.k8s.io":                  true,
+	"policy":                       true,
+	"scheduling.k8s.io":            true,
 }
 
 // Scope is what a controller is declared to write: the extension groups open to
@@ -142,6 +167,9 @@ const (
 	PartStatus Part = "status"
 	// PartMarker is one or more attribution, decline, release or validity keys.
 	PartMarker Part = "marker"
+	// PartMeta is the object's own metadata outside spec, status and markers:
+	// the finalizers its reconciler sets and releases (C-33, C-54).
+	PartMeta Part = "meta"
 	// PartObject is the whole object of a non-kernel class.
 	PartObject Part = "object"
 )
@@ -179,7 +207,11 @@ type Request struct {
 	Markers []MarkerWrite
 	// Current is the stored object, nil when the write creates it.
 	Current *unstructured.Unstructured
-	Scope   Scope
+	// Labels is the label set the submitted document carries. Record rows are
+	// recognized by label, so the allocation can name one record kind without
+	// granting a subject every object of its class (C-04).
+	Labels map[string]string
+	Scope  Scope
 	// Claim is the claim row a claim write belongs to (C-04).
 	Claim Claim
 }

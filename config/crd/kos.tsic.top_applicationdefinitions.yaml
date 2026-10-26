@@ -38,6 +38,160 @@ spec:
             type: object
           spec:
             description: Spec is the desired state owned by the catalogue (C-03).
+            properties:
+              chart:
+                description: Chart references the chart the package ships (C-32).
+                type: string
+              config:
+                description: |-
+                  Config is the config structure the interface fields are generated from
+                  (C-32).
+                items:
+                  description: |-
+                    ConfigField is one entry of a config structure. Type decides the value
+                    shape: string, integer, number, boolean or enum (C-32).
+                  properties:
+                    default:
+                      description: Default is the textual default, interpreted by
+                        Type.
+                      type: string
+                    description:
+                      description: Description is the help text the interface shows.
+                      type: string
+                    enum:
+                      description: Enum lists the accepted values of an enum field.
+                      items:
+                        type: string
+                      type: array
+                    maximum:
+                      description: |-
+                        Maximum is the textual inclusive upper bound of an integer or number
+                        field, interpreted by Type.
+                      type: string
+                    minimum:
+                      description: |-
+                        Minimum is the textual inclusive lower bound of an integer or number
+                        field, interpreted by Type.
+                      type: string
+                    name:
+                      description: Name is the field name a submitted config uses.
+                      type: string
+                    required:
+                      description: Required rejects a submission that omits the field.
+                      type: boolean
+                    sensitive:
+                      description: |-
+                        Sensitive marks a value the read path masks; it is never returned to a
+                        browser (C-31).
+                      type: boolean
+                    type:
+                      description: Type is one of string, integer, number, boolean
+                        or enum (C-32).
+                      enum:
+                      - string
+                      - integer
+                      - number
+                      - boolean
+                      - enum
+                      type: string
+                  required:
+                  - name
+                  - type
+                  type: object
+                type: array
+              hooks:
+                description: |-
+                  Hooks are optional lifecycle hooks; an exit status expresses the result
+                  (C-32).
+                items:
+                  description: |-
+                    Hook is one package hook; a zero exit status succeeds and any other value
+                    fails (C-32).
+                  properties:
+                    command:
+                      description: Command is the command the hook runs.
+                      items:
+                        type: string
+                      type: array
+                    name:
+                      description: Name identifies the hook.
+                      type: string
+                    timeoutSeconds:
+                      description: TimeoutSeconds bounds one run.
+                      format: int32
+                      type: integer
+                  required:
+                  - name
+                  type: object
+                type: array
+              package:
+                description: |-
+                  Package identifies the packaged artifact the definition was installed
+                  from (C-32).
+                properties:
+                  digest:
+                    description: |-
+                      Digest is the package digest; the catalogue locks it instead of a tag
+                      (C-32).
+                    type: string
+                  version:
+                    description: Version is the package version.
+                    type: string
+                type: object
+              requires:
+                description: Requires lists the capability requirements of the definition
+                  (C-11).
+                items:
+                  description: CapabilityRequirement is one capability an application
+                    needs (C-11).
+                  properties:
+                    guarantees:
+                      description: Guarantees are the guarantee values the capability
+                        must hold (C-11).
+                      items:
+                        description: |-
+                          GuaranteeRequirement declares one guarantee value: a boolean must be equal,
+                          an enum must be equal or inside the declared set (C-11).
+                        properties:
+                          bool:
+                            description: Bool is the required boolean value.
+                            type: boolean
+                          enum:
+                            description: Enum is the required enum value.
+                            type: string
+                          key:
+                            description: Key is the guarantee key.
+                            type: string
+                          oneOf:
+                            description: OneOf is the set an enum value may come from.
+                            items:
+                              type: string
+                            type: array
+                        required:
+                        - key
+                        type: object
+                      type: array
+                    name:
+                      description: Name is the capability name.
+                      type: string
+                    optional:
+                      description: |-
+                        Optional makes a failed requirement degrade the application instead of
+                        keeping it Pending (C-11).
+                      type: boolean
+                    version:
+                      description: Version is the optional version range; empty matches
+                        any version.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              template:
+                description: |-
+                  Template is the one-way translation template; it is a pure function of
+                  the application and its config (C-32).
+                type: string
             type: object
         type: object
     served: true
@@ -66,6 +220,160 @@ spec:
             type: object
           spec:
             description: Spec is the desired state owned by the catalogue (C-03).
+            properties:
+              chart:
+                description: Chart references the chart the package ships (C-32).
+                type: string
+              config:
+                description: |-
+                  Config is the config structure the interface fields are generated from
+                  (C-32).
+                items:
+                  description: |-
+                    ConfigField is one entry of a config structure. Type decides the value
+                    shape: string, integer, number, boolean or enum (C-32).
+                  properties:
+                    default:
+                      description: Default is the textual default, interpreted by
+                        Type.
+                      type: string
+                    description:
+                      description: Description is the help text the interface shows.
+                      type: string
+                    enum:
+                      description: Enum lists the accepted values of an enum field.
+                      items:
+                        type: string
+                      type: array
+                    maximum:
+                      description: |-
+                        Maximum is the textual inclusive upper bound of an integer or number
+                        field, interpreted by Type.
+                      type: string
+                    minimum:
+                      description: |-
+                        Minimum is the textual inclusive lower bound of an integer or number
+                        field, interpreted by Type.
+                      type: string
+                    name:
+                      description: Name is the field name a submitted config uses.
+                      type: string
+                    required:
+                      description: Required rejects a submission that omits the field.
+                      type: boolean
+                    sensitive:
+                      description: |-
+                        Sensitive marks a value the read path masks; it is never returned to a
+                        browser (C-31).
+                      type: boolean
+                    type:
+                      description: Type is one of string, integer, number, boolean
+                        or enum (C-32).
+                      enum:
+                      - string
+                      - integer
+                      - number
+                      - boolean
+                      - enum
+                      type: string
+                  required:
+                  - name
+                  - type
+                  type: object
+                type: array
+              hooks:
+                description: |-
+                  Hooks are optional lifecycle hooks; an exit status expresses the result
+                  (C-32).
+                items:
+                  description: |-
+                    Hook is one package hook; a zero exit status succeeds and any other value
+                    fails (C-32).
+                  properties:
+                    command:
+                      description: Command is the command the hook runs.
+                      items:
+                        type: string
+                      type: array
+                    name:
+                      description: Name identifies the hook.
+                      type: string
+                    timeoutSeconds:
+                      description: TimeoutSeconds bounds one run.
+                      format: int32
+                      type: integer
+                  required:
+                  - name
+                  type: object
+                type: array
+              package:
+                description: |-
+                  Package identifies the packaged artifact the definition was installed
+                  from (C-32).
+                properties:
+                  digest:
+                    description: |-
+                      Digest is the package digest; the catalogue locks it instead of a tag
+                      (C-32).
+                    type: string
+                  version:
+                    description: Version is the package version.
+                    type: string
+                type: object
+              requires:
+                description: Requires lists the capability requirements of the definition
+                  (C-11).
+                items:
+                  description: CapabilityRequirement is one capability an application
+                    needs (C-11).
+                  properties:
+                    guarantees:
+                      description: Guarantees are the guarantee values the capability
+                        must hold (C-11).
+                      items:
+                        description: |-
+                          GuaranteeRequirement declares one guarantee value: a boolean must be equal,
+                          an enum must be equal or inside the declared set (C-11).
+                        properties:
+                          bool:
+                            description: Bool is the required boolean value.
+                            type: boolean
+                          enum:
+                            description: Enum is the required enum value.
+                            type: string
+                          key:
+                            description: Key is the guarantee key.
+                            type: string
+                          oneOf:
+                            description: OneOf is the set an enum value may come from.
+                            items:
+                              type: string
+                            type: array
+                        required:
+                        - key
+                        type: object
+                      type: array
+                    name:
+                      description: Name is the capability name.
+                      type: string
+                    optional:
+                      description: |-
+                        Optional makes a failed requirement degrade the application instead of
+                        keeping it Pending (C-11).
+                      type: boolean
+                    version:
+                      description: Version is the optional version range; empty matches
+                        any version.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              template:
+                description: |-
+                  Template is the one-way translation template; it is a pure function of
+                  the application and its config (C-32).
+                type: string
             type: object
         type: object
     served: true

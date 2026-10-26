@@ -39,6 +39,21 @@ spec:
           spec:
             description: Spec is the desired state owned by the user (C-03).
             properties:
+              config:
+                description: Config carries the values of the definition's config
+                  structure (C-32).
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              definitionRef:
+                description: |-
+                  DefinitionRef names the application definition the application was
+                  installed from (C-32).
+                type: string
+              namespace:
+                description: |-
+                  Namespace is the namespace the application declares for everything it
+                  renders; it must already exist (C-32, C-54).
+                type: string
               owner:
                 description: |-
                   Owner is the local username of the creating session; the API writes it
@@ -59,9 +74,17 @@ spec:
                       type: string
                     type: array
                 type: object
+              volumes:
+                description: |-
+                  Volumes names the volume objects whose claims the render references
+                  (C-32, C-38).
+                items:
+                  type: string
+                type: array
             type: object
           status:
-            description: Status is written by the application reconciler (C-03, C-07).
+            description: Status is written by the application reconciler (C-03, C-07,
+              C-33).
             properties:
               conditions:
                 description: Conditions carries Reconciled and the object's failure
@@ -136,9 +159,92 @@ spec:
                     - Unknown
                     type: string
                 type: object
+              nextRetryAt:
+                description: |-
+                  NextRetryAt is the earliest time the next automatic attempt may run
+                  (C-33).
+                format: date-time
+                type: string
               phase:
                 description: Phase is the flow stage; it is orthogonal to health (C-07).
                 type: string
+              rendered:
+                description: |-
+                  Rendered lists the objects the last applied render wrote, so an uninstall
+                  does not depend on the definition still existing (C-33).
+                items:
+                  description: ObjectRef identifies one object inside a status list.
+                  properties:
+                    group:
+                      description: Group is the API group; empty for the core group.
+                      type: string
+                    kind:
+                      description: Kind is the object kind.
+                      type: string
+                    name:
+                      description: Name is the object name.
+                      type: string
+                    namespace:
+                      description: Namespace is the object namespace; empty for cluster-scoped
+                        objects.
+                      type: string
+                    version:
+                      description: Version is the object version.
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
+              retryCount:
+                description: |-
+                  RetryCount is the number of failed attempts in the current retry budget
+                  (C-33).
+                format: int32
+                type: integer
+              uninstall:
+                description: Uninstall carries the objects that block an uninstall
+                  (C-33).
+                properties:
+                  blocked:
+                    description: Blocked lists the objects that have not gone away
+                      yet.
+                    items:
+                      description: ObjectRef identifies one object inside a status
+                        list.
+                      properties:
+                        group:
+                          description: Group is the API group; empty for the core
+                            group.
+                          type: string
+                        kind:
+                          description: Kind is the object kind.
+                          type: string
+                        name:
+                          description: Name is the object name.
+                          type: string
+                        namespace:
+                          description: Namespace is the object namespace; empty for
+                            cluster-scoped objects.
+                          type: string
+                        version:
+                          description: Version is the object version.
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      type: object
+                    type: array
+                  blockedSince:
+                    description: BlockedSince is when the first blocking object was
+                      observed.
+                    format: date-time
+                    type: string
+                  stalled:
+                    description: Stalled reports a block that has outlasted the stall
+                      window.
+                    type: boolean
+                type: object
             type: object
         type: object
     served: true
@@ -170,6 +276,21 @@ spec:
           spec:
             description: Spec is the desired state owned by the user (C-03).
             properties:
+              config:
+                description: Config carries the values of the definition's config
+                  structure (C-32).
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              definitionRef:
+                description: |-
+                  DefinitionRef names the application definition the application was
+                  installed from (C-32).
+                type: string
+              namespace:
+                description: |-
+                  Namespace is the namespace the application declares for everything it
+                  renders; it must already exist (C-32, C-54).
+                type: string
               owner:
                 description: |-
                   Owner is the local username of the creating session; the API writes it
@@ -190,9 +311,17 @@ spec:
                       type: string
                     type: array
                 type: object
+              volumes:
+                description: |-
+                  Volumes names the volume objects whose claims the render references
+                  (C-32, C-38).
+                items:
+                  type: string
+                type: array
             type: object
           status:
-            description: Status is written by the application reconciler (C-03, C-07).
+            description: Status is written by the application reconciler (C-03, C-07,
+              C-33).
             properties:
               conditions:
                 description: Conditions carries Reconciled and the object's failure
@@ -267,9 +396,92 @@ spec:
                     - Unknown
                     type: string
                 type: object
+              nextRetryAt:
+                description: |-
+                  NextRetryAt is the earliest time the next automatic attempt may run
+                  (C-33).
+                format: date-time
+                type: string
               phase:
                 description: Phase is the flow stage; it is orthogonal to health (C-07).
                 type: string
+              rendered:
+                description: |-
+                  Rendered lists the objects the last applied render wrote, so an uninstall
+                  does not depend on the definition still existing (C-33).
+                items:
+                  description: ObjectRef identifies one object inside a status list.
+                  properties:
+                    group:
+                      description: Group is the API group; empty for the core group.
+                      type: string
+                    kind:
+                      description: Kind is the object kind.
+                      type: string
+                    name:
+                      description: Name is the object name.
+                      type: string
+                    namespace:
+                      description: Namespace is the object namespace; empty for cluster-scoped
+                        objects.
+                      type: string
+                    version:
+                      description: Version is the object version.
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
+              retryCount:
+                description: |-
+                  RetryCount is the number of failed attempts in the current retry budget
+                  (C-33).
+                format: int32
+                type: integer
+              uninstall:
+                description: Uninstall carries the objects that block an uninstall
+                  (C-33).
+                properties:
+                  blocked:
+                    description: Blocked lists the objects that have not gone away
+                      yet.
+                    items:
+                      description: ObjectRef identifies one object inside a status
+                        list.
+                      properties:
+                        group:
+                          description: Group is the API group; empty for the core
+                            group.
+                          type: string
+                        kind:
+                          description: Kind is the object kind.
+                          type: string
+                        name:
+                          description: Name is the object name.
+                          type: string
+                        namespace:
+                          description: Namespace is the object namespace; empty for
+                            cluster-scoped objects.
+                          type: string
+                        version:
+                          description: Version is the object version.
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      type: object
+                    type: array
+                  blockedSince:
+                    description: BlockedSince is when the first blocking object was
+                      observed.
+                    format: date-time
+                    type: string
+                  stalled:
+                    description: Stalled reports a block that has outlasted the stall
+                      window.
+                    type: boolean
+                type: object
             type: object
         type: object
     served: true
