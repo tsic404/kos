@@ -66,7 +66,7 @@ var adoptedLabels = map[string]string{markers.AdoptedBy: "alice", markers.Adopti
 // owner's UID for a class that has an owner. An empty ownerUID is the
 // ownerless form C-02 allows for action records, definitions and device facts.
 func creatorMarkers(ownerUID string) []MarkerWrite {
-	writes := []MarkerWrite{{Key: markers.ManagedBy, Carrier: markers.CarrierLabel, Value: managedByValue, Present: true}}
+	writes := []MarkerWrite{{Key: markers.ManagedBy, Carrier: markers.CarrierLabel, Value: ManagedByValue, Present: true}}
 	if ownerUID != "" {
 		writes = append(writes, MarkerWrite{Key: markers.OwnerUID, Carrier: markers.CarrierLabel, Value: ownerUID, Present: true})
 	}
@@ -452,7 +452,7 @@ func TestKOSSubjectsDoNotWriteUnmanagedObjects(t *testing.T) {
 // TestApplyCreateMayWriteAttribution covers the merged apply that creates: the
 // writer is the creator, so it may write managed-by (C-02).
 func TestApplyCreateMayWriteAttribution(t *testing.T) {
-	marker := MarkerWrite{Key: markers.ManagedBy, Carrier: markers.CarrierLabel, Value: managedByValue, Present: true}
+	marker := MarkerWrite{Key: markers.ManagedBy, Carrier: markers.CarrierLabel, Value: ManagedByValue, Present: true}
 	cases := []struct {
 		name string
 		req  Request
@@ -536,7 +536,7 @@ func TestOwnedCreationNeedsOwnerUID(t *testing.T) {
 				Subject: SubjectApplicationReconciler, Object: downstream, Verb: VerbCreate,
 				Parts: []Part{PartObject, PartMarker}, Scope: namespaces("apps"),
 				Markers: []MarkerWrite{
-					{Key: markers.ManagedBy, Carrier: markers.CarrierLabel, Value: managedByValue, Present: true},
+					{Key: markers.ManagedBy, Carrier: markers.CarrierLabel, Value: ManagedByValue, Present: true},
 					{Key: markers.OwnerUID, Carrier: markers.CarrierLabel, Value: "", Present: true},
 				},
 			},
@@ -625,7 +625,7 @@ func TestOwnedCreationNeedsOwnerUID(t *testing.T) {
 				Subject: SubjectApplicationReconciler, Object: downstream, Verb: VerbApply,
 				Parts: []Part{PartObject}, Scope: namespaces("apps"),
 				Current: nativeStored("Service", "apps", "web", map[string]string{
-					markers.ManagedBy: managedByValue, markers.OwnerUID: "uid-application",
+					markers.ManagedBy: ManagedByValue, markers.OwnerUID: "uid-application",
 				}),
 			},
 			want: true,
@@ -670,7 +670,6 @@ func TestDownstreamAllocation(t *testing.T) {
 		{name: "extension stays inside its declared namespaces", subject: SubjectExtensionReconciler, scope: downstreamScope([]string{"other"}, schema.GroupKind{Kind: "Service"}), verb: VerbCreate},
 		{name: "extension writes only declared kinds", subject: SubjectExtensionReconciler, scope: downstreamScope([]string{"apps"}, schema.GroupKind{Kind: "ConfigMap"}), verb: VerbCreate},
 		{name: "extension without a declaration writes nothing", subject: SubjectExtensionReconciler, verb: VerbCreate},
-		{name: "endpoint reconciler writes no downstream object until its route rows land", subject: SubjectEndpointReconciler, verb: VerbCreate},
 		{name: "backup reconciler writes no downstream object until its CronJob row lands", subject: SubjectBackupReconciler, verb: VerbCreate},
 		{name: "migration flow writes no downstream object until its Job row lands", subject: SubjectMigrationReconciler, verb: VerbCreate},
 		{name: "volume reconciler writes no downstream object", subject: SubjectVolumeReconciler, verb: VerbApply},
@@ -699,17 +698,15 @@ func TestDownstreamAllocation(t *testing.T) {
 }
 
 // TestUnrenderedDownstreamKindsStayDenied covers the C-04 rows this change does
-// not implement: the endpoint reconciler's ingress routes (C-43, C-44), the
-// backup reconciler's CronJob (C-41) and the migration flow's replication Job
-// and target objects (C-40) are refused, including their own contract objects,
-// rather than allowed by a class-wide row.
+// not implement: the backup reconciler's CronJob (C-41) and the migration flow's
+// replication Job and target objects (C-40) are refused, including their own
+// contract objects, rather than allowed by a class-wide row.
 func TestUnrenderedDownstreamKindsStayDenied(t *testing.T) {
 	cases := []struct {
 		name    string
 		subject Subject
 		object  Ref
 	}{
-		{name: "endpoint reconciler writes no ingress route", subject: SubjectEndpointReconciler, object: Ref{Group: "networking.k8s.io", Version: "v1", Kind: "Ingress", Namespace: "apps", Name: "web"}},
 		{name: "backup reconciler writes no CronJob", subject: SubjectBackupReconciler, object: Ref{Group: "batch", Version: "v1", Kind: "CronJob", Namespace: "apps", Name: "nightly"}},
 		{name: "migration flow writes no replication Job", subject: SubjectMigrationReconciler, object: Ref{Group: "batch", Version: "v1", Kind: "Job", Namespace: "apps", Name: "copy"}},
 		{name: "migration flow writes no target object", subject: SubjectMigrationReconciler, object: Ref{Version: "v1", Kind: "Service", Namespace: "apps", Name: "target"}},
@@ -794,7 +791,7 @@ func TestClaimReleaseMarker(t *testing.T) {
 				Claim:   ClaimBound,
 				Markers: []MarkerWrite{{Key: markers.Released, Carrier: carrier, Value: "true", Present: true}},
 				Current: nativeStored("PersistentVolumeClaim", "apps", "data", map[string]string{
-					markers.ManagedBy: managedByValue, markers.OwnerUID: "uid-volume",
+					markers.ManagedBy: ManagedByValue, markers.OwnerUID: "uid-volume",
 				}),
 			})
 			if err != nil {
@@ -1014,5 +1011,42 @@ func TestClassOfClaimBeforeNamespace(t *testing.T) {
 	ref := Ref{Version: "v1", Kind: "PersistentVolumeClaim", Namespace: api.SystemNamespace, Name: "data"}
 	if got := ClassOf(ref, Scope{}); got != ClassPVC {
 		t.Fatalf("a claim in the KOS namespace is %q, want %q", got, ClassPVC)
+	}
+}
+
+// TestEndpointRouteAllocation covers C-04's route row the way C-43 fixes it: the
+// endpoint reconciler writes the two route kinds in one entry's namespace and
+// nothing else, whatever the scope claims.
+func TestEndpointRouteAllocation(t *testing.T) {
+	cases := []struct {
+		name   string
+		object Ref
+		scope  Scope
+		verb   Verb
+		want   bool
+	}{
+		{name: "ingress into the entry namespace", object: Ref{Group: "networking.k8s.io", Version: "v1", Kind: "Ingress", Namespace: "apps", Name: "web"}, scope: namespaces("apps"), verb: VerbCreate, want: true},
+		{name: "service into the entry namespace", object: Ref{Version: "v1", Kind: "Service", Namespace: "apps", Name: "web"}, scope: namespaces("apps"), verb: VerbApply, want: true},
+		{name: "route outside the entry namespace", object: Ref{Group: "networking.k8s.io", Version: "v1", Kind: "Ingress", Namespace: "other", Name: "web"}, scope: namespaces("apps"), verb: VerbCreate},
+		{name: "another kind in the entry namespace", object: Ref{Version: "v1", Kind: "ConfigMap", Namespace: "apps", Name: "web"}, scope: namespaces("apps"), verb: VerbCreate},
+		{name: "deleting the route", object: Ref{Group: "networking.k8s.io", Version: "v1", Kind: "Ingress", Namespace: "apps", Name: "web"}, scope: namespaces("apps"), verb: VerbDelete, want: true},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			err := Admit(Request{
+				Subject: SubjectEndpointReconciler,
+				Object:  test.object,
+				Verb:    test.verb,
+				Parts:   []Part{PartObject},
+				Markers: creatorMarkers("uid-endpoint"),
+				Scope:   test.scope,
+			})
+			if test.want && err != nil {
+				t.Fatalf("write refused: %v", err)
+			}
+			if !test.want && err == nil {
+				t.Fatal("write allowed")
+			}
+		})
 	}
 }

@@ -16,7 +16,7 @@ const (
 	// SubjectApplicationReconciler writes application status and rendered
 	// downstream objects (C-03, C-04).
 	SubjectApplicationReconciler Subject = "application-reconciler"
-	// SubjectEndpointReconciler writes endpoint status and ingress routes.
+	// SubjectEndpointReconciler writes endpoint status and the route objects C-43 maps the shapes to.
 	SubjectEndpointReconciler Subject = "endpoint-reconciler"
 	// SubjectVolumeReconciler writes volume status and bound PVCs.
 	SubjectVolumeReconciler Subject = "volume-reconciler"

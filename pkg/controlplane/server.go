@@ -12,8 +12,11 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/dynamic"
+
+	"github.com/tsic404/kos/pkg/endpoint"
 )
 
 // Verb names what a request does, so one decision covers reads, writes and
@@ -84,6 +87,11 @@ type Config struct {
 	Controllers ControllerAvailability
 	// Authorizer judges requests; defaults to AllowAll.
 	Authorizer Authorizer
+	// EndpointFacts answers the two path-prefix declarations C-43 requires
+	// before an http.path endpoint may be written. A nil value means neither is
+	// readable, and that shape is refused (ADR-008: path prefixes are off by
+	// default).
+	EndpointFacts endpoint.Facts
 	// Now supplies the read clock; defaults to time.Now.
 	Now func() time.Time
 	// OperationTimeout bounds one accepted write; defaults to two minutes.
@@ -96,17 +104,18 @@ type Config struct {
 // Server is the control plane API. It holds the cluster client and never hands
 // one to a caller (C-13, F9).
 type Server struct {
-	dynamic     dynamic.Interface
-	source      ObjectSource
-	extensions  ExtensionKinds
-	controllers ControllerAvailability
-	authorizer  Authorizer
-	now         func() time.Time
-	timeout     time.Duration
-	log         *slog.Logger
-	operations  context.Context
-	stop        context.CancelFunc
-	mux         *http.ServeMux
+	dynamic       dynamic.Interface
+	source        ObjectSource
+	extensions    ExtensionKinds
+	controllers   ControllerAvailability
+	authorizer    Authorizer
+	endpointFacts endpoint.Facts
+	now           func() time.Time
+	timeout       time.Duration
+	log           *slog.Logger
+	operations    context.Context
+	stop          context.CancelFunc
+	mux           *http.ServeMux
 }
 
 // New builds the API surface.
@@ -115,14 +124,15 @@ func New(config Config) (*Server, error) {
 		return nil, errors.New("controlplane: a dynamic client is required")
 	}
 	server := &Server{
-		dynamic:     config.Dynamic,
-		source:      config.Source,
-		extensions:  config.Extensions,
-		controllers: config.Controllers,
-		authorizer:  config.Authorizer,
-		now:         config.Now,
-		timeout:     config.OperationTimeout,
-		log:         config.Log,
+		dynamic:       config.Dynamic,
+		source:        config.Source,
+		extensions:    config.Extensions,
+		controllers:   config.Controllers,
+		authorizer:    config.Authorizer,
+		endpointFacts: config.EndpointFacts,
+		now:           config.Now,
+		timeout:       config.OperationTimeout,
+		log:           config.Log,
 	}
 	if server.source == nil {
 		server.source = NewClusterSource(config.Dynamic)
@@ -192,12 +202,20 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure)
 		return
 	}
+	// targetApp is the reverse lookup of C-45: the endpoints that expose one
+	// application. It is the same predicate the cascade deletes by, so the list
+	// and the deletion touch one set.
+	targetApp := query.Get("targetApp")
+	if targetApp != "" && kind != "Endpoint" {
+		writeError(w, invalidField("targetApp 过滤只适用于 Endpoint"))
+		return
+	}
 	size, failure := pageSize(query.Get("limit"))
 	if failure != nil {
 		writeError(w, failure)
 		return
 	}
-	last, failure := decodePageToken(query.Get("continue"), objectType, namespace, selector.String())
+	last, failure := decodePageToken(query.Get("continue"), objectType, namespace, selector.String(), targetApp)
 	if failure != nil {
 		writeError(w, failure)
 		return
@@ -220,6 +238,9 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		if !selector.Matches(labels.Set(stringMap(metadata["labels"]))) {
 			continue
 		}
+		if targetApp != "" && !endpoint.TargetsApp(&unstructured.Unstructured{Object: item.Object}, targetApp) {
+			continue
+		}
 		object := s.projectedObject(objectType, item.Object)
 		projections = append(projections, newProjection(refOf(object, objectType), object, item.ObservedAt, now))
 	}
@@ -234,7 +255,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	page := projections[start:end]
 	response := listResponse{Items: page}
 	if end < len(projections) {
-		response.Continue = encodePageToken(objectType, namespace, selector.String(), page[len(page)-1].Ref.String())
+		response.Continue = encodePageToken(objectType, namespace, selector.String(), targetApp, page[len(page)-1].Ref.String())
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -284,6 +305,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	object, failure := decodeObject(objectType, r.URL.Query().Get("namespace"), raw)
 	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	if failure := s.validateDesired(r.Context(), object); failure != nil {
 		writeError(w, failure)
 		return
 	}
@@ -351,6 +376,10 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, invalidField("请求体的 metadata.name 与请求路径不一致").about(object.Ref))
 		return
 	}
+	if failure := s.validateDesired(r.Context(), object); failure != nil {
+		writeError(w, failure)
+		return
+	}
 	if failure := s.authorize(r.Context(), VerbUpdate, object.Ref); failure != nil {
 		writeError(w, failure)
 		return
@@ -361,6 +390,10 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	current, err := s.source.Get(ctx, object.Type, namespace, name)
 	if err != nil {
 		writeError(w, s.readFailure(err, object.Ref))
+		return
+	}
+	if failure := validateEndpointUpdate(current.Object, object); failure != nil {
+		writeError(w, failure)
 		return
 	}
 	if len(changes(current.Object, object.Object.Object)) == 0 {

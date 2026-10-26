@@ -114,7 +114,7 @@ func KernelObjects(t *testing.T) []*unstructured.Unstructured {
 				"labels":      markerLabels(kind),
 				"annotations": markerAnnotations(kind),
 			},
-			"spec": map[string]any{},
+			"spec": KernelSpec(kind),
 		}}
 		if hasStatus, _ := api.HasStatus(kind); hasStatus {
 			object.Object["status"] = ObjectStatus()
@@ -122,6 +122,19 @@ func KernelObjects(t *testing.T) []*unstructured.Unstructured {
 		objects = append(objects, object)
 	}
 	return objects
+}
+
+// KernelSpec returns a spec the kernel accepts for one kind. Only Endpoint has
+// a shape the schema requires (C-43); every other kind carries an empty spec.
+func KernelSpec(kind string) map[string]any {
+	if kind != "Endpoint" {
+		return map[string]any{}
+	}
+	return map[string]any{
+		"kind":      string(v1beta1.EndpointKindHTTPHost),
+		"targetApp": "application",
+		"host":      "endpoint.test",
+	}
 }
 
 // ObjectStatus is the status value the acceptance objects carry (C-07, C-08).
@@ -182,8 +195,15 @@ func (c *Cluster) GVR(t *testing.T, version, kind string) schema.GroupVersionRes
 // The returned object is what the server stored.
 func (c *Cluster) Create(t *testing.T, object *unstructured.Unstructured) *unstructured.Unstructured {
 	t.Helper()
+	return c.CreateIn(t, Namespace, object)
+}
+
+// CreateIn writes an object into an explicit namespace, so a case can install
+// one outside the acceptance namespace.
+func (c *Cluster) CreateIn(t *testing.T, namespace string, object *unstructured.Unstructured) *unstructured.Unstructured {
+	t.Helper()
 	kind := object.GetKind()
-	resource := c.resource(t, v1beta1.GroupVersion.Version, kind)
+	resource := c.resourceIn(t, v1beta1.GroupVersion.Version, kind, namespace)
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
 
@@ -206,11 +226,17 @@ func (c *Cluster) Create(t *testing.T, object *unstructured.Unstructured) *unstr
 // Get reads an existing object in one served version.
 func (c *Cluster) Get(t *testing.T, version, kind, name string) *unstructured.Unstructured {
 	t.Helper()
+	return c.GetIn(t, Namespace, version, kind, name)
+}
+
+// GetIn reads an existing object in an explicit namespace.
+func (c *Cluster) GetIn(t *testing.T, namespace, version, kind, name string) *unstructured.Unstructured {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
-	object, err := c.resource(t, version, kind).Get(ctx, name, metav1.GetOptions{})
+	object, err := c.resourceIn(t, version, kind, namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("get %s %s in %s: %v", kind, name, version, err)
+		t.Fatalf("get %s %s/%s in %s: %v", kind, namespace, name, version, err)
 	}
 	return object
 }
@@ -301,12 +327,17 @@ func sameJSON(left, right any) (bool, error) {
 // Application returns a namespaced Application with an empty status, so the
 // case's reconciler is the only status writer.
 func Application(name string, annotations map[string]string) *unstructured.Unstructured {
+	return ApplicationIn(Namespace, name, annotations)
+}
+
+// ApplicationIn is Application in an explicit namespace.
+func ApplicationIn(namespace, name string, annotations map[string]string) *unstructured.Unstructured {
 	object := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": api.Group + "/" + v1beta1.GroupVersion.Version,
 		"kind":       "Application",
 		"metadata": map[string]any{
 			"name":      name,
-			"namespace": Namespace,
+			"namespace": namespace,
 			"labels":    map[string]any{markers.ManagedBy: "acceptance"},
 		},
 		"spec": map[string]any{},
@@ -361,9 +392,15 @@ func StatusValue(status v1beta1.ObjectStatus) (map[string]any, error) {
 // resource returns the client for a kind, namespace-scoped when the kind is.
 func (c *Cluster) resource(t *testing.T, version, kind string) dynamic.ResourceInterface {
 	t.Helper()
+	return c.resourceIn(t, version, kind, Namespace)
+}
+
+// resourceIn resolves the client of one kind in an explicit namespace.
+func (c *Cluster) resourceIn(t *testing.T, version, kind, namespace string) dynamic.ResourceInterface {
+	t.Helper()
 	resource := c.Dynamic.Resource(c.GVR(t, version, kind))
 	if scope, _ := api.ScopeOf(kind); scope == api.ScopeNamespaced {
-		return resource.Namespace(Namespace)
+		return resource.Namespace(namespace)
 	}
 	return resource.Namespace("")
 }

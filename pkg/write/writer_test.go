@@ -66,8 +66,8 @@ func TestCreateStampsAttribution(t *testing.T) {
 			if err != nil {
 				t.Fatalf("create: %v", err)
 			}
-			if got := created.GetLabels()[markers.ManagedBy]; got != managedByValue {
-				t.Fatalf("managed-by = %q, want %q", got, managedByValue)
+			if got := created.GetLabels()[markers.ManagedBy]; got != ManagedByValue {
+				t.Fatalf("managed-by = %q, want %q", got, ManagedByValue)
 			}
 			if test.ownerUID != "" {
 				if got := created.GetLabels()[markers.OwnerUID]; got != test.ownerUID {
@@ -188,8 +188,8 @@ func TestCreateKeepsOwnerUID(t *testing.T) {
 	if got := created.GetLabels()[markers.OwnerUID]; got != ownerUID {
 		t.Fatalf("owner-uid = %q, want the caller's %q", got, ownerUID)
 	}
-	if got := created.GetLabels()[markers.ManagedBy]; got != managedByValue {
-		t.Fatalf("managed-by = %q, want %q", got, managedByValue)
+	if got := created.GetLabels()[markers.ManagedBy]; got != ManagedByValue {
+		t.Fatalf("managed-by = %q, want %q", got, ManagedByValue)
 	}
 }
 
@@ -197,7 +197,7 @@ func TestCreateKeepsOwnerUID(t *testing.T) {
 // wrote the attribution refills it when a later render omits it.
 func TestKeepsAttribution(t *testing.T) {
 	current := nativeStored("Service", "apps", "web", map[string]string{
-		markers.ManagedBy: managedByValue,
+		markers.ManagedBy: ManagedByValue,
 		markers.OwnerUID:  "uid-application",
 	})
 	metadata := current.Object["metadata"].(map[string]any)
@@ -214,7 +214,7 @@ func TestKeepsAttribution(t *testing.T) {
 	document := nativeStored("Service", "apps", "web", nil)
 
 	kept := keepsAttribution(document, SubjectApplicationReconciler, Session{}, current)
-	if got := kept.GetLabels()[markers.ManagedBy]; got != managedByValue {
+	if got := kept.GetLabels()[markers.ManagedBy]; got != ManagedByValue {
 		t.Fatalf("the render dropped managed-by: %q", got)
 	}
 	if got := kept.GetLabels()[markers.OwnerUID]; got != "uid-application" {

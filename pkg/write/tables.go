@@ -77,15 +77,18 @@ var markerClasses = map[Subject]map[markers.Class]bool{
 
 // downstreamWriters is the C-04 allocation for native objects below a KOS
 // object. The application reconciler renders inside its declared namespaces, the
-// extension controller inside its declared scope, and the installer in its own;
-// the volume reconciler, the catalogue, discovery and the projection write none.
-// The endpoint reconciler's ingress routes, the backup reconciler's CronJob and
-// the migration flow's replication Job and target objects are object-level rows
-// (C-43/C-44, C-41, C-40) that are not implemented yet: those subjects are
+// extension controller inside its declared scope, the installer in its own and
+// the endpoint reconciler inside one entry's namespace; the volume reconciler,
+// the catalogue, discovery and the projection write none. The endpoint
+// reconciler's row is object-level (C-43): admission fixes it to the Ingress and
+// Service kinds, so it cannot use the row for another kind. The backup
+// reconciler's CronJob and the migration flow's replication Job and target
+// objects are rows (C-41, C-40) that are not implemented yet: those subjects are
 // refused rather than granted a class-wide write they were never given.
 var downstreamWriters = map[Subject]map[Verb]bool{
 	SubjectInstaller:             allVerbs(),
 	SubjectApplicationReconciler: allVerbs(),
+	SubjectEndpointReconciler:    allVerbs(),
 	SubjectExtensionReconciler:   allVerbs(),
 }
 

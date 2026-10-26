@@ -15,8 +15,8 @@ func TestPageTokenResumesWithinOneQuery(t *testing.T) {
 	sortProjections(projections)
 
 	applicationType := kernelTypeOf(t, "Application")
-	token := encodePageToken(applicationType, "default", "app=web", projections[0].Ref.String())
-	last, failure := decodePageToken(token, applicationType, "default", "app=web")
+	token := encodePageToken(applicationType, "default", "app=web", "", projections[0].Ref.String())
+	last, failure := decodePageToken(token, applicationType, "default", "app=web", "")
 	if failure != nil {
 		t.Fatalf("decode token: %v", failure)
 	}
@@ -31,15 +31,17 @@ func TestPageTokenResumesWithinOneQuery(t *testing.T) {
 		object    ObjectType
 		namespace string
 		selector  string
+		targetApp string
 	}{
 		{name: "another kind", object: kernelTypeOf(t, "Volume"), namespace: "default", selector: "app=web"},
 		{name: "another namespace", object: applicationType, namespace: "other", selector: "app=web"},
 		{name: "another filter", object: applicationType, namespace: "default", selector: "app=api"},
 		{name: "another version", object: ObjectType{Group: "kos.tsic.top", Version: "v1", Kind: "Application", Resource: "applications"}, namespace: "default", selector: "app=web"},
+		{name: "another target application", object: applicationType, namespace: "default", selector: "app=web", targetApp: "web"},
 	}
 	for _, query := range otherQueries {
 		t.Run(query.name, func(t *testing.T) {
-			if _, failure := decodePageToken(token, query.object, query.namespace, query.selector); failure == nil {
+			if _, failure := decodePageToken(token, query.object, query.namespace, query.selector, query.targetApp); failure == nil {
 				t.Fatal("the cursor was accepted by another query")
 			} else if failure.Code != CodeInvalidField {
 				t.Fatalf("code = %s, want %s", failure.Code, CodeInvalidField)

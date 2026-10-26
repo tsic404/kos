@@ -38,7 +38,66 @@ spec:
             type: object
           spec:
             description: Spec is the desired state owned by the user (C-03).
+            properties:
+              auth:
+                description: |-
+                  Auth names the authentication provider of an http.host or http.path
+                  endpoint (C-43, C-46).
+                properties:
+                  providerRef:
+                    description: ProviderRef names the forward-auth provider (C-46).
+                    type: string
+                type: object
+              host:
+                description: Host is the hostname of an http.host or http.path endpoint
+                  (C-43).
+                type: string
+              kind:
+                description: Kind selects the shape (C-43).
+                enum:
+                - http.host
+                - http.path
+                - l4.tcp
+                - l4.udp
+                - mdns
+                type: string
+              path:
+                description: Path is the path prefix of an http.path endpoint (C-43).
+                type: string
+              port:
+                description: Port is the port of an l4.tcp, l4.udp or mdns endpoint
+                  (C-43).
+                format: int32
+                maximum: 65535
+                minimum: 1
+                type: integer
+              serviceName:
+                description: ServiceName is the advertised name of an mdns endpoint
+                  (C-43).
+                type: string
+              targetApp:
+                description: |-
+                  TargetApp names the application the endpoint exposes; the reference is
+                  fixed at creation and resolved in the endpoint's namespace (C-43, C-45).
+                type: string
+              tls:
+                description: |-
+                  TLS names the certificate issuer of an http.host or http.path endpoint
+                  (C-43, C-46).
+                properties:
+                  issuerRef:
+                    description: |-
+                      IssuerRef names the issuer component; empty means the distribution's
+                      built-in issuer (C-46).
+                    type: string
+                type: object
+            required:
+            - kind
+            - targetApp
             type: object
+            x-kubernetes-validations:
+            - message: spec.targetApp 创建后不可修改
+              rule: self.targetApp == oldSelf.targetApp
           status:
             description: Status is written by the endpoint reconciler (C-03, C-07).
             properties:
@@ -148,7 +207,66 @@ spec:
             type: object
           spec:
             description: Spec is the desired state owned by the user (C-03).
+            properties:
+              auth:
+                description: |-
+                  Auth names the authentication provider of an http.host or http.path
+                  endpoint (C-43, C-46).
+                properties:
+                  providerRef:
+                    description: ProviderRef names the forward-auth provider (C-46).
+                    type: string
+                type: object
+              host:
+                description: Host is the hostname of an http.host or http.path endpoint
+                  (C-43).
+                type: string
+              kind:
+                description: Kind selects the shape (C-43).
+                enum:
+                - http.host
+                - http.path
+                - l4.tcp
+                - l4.udp
+                - mdns
+                type: string
+              path:
+                description: Path is the path prefix of an http.path endpoint (C-43).
+                type: string
+              port:
+                description: Port is the port of an l4.tcp, l4.udp or mdns endpoint
+                  (C-43).
+                format: int32
+                maximum: 65535
+                minimum: 1
+                type: integer
+              serviceName:
+                description: ServiceName is the advertised name of an mdns endpoint
+                  (C-43).
+                type: string
+              targetApp:
+                description: |-
+                  TargetApp names the application the endpoint exposes; the reference is
+                  fixed at creation and resolved in the endpoint's namespace (C-43, C-45).
+                type: string
+              tls:
+                description: |-
+                  TLS names the certificate issuer of an http.host or http.path endpoint
+                  (C-43, C-46).
+                properties:
+                  issuerRef:
+                    description: |-
+                      IssuerRef names the issuer component; empty means the distribution's
+                      built-in issuer (C-46).
+                    type: string
+                type: object
+            required:
+            - kind
+            - targetApp
             type: object
+            x-kubernetes-validations:
+            - message: spec.targetApp 创建后不可修改
+              rule: self.targetApp == oldSelf.targetApp
           status:
             description: Status is written by the endpoint reconciler (C-03, C-07).
             properties:

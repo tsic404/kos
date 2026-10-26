@@ -4,12 +4,20 @@ import (
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/tsic404/kos/pkg/markers"
 )
 
 // ownerField is the field C-60 lets only the global Owner transfer.
 const ownerField = "spec.owner"
+
+// routeKinds are the downstream objects C-43 maps the endpoint shapes to: the
+// Ingress of both HTTP shapes and the Service of both L4 shapes.
+var routeKinds = map[schema.GroupKind]bool{
+	{Group: "networking.k8s.io", Kind: "Ingress"}: true,
+	{Group: "", Kind: "Service"}:                  true,
+}
 
 // Admit decides one write. A nil error means it may proceed; a *Denied names
 // the subject, the object and the rule that refused it.
@@ -201,6 +209,16 @@ func admitDownstream(req Request) error {
 	case SubjectInstaller:
 		if !req.Scope.Namespaces[req.Object.Namespace] {
 			return denyf(req, "namespace is not declared by the installer")
+		}
+	case SubjectEndpointReconciler:
+		// C-04 allocates the route object to the endpoint reconciler; C-43 fixes
+		// the two kinds, so the row cannot carry another downstream object and
+		// the scope only names the entry's namespace.
+		if !routeKinds[req.Object.GroupKind()] {
+			return denyf(req, "the endpoint reconciler writes only the route objects of C-43")
+		}
+		if !req.Scope.Namespaces[req.Object.Namespace] {
+			return denyf(req, "namespace is not declared by the endpoint")
 		}
 	case SubjectApplicationReconciler:
 		if !req.Scope.Namespaces[req.Object.Namespace] {
