@@ -79,10 +79,17 @@ func currentObject(name, version string) *unstructured.Unstructured {
 	}}
 }
 
+// systemComponentType resolves the kind the write recorder serves.
+func systemComponentType() ObjectType {
+	objectType, _ := kernelType("SystemComponent")
+	return objectType
+}
+
 // desiredVersion builds the desired state of that object.
 func desiredVersion(name string) desiredObject {
 	return desiredObject{
-		Ref: kernelRef("SystemComponent", "", name),
+		Ref:  kernelRef("SystemComponent", "", name),
+		Type: systemComponentType(),
 		Object: &unstructured.Unstructured{Object: map[string]any{
 			"apiVersion": api.Group + "/v1beta1",
 			"kind":       "SystemComponent",
@@ -123,7 +130,7 @@ func TestDeleteCarriesTheCheckedVersion(t *testing.T) {
 	server := &Server{dynamic: recorder, source: &fakeSource{}, log: slog.New(slog.DiscardHandler)}
 	ref := kernelRef("SystemComponent", "", "alpha")
 
-	if failure := server.delete(context.Background(), ref, "7"); failure == nil || failure.Code != CodeConflict {
+	if failure := server.delete(context.Background(), systemComponentType(), ref, "7"); failure == nil || failure.Code != CodeConflict {
 		t.Fatalf("failure = %v, want a conflict from the API server", failure)
 	}
 	if recorder.deleted == nil || recorder.deleted.Preconditions == nil || recorder.deleted.Preconditions.ResourceVersion == nil {
@@ -140,7 +147,7 @@ func TestDeleteWithoutPreconditionUsesTheReadVersion(t *testing.T) {
 	recorder := &writeRecorder{current: currentObject("alpha", "9")}
 	server := &Server{dynamic: recorder, source: &fakeSource{}, log: slog.New(slog.DiscardHandler)}
 
-	if failure := server.delete(context.Background(), kernelRef("SystemComponent", "", "alpha"), ""); failure != nil {
+	if failure := server.delete(context.Background(), systemComponentType(), kernelRef("SystemComponent", "", "alpha"), ""); failure != nil {
 		t.Fatalf("delete: %v", failure)
 	}
 	if recorder.deleted == nil || recorder.deleted.Preconditions == nil || recorder.deleted.Preconditions.ResourceVersion == nil {
@@ -155,7 +162,7 @@ func TestDeleteWithoutPreconditionUsesTheReadVersion(t *testing.T) {
 func TestDeleteOfAGoneObjectSucceeds(t *testing.T) {
 	recorder := &writeRecorder{}
 	server := &Server{dynamic: recorder, source: &fakeSource{}, log: slog.New(slog.DiscardHandler)}
-	if failure := server.delete(context.Background(), kernelRef("SystemComponent", "", "alpha"), "7"); failure != nil {
+	if failure := server.delete(context.Background(), systemComponentType(), kernelRef("SystemComponent", "", "alpha"), "7"); failure != nil {
 		t.Fatalf("delete of a gone object: %v", failure)
 	}
 	if recorder.deleted != nil {
@@ -190,7 +197,7 @@ func TestFailureMessagesKeepTheClusterDetailOut(t *testing.T) {
 	if strings.Contains(readFailure.Message, "10.0.0.7") {
 		t.Fatalf("read message leaks the cluster detail: %q", readFailure.Message)
 	}
-	invalid := server.writeFailure(context.Background(), apierrors.NewInvalid(
+	invalid := server.writeFailure(context.Background(), kernelTypeOf(t, "Application"), apierrors.NewInvalid(
 		schema.GroupKind{Group: api.Group, Kind: "Application"}, "web",
 		field.ErrorList{field.Invalid(field.NewPath("spec"), "x", detail)}), ref)
 	if strings.Contains(invalid.Message, "10.0.0.7") {

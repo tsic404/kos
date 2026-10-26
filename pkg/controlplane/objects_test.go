@@ -3,7 +3,20 @@ package controlplane
 import (
 	"sort"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 )
+
+// kernelTypeOf resolves a kernel kind for a decode case.
+func kernelTypeOf(t *testing.T, kind string) ObjectType {
+	t.Helper()
+	objectType, ok := kernelType(kind)
+	if !ok {
+		t.Fatalf("kind %q is not a kernel kind", kind)
+	}
+	return objectType
+}
 
 // applicationManifest builds a submitted application body.
 func applicationManifest(mutate func(map[string]any)) map[string]any {
@@ -27,7 +40,7 @@ func applicationManifest(mutate func(map[string]any)) map[string]any {
 // TestDecodeObjectKeepsClientOwnedFields checks that a submitted object becomes
 // the desired state without server-assigned metadata (C-03).
 func TestDecodeObjectKeepsClientOwnedFields(t *testing.T) {
-	decoded, failure := decodeObject("Application", "default", applicationManifest(nil))
+	decoded, failure := decodeObject(kernelTypeOf(t, "Application"), "default", applicationManifest(nil))
 	if failure != nil {
 		t.Fatalf("decode object: %v", failure)
 	}
@@ -102,7 +115,7 @@ func TestDecodeObjectRejectsFieldsOutsideTheModel(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			if _, failure := decodeObject(testCase.kind, "", testCase.manifest); failure == nil {
+			if _, failure := decodeObject(kernelTypeOf(t, testCase.kind), "", testCase.manifest); failure == nil {
 				t.Fatal("the body must be rejected")
 			} else if failure.Code != CodeInvalidField {
 				t.Fatalf("code = %s, want %s", failure.Code, CodeInvalidField)
@@ -114,19 +127,83 @@ func TestDecodeObjectRejectsFieldsOutsideTheModel(t *testing.T) {
 // TestDecodeObjectReportsMissingExtension checks that a kind of another group is
 // a missing capability, not a malformed request (C-19, F16).
 func TestDecodeObjectReportsMissingExtension(t *testing.T) {
-	manifest := applicationManifest(func(manifest map[string]any) {
-		manifest["apiVersion"] = "example.test/v1"
-		manifest["kind"] = "Widget"
-	})
-	_, failure := decodeObject("Widget", "", manifest)
+	_, failure := resolveType("Widget", "example.test/v1", nil)
 	if failure == nil {
 		t.Fatal("a kind of an uninstalled extension must not be served")
 	}
 	if failure.Code != CodeCapabilityMissing || failure.Stage != StageCapability {
 		t.Fatalf("code = %s, stage = %s", failure.Code, failure.Stage)
 	}
-	if failure.Object == nil || failure.Object.Group != "example.test" || failure.Object.Name != "web" {
+	if failure.Object == nil || failure.Object.Group != "example.test" || failure.Object.Kind != "Widget" {
 		t.Fatalf("object reference = %v", failure.Object)
+	}
+}
+
+// extensionKinds serves one declared class for the resolver cases.
+type extensionKinds map[schema.GroupKind]ExtensionObjectClass
+
+// ObjectClass implements ExtensionKinds.
+func (k extensionKinds) ObjectClass(group, kind string) (ExtensionObjectClass, bool) {
+	class, ok := k[schema.GroupKind{Group: group, Kind: kind}]
+	return class, ok
+}
+
+// TestResolveTypeServesOnlyDeclaredClasses checks that an active declaration
+// serves its class and an undeclared class stays a missing capability (C-19).
+func TestResolveTypeServesOnlyDeclaredClasses(t *testing.T) {
+	kinds := extensionKinds{
+		{Group: "widgets.example.test", Kind: "Widget"}: {
+			Versions: []string{"v1"}, Resource: "widgets", Namespaced: true,
+		},
+	}
+	served, failure := resolveType("Widget", "widgets.example.test/v1", kinds)
+	if failure != nil {
+		t.Fatalf("resolve served class: %v", failure)
+	}
+	if served.Resource != "widgets" || !served.Namespaced || served.Version != "v1" {
+		t.Fatalf("served type = %+v", served)
+	}
+	if _, failure := resolveType("Widget", "widgets.example.test/v2", kinds); failure == nil ||
+		failure.Code != CodeCapabilityMissing {
+		t.Fatalf("an unserved version resolved: %v", failure)
+	}
+	if _, failure := resolveType("Gadget", "widgets.example.test/v1", kinds); failure == nil ||
+		failure.Code != CodeCapabilityMissing {
+		t.Fatalf("an undeclared class resolved: %v", failure)
+	}
+	if _, failure := resolveType("Widget", "", kinds); failure == nil ||
+		failure.Code != CodeInvalidField {
+		t.Fatalf("a class without an API group resolved: %v", failure)
+	}
+}
+
+// TestDecodeExtensionObjectKeepsTheExtensionSpec checks that an extension
+// object's spec passes through untouched while identity rules still apply
+// (C-19).
+func TestDecodeExtensionObjectKeepsTheExtensionSpec(t *testing.T) {
+	objectType := ObjectType{
+		Group: "widgets.example.test", Version: "v1", Kind: "Widget",
+		Resource: "widgets", Namespaced: true,
+	}
+	manifest := map[string]any{
+		"apiVersion": "widgets.example.test/v1",
+		"kind":       "Widget",
+		"metadata":   map[string]any{"name": "alpha", "namespace": "default"},
+		"spec":       map[string]any{"size": int64(3), "nested": map[string]any{"enabled": true}},
+	}
+	decoded, failure := decodeObject(objectType, "default", manifest)
+	if failure != nil {
+		t.Fatalf("decode extension object: %v", failure)
+	}
+	if decoded.Ref != (ObjectRef{Group: "widgets.example.test", Kind: "Widget", Namespace: "default", Name: "alpha"}) {
+		t.Fatalf("ref = %v", decoded.Ref)
+	}
+	spec, _, err := unstructured.NestedMap(decoded.Object.Object, "spec")
+	if err != nil || spec["size"] != int64(3) {
+		t.Fatalf("spec = %v (err %v)", spec, err)
+	}
+	if decoded.Object.Object["apiVersion"] != "widgets.example.test/v1" {
+		t.Fatalf("apiVersion = %v", decoded.Object.Object["apiVersion"])
 	}
 }
 

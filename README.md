@@ -4,7 +4,8 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 归属标记、扩展接口与 ABI 的实现骨架。设计仓（意图与承诺）为
 <https://gitea.tsic.top/tsic/kos-design>，契约以 `docs/02-contracts.md` 为准。
 
-当前阶段交付内核对象模型、归属三态、写入路径、ABI、控制面 API 与通用调和内核；不含具体对象的调和与扩展装载。
+当前阶段交付内核对象模型、归属三态、写入路径、ABI、控制面 API、通用调和内核与扩展装载
+（包摘要、声明、九类贡献、依赖激活与可见性投影）；不含具体贡献类的语义、停用与卸载。
 
 ## 布局
 
@@ -23,6 +24,7 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `pkg/identity/` | 账号与会话：本地账号、锁定计数、一次性口令、会话边界与失效、自身数据库与每日导出 |
 | `pkg/adoption/` | 归属动作：接管、释放、放弃与接管前的不可变快照 |
 | `pkg/serial/` | 调和循环之外显式写入动作的按对象串行门（调和轮次由 `pkg/reconcile` 串行） |
+| `pkg/extension/` | C-17 至 C-20/C-28：包摘要、声明、九类贡献、依赖激活、可见性投影与贡献类控制器 |
 | `tests/acceptance/TC-27/` | 读投影带观测时间，超阈值标记陈旧 |
 | `tests/acceptance/TC-28/` | 同一写请求重复提交只产生一个对象 |
 | `tests/acceptance/TC-29/` | 四类失败的错误包络，断线后操作仍到终态 |
@@ -38,6 +40,12 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `tests/acceptance/TC-72/` | 自身数据库的每日导出与离线恢复 |
 | `tests/acceptance/TC-117/` | 登录失败同一结果、按登录名锁定与退出 |
 | `tests/acceptance/TC-118/` | 角色变更、改口令、停用与删除前置转移 |
+| `tests/acceptance/TC-1/` | 安装与卸载产品不改变内核 kind 集合；对象类只在其 API 组 |
+| `tests/acceptance/TC-2/` | 能力基线不变；扩展能力只在安装期间可读 |
+| `tests/acceptance/TC-3/` | 第一方与第三方同类贡献装载、权限判定与卸载一致 |
+| `tests/acceptance/TC-4/` | 九类声明逐项可见，组件状态就绪 |
+| `tests/acceptance/TC-5/` | 未声明与未安装的贡献不可见，越界写入被拒绝 |
+| `tests/acceptance/TC-6/` | 依赖缺失时无贡献生效；一个控制器失败只影响它管理的对象 |
 
 ## 对象模型
 
@@ -49,7 +57,8 @@ ApplicationDefinition 与 NodeDevice 没有 status 写者，因此没有 status 
 其余八类带 `status.phase`、`status.health.state` 与 `Reconciled` 条件。
 
 `spec` 字段由契约逐个加入：尚未固定字段的对象保持空 spec，实现不发明线格式。当前已兑现
-C-60 的 `spec.owner`（五类带所有者的对象）与 C-59 的 `Application.spec.visibility`。
+C-60 的 `spec.owner`（五类带所有者的对象）、C-59 的 `Application.spec.visibility` 与
+C-17 的 `SystemComponent.spec.package`（工件引用与 sha256 摘要）。
 
 ## ABI
 
@@ -102,7 +111,34 @@ KOS 不再写它；放弃写入 `declined`，对象留在 unmanaged，不再被�
 - 分页游标绑定对象类型、命名空间与过滤条件；不属于本次查询的游标被拒绝，不会静默漏数据。
 - 失败响应统一为 `{"error": {...}}`，含 `code`、`message`、`stage`、`object`、`retryable`、
   `requiresUserAction`、`sideEffects`。`code` 在一个主版本内不变。
-- 只服务十类内核对象。外部组的对象类在扩展装载前不可用，返回 `capability_missing`（C-19、F16）。
+- 内核十类之外，已激活组件声明的扩展对象类也由控制面服务；扩展对象类用 `apiVersion`
+  （读、删）或请求体的 `apiVersion`（写）指名 API 组。未声明或未安装的类返回
+  `capability_missing`（C-19、F16），对象类只在组件激活时被服务。
+- `GET`、`GET {name}`、`DELETE` 的扩展对象类通过 `apiVersion` 查询参数指名其 API 组与版本。
+
+## 扩展装载
+
+`pkg/extension` 把 C-17 至 C-20 与 C-28 写成一条装载流水线：
+
+- **安装请求**：`SystemComponent.spec.package` 给出工件引用与 sha256 摘要；`Installer` 读取
+  集群里带归属标记的组件，经 `ArtifactSource` 取回工件，摘要不匹配即拒绝。同一扩展标识
+  同时只保留最先安装的版本；adopted 组件不携带包，也不贡献对象类、页面或控制器。
+- **声明**（C-18）：标识、版本、目标框架版本、九类贡献（对象类、控制器、能力、页面与动作、
+  设置项、目录来源、发现适配器、诊断适配器、偏好结构）以及依赖（能力与组件，均带版本范围）。
+  目标框架版本随声明装载，兼容判定属于独立契约。
+- **激活**（C-28）：按依赖求不动点，只有能力基线与已激活组件能满足的依赖才算满足。依赖不满足
+  时组件不可用、状态列出缺失项，且没有任何贡献生效；某一贡献类校验失败只让该类缺席，组件
+  降级，其余类照常生效。
+- **可见性投影**：`Registry` 只回答已激活声明里的贡献，未声明的一律不出现；能力清单是 C-09
+  的八项基线加扩展能力（扩展能力名带扩展标识前缀）；页面按会话角色给出可见性判定；对象类
+  解析供控制面判断某个扩展类是否正在被服务。
+- **控制器**（C-20）：`ControllerSet` 为每个声明的控制器启动一条 `pkg/reconcile` 循环，
+  连续失败达到阈值即判为不可用；只有该控制器管理的对象投影为 Unknown，其他扩展与内核对象
+  保持自己的状态。声明里的写入范围经 `WriteScope.Admit` 转成写入路径检查的分配。
+- **组件状态**：`Installer` 以组件调和者的身份写 `status`，含 `phase`、`health` 与
+  `PackageVerified`、`DependenciesMet`、`ContributionsLoaded` 三个条件；状态未变化时不写。
+
+停用、卸载、框架版本兼容与各贡献类自身的语义不在本阶段实现，分别属于独立契约。
 
 ## 调和与状态轴
 

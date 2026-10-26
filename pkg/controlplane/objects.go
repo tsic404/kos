@@ -25,30 +25,30 @@ var kernelScheme = api.Scheme()
 // it (C-03).
 type desiredObject struct {
 	Ref    ObjectRef
+	Type   ObjectType
 	Object *unstructured.Unstructured
 }
 
-// decodeObject validates one submitted manifest against the closed kernel model
-// and returns the desired state. A field the typed model does not declare is
-// rejected rather than written and pruned, so a client learns about the mistake
-// instead of seeing it disappear (C-01, C-12).
-func decodeObject(kind, namespace string, raw map[string]any) (desiredObject, *Error) {
-	if bodyKind := text(raw["kind"]); bodyKind != "" && bodyKind != kind {
-		return desiredObject{}, invalidField("请求体的 kind " + bodyKind + " 与请求路径的 kind " + kind + " 不一致")
+// decodeObject validates one submitted manifest against the class it belongs to
+// and returns the desired state. A kernel manifest is checked against the closed
+// typed model; an extension object's spec belongs to the extension, so only the
+// kernel-side identity rules are applied to it (C-01, C-19).
+func decodeObject(objectType ObjectType, namespace string, raw map[string]any) (desiredObject, *Error) {
+	if bodyKind := text(raw["kind"]); bodyKind != "" && bodyKind != objectType.Kind {
+		return desiredObject{}, invalidField("请求体的 kind " + bodyKind + " 与请求路径的 kind " + objectType.Kind + " 不一致")
 	}
-	group := api.Group
+	ref := ObjectRef{Group: objectType.Group, Kind: objectType.Kind, Name: nestedText(raw, "metadata", "name")}
 	if apiVersion := text(raw["apiVersion"]); apiVersion != "" {
-		if parsed, _, ok := splitAPIVersion(apiVersion); ok {
-			group = parsed
+		group, version, ok := splitAPIVersion(apiVersion)
+		if !ok {
+			return desiredObject{}, invalidField("apiVersion 必须是 group/version 形式").about(ref)
+		}
+		if group != objectType.Group || (!objectType.IsKernel() && version != objectType.Version) {
+			return desiredObject{}, invalidField("请求体的 apiVersion 与请求路径的对象类不一致").about(ref)
 		}
 	}
-	ref := ObjectRef{Group: group, Kind: kind, Name: nestedText(raw, "metadata", "name")}
-	if failure := resolveKind(kind, text(raw["apiVersion"])); failure != nil {
-		return desiredObject{}, failure.about(ref)
-	}
-	scope, _ := api.ScopeOf(kind)
 	bodyNamespace := nestedText(raw, "metadata", "namespace")
-	if scope == api.ScopeCluster {
+	if !objectType.Namespaced {
 		if bodyNamespace != "" || namespace != "" {
 			return desiredObject{}, invalidField("集群作用域对象不能带 namespace").about(ref)
 		}
@@ -63,7 +63,7 @@ func decodeObject(kind, namespace string, raw map[string]any) (desiredObject, *E
 			return desiredObject{}, invalidField("命名空间作用域对象必须给出 metadata.namespace").about(ref)
 		}
 	}
-	ref = kernelRef(kind, bodyNamespace, ref.Name)
+	ref.Namespace = bodyNamespace
 	if ref.Name == "" {
 		return desiredObject{}, invalidField("对象必须给出 metadata.name").about(ref)
 	}
@@ -74,16 +74,41 @@ func decodeObject(kind, namespace string, raw map[string]any) (desiredObject, *E
 		return desiredObject{}, invalidField("status 由调和器写入，请求不能设置").about(ref)
 	}
 
+	if !objectType.IsKernel() {
+		return desiredObject{Ref: ref, Type: objectType, Object: normalizeExtension(raw, objectType, ref.Namespace, ref.Name)}, nil
+	}
 	typed, err := kernelScheme.New(schema.GroupVersionKind{
-		Group: api.Group, Version: v1beta1.GroupVersion.Version, Kind: kind,
+		Group: api.Group, Version: v1beta1.GroupVersion.Version, Kind: objectType.Kind,
 	})
 	if err != nil {
-		return desiredObject{}, internal(StageValidate, "无法解析对象类型 "+kind).about(ref)
+		return desiredObject{}, internal(StageValidate, "无法解析对象类型 "+objectType.Kind).about(ref)
 	}
 	if failure := decodeStrict(raw, typed); failure != nil {
 		return desiredObject{}, failure.about(ref)
 	}
-	return desiredObject{Ref: ref, Object: normalize(typed, kind, ref.Namespace, ref.Name)}, nil
+	return desiredObject{Ref: ref, Type: objectType, Object: normalize(typed, objectType.Kind, ref.Namespace, ref.Name)}, nil
+}
+
+// normalizeExtension keeps the client-owned part of an extension object: the
+// extension defines its spec, so the kernel checks identity only (C-19).
+func normalizeExtension(raw map[string]any, objectType ObjectType, namespace, name string) *unstructured.Unstructured {
+	metadata := map[string]any{"name": name}
+	if namespace != "" {
+		metadata["namespace"] = namespace
+	}
+	if source, ok := raw["metadata"].(map[string]any); ok {
+		copyKey(metadata, source, "labels")
+		copyKey(metadata, source, "annotations")
+	}
+	object := map[string]any{
+		"apiVersion": objectType.Group + "/" + objectType.Version,
+		"kind":       objectType.Kind,
+		"metadata":   metadata,
+	}
+	if spec, ok := raw["spec"]; ok {
+		object["spec"] = spec
+	}
+	return &unstructured.Unstructured{Object: object}
 }
 
 // decodeStrict decodes a manifest into its typed object, rejecting fields the

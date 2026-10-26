@@ -38,6 +38,19 @@ spec:
             type: object
           spec:
             description: Spec is the desired state owned by the installer (C-03).
+            properties:
+              package:
+                description: |-
+                  Package is the artifact this component installs (C-17). An adopted
+                  component installs no package and leaves it empty.
+                properties:
+                  digest:
+                    description: Digest is the artifact's sha256 in the form sha256:<hex>.
+                    type: string
+                  reference:
+                    description: Reference locates the artifact.
+                    type: string
+                type: object
             type: object
           status:
             description: Status is written by the component reconciler (C-03, C-07).
@@ -148,6 +161,19 @@ spec:
             type: object
           spec:
             description: Spec is the desired state owned by the installer (C-03).
+            properties:
+              package:
+                description: |-
+                  Package is the artifact this component installs (C-17). An adopted
+                  component installs no package and leaves it empty.
+                properties:
+                  digest:
+                    description: Digest is the artifact's sha256 in the form sha256:<hex>.
+                    type: string
+                  reference:
+                    description: Reference locates the artifact.
+                    type: string
+                type: object
             type: object
           status:
             description: Status is written by the component reconciler (C-03, C-07).
