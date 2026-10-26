@@ -17,16 +17,18 @@ import (
 // fieldManagerLimit is the longest field manager the API server accepts.
 const fieldManagerLimit = 128
 
-// managedByValue is what kos-shell writes in managed-by. C-02 fixes the key
-// and its carrier, not a vocabulary for the value.
-const managedByValue = "kos-shell"
+// ManagedByValue is what kos-shell writes in managed-by. C-02 fixes the key and
+// its carrier, not a vocabulary for the value.
+const ManagedByValue = "kos-shell"
 
 // nativeResources names the native kinds the allocation tables talk about. Any
 // other native kind must come from discovery rather than a guess.
 var nativeResources = map[schema.GroupKind]string{
-	{Group: "", Kind: "ConfigMap"}:             "configmaps",
-	{Group: "", Kind: "PersistentVolumeClaim"}: "persistentvolumeclaims",
-	{Group: "", Kind: "Node"}:                  "nodes",
+	{Group: "", Kind: "ConfigMap"}:                "configmaps",
+	{Group: "", Kind: "PersistentVolumeClaim"}:    "persistentvolumeclaims",
+	{Group: "", Kind: "Node"}:                     "nodes",
+	{Group: "", Kind: "Service"}:                  "services",
+	{Group: "networking.k8s.io", Kind: "Ingress"}: "ingresses",
 }
 
 // Writer executes admitted writes against the API server.
@@ -514,7 +516,7 @@ func writeCreationAttribution(object *unstructured.Unstructured, class Class) *u
 		return object
 	}
 	stamped := object.DeepCopy()
-	writeMarker(stamped, markers.ManagedBy, markers.CarrierLabel, managedByValue)
+	writeMarker(stamped, markers.ManagedBy, markers.CarrierLabel, ManagedByValue)
 	return stamped
 }
 

@@ -95,6 +95,10 @@ func ClassOf(ref Ref, scope Scope) Class {
 		return ClassNode
 	case ref.Namespace == api.SystemNamespace:
 		return ClassSystem
+	// The route objects C-43 maps the endpoint shapes to are native, not an
+	// extension class, even though one of them lives outside the core group.
+	case routeKinds[ref.GroupKind()]:
+		return ClassDownstream
 	case scope.Groups[ref.Group]:
 		return ClassExtension
 	case ref.Group == "":

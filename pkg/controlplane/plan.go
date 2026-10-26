@@ -108,6 +108,9 @@ func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (
 		if failure != nil {
 			return nil, nil, failure
 		}
+		if failure := s.validateDesired(ctx, object); failure != nil {
+			return nil, nil, failure
+		}
 		if seen[object.Ref.String()] {
 			return nil, nil, invalidField("请求重复给出了对象 " + object.Ref.String()).about(object.Ref)
 		}
@@ -135,6 +138,9 @@ func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (
 			}
 			s.log.Error("plan read failed", "object", object.Ref.String(), "error", err)
 			return nil, nil, internal(StagePlan, "读取对象 "+object.Ref.String()+" 失败").about(object.Ref)
+		}
+		if failure := validateEndpointUpdate(current.Object, object); failure != nil {
+			return nil, nil, failure
 		}
 		if differences := changes(current.Object, object.Object.Object); len(differences) > 0 {
 			plan.Update = append(plan.Update, PlannedUpdate{Ref: object.Ref, Changes: differences})

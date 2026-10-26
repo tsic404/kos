@@ -169,8 +169,73 @@ type Endpoint struct {
 	Status ObjectStatus `json:"status,omitempty"`
 }
 
-// EndpointSpec holds the user-owned desired state of an endpoint.
-type EndpointSpec struct{}
+// EndpointKind is the form of an endpoint (C-43).
+//
+// +kubebuilder:validation:Enum=http.host;http.path;l4.tcp;l4.udp;mdns
+type EndpointKind string
+
+const (
+	// EndpointKindHTTPHost exposes an application under a hostname (C-43).
+	EndpointKindHTTPHost EndpointKind = "http.host"
+	// EndpointKindHTTPPath exposes an application under a hostname and path (C-43).
+	EndpointKindHTTPPath EndpointKind = "http.path"
+	// EndpointKindTCP exposes a TCP port (C-43).
+	EndpointKindTCP EndpointKind = "l4.tcp"
+	// EndpointKindUDP exposes a UDP port (C-43).
+	EndpointKindUDP EndpointKind = "l4.udp"
+	// EndpointKindMDNS advertises an application over multicast DNS (C-43).
+	EndpointKindMDNS EndpointKind = "mdns"
+)
+
+// EndpointSpec holds the user-owned desired state of an endpoint. The five
+// shapes and the fields each accepts are C-43's matrix: every shape takes kind
+// and targetApp, and a field the shape does not list is invalid.
+//
+// +kubebuilder:validation:XValidation:rule="self.targetApp == oldSelf.targetApp",message="spec.targetApp 创建后不可修改"
+type EndpointSpec struct {
+	// Kind selects the shape (C-43).
+	Kind EndpointKind `json:"kind"`
+	// TargetApp names the application the endpoint exposes; the reference is
+	// fixed at creation and resolved in the endpoint's namespace (C-43, C-45).
+	TargetApp string `json:"targetApp"`
+	// Host is the hostname of an http.host or http.path endpoint (C-43).
+	// +optional
+	Host string `json:"host,omitempty"`
+	// Path is the path prefix of an http.path endpoint (C-43).
+	// +optional
+	Path string `json:"path,omitempty"`
+	// Port is the port of an l4.tcp, l4.udp or mdns endpoint (C-43).
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port,omitempty"`
+	// ServiceName is the advertised name of an mdns endpoint (C-43).
+	// +optional
+	ServiceName string `json:"serviceName,omitempty"`
+	// TLS names the certificate issuer of an http.host or http.path endpoint
+	// (C-43, C-46).
+	// +optional
+	TLS *EndpointTLS `json:"tls,omitempty"`
+	// Auth names the authentication provider of an http.host or http.path
+	// endpoint (C-43, C-46).
+	// +optional
+	Auth *EndpointAuth `json:"auth,omitempty"`
+}
+
+// EndpointTLS is the certificate provider reference of an endpoint (C-46).
+type EndpointTLS struct {
+	// IssuerRef names the issuer component; empty means the distribution's
+	// built-in issuer (C-46).
+	// +optional
+	IssuerRef string `json:"issuerRef,omitempty"`
+}
+
+// EndpointAuth is the authentication provider reference of an endpoint (C-46).
+type EndpointAuth struct {
+	// ProviderRef names the forward-auth provider (C-46).
+	// +optional
+	ProviderRef string `json:"providerRef,omitempty"`
+}
 
 // EndpointList is the list form of Endpoint.
 //
