@@ -20,6 +20,7 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `pkg/reconcile/` | C-06 通用调和循环：去重工作队列、单轮时间预算与指标 |
 | `pkg/controlplane/` | 控制面 HTTP 面：资源路由、投影、统一错误包络、计划请求 |
 | `pkg/write/` | 写入路径：C-03/C-04 写入者分配表、准入判定、服务端合并提交与 409 冲突 |
+| `pkg/identity/` | 账号与会话：本地账号、锁定计数、一次性口令、会话边界与失效、自身数据库与每日导出 |
 | `pkg/adoption/` | 归属动作：接管、释放、放弃与接管前的不可变快照 |
 | `pkg/serial/` | 调和循环之外显式写入动作的按对象串行门（调和轮次由 `pkg/reconcile` 串行） |
 | `tests/acceptance/TC-27/` | 读投影带观测时间，超阈值标记陈旧 |
@@ -34,6 +35,9 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `tests/acceptance/TC-18/` | 父对象调和器不写子对象 spec |
 | `tests/acceptance/TC-19/` | 归属标记的载体 |
 | `tests/acceptance/TC-24/` | 并发写入与角色写权限 |
+| `tests/acceptance/TC-72/` | 自身数据库的每日导出与离线恢复 |
+| `tests/acceptance/TC-117/` | 登录失败同一结果、按登录名锁定与退出 |
+| `tests/acceptance/TC-118/` | 角色变更、改口令、停用与删除前置转移 |
 
 ## 对象模型
 
@@ -117,6 +121,42 @@ Unknown，表示尚无写者观察过该对象。失败由对象自己的失败�
 求值：无法观察不推断为 Healthy，期望副本大于零且就绪为零、必需依赖不可用或必需卷丢失
 判 Unavailable，部分就绪、非必需依赖降级、下游漂移或能力保证不足判 Degraded；暂停与
 维护停止按有效期望副本零判定。
+
+## 账号、会话与自身数据库
+
+`pkg/identity` 实现 C-63 的本地账号与会话，以及 C-61 的控制面自身数据库。浏览器身份只有本地账号；
+Kubernetes 凭据不进入浏览器。
+
+- 登录：账号不存在、口令错误与账号停用返回同一错误（`login_failed`）；计数键是登录名，连续五次失败后
+  该名字锁定五分钟，`retryAfterSeconds` 给出剩余时间；成功登录与锁到期都清零。计数行在十五分钟无进展后
+  由下一次失败清理，未认证的登录路径不会让这张表无限增长。
+- 会话：空闲十二小时与绝对七天取先到者，响应可读剩余秒数。退出、改口令、停用与删除立即结束相应会话；
+  改口令保留当前会话、作废其余会话。角色不写入会话，每次请求按账号当前角色求值。
+- 账号：由 Owner 创建、停用、启用、改角色与删除；账号以一次性口令创建，首次登录必须先改口令
+  （`password_change_required`），此前只放行改口令、退出与会话读取。最后一个可用 Owner 不能被停用、
+  降级或删除；删除前必须转移其拥有的应用、卷、备份策略、恢复作业与卷迁移，未转移时返回
+  `account_has_objects` 与 `ownedObjects`。
+- 口令只保存 argon2id 单向摘要，会话只保存令牌摘要；日志、响应与投影响应都不含口令。
+- 数据库是单文件 SQLite（纯 Go 驱动），存放用户、会话、偏好与审计，不在调和路径上。schema 由内嵌迁移
+  脚本按版本前滚，`Rollback` 反向执行最新一版。数据库不可用时登录与写请求失败
+  （`database_unavailable`），已登录会话的读请求从内存副本照常提供。
+- 每日导出用 `VACUUM INTO` 把一致性快照写到配置的备份目标；未配置目标时跳过并在 `Exporter.Status`
+  留下可观察提示。恢复是离线动作：控制面停机后用 `Restore` 以导出文件替换数据库文件，再启动；
+  账号、偏好与审计回到导出时刻。
+
+| 方法 | 路径 | 语义 |
+|---|---|---|
+| `POST` | `/api/v1/auth/login` | 登录；返回令牌与剩余有效期 |
+| `POST` | `/api/v1/auth/logout` | 退出，结束当前会话 |
+| `GET` | `/api/v1/auth/session` | 当前身份与剩余有效期 |
+| `PUT` | `/api/v1/auth/password` | 改自己的口令；其余会话作废 |
+| `GET` | `/api/v1/accounts` | 账号列表（Owner） |
+| `POST` | `/api/v1/accounts` | 创建账号并返回一次性口令（Owner） |
+| `PUT` | `/api/v1/accounts/{name}` | 改角色或停用/启用（Owner） |
+| `DELETE` | `/api/v1/accounts/{name}` | 删除账号；仍有归属时拒绝（Owner） |
+
+除登录外，所有路由都要求 `Authorization: Bearer <token>`。`identity.Authorizer` 把 `pkg/write`
+的角色规则接到控制面 API：Guest 只读，写请求按会话当前角色判定。
 
 ## 构建与测试
 

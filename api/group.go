@@ -71,3 +71,26 @@ func HasStatus(kind string) (has bool, ok bool) {
 	info, ok := kinds[kind]
 	return info.hasStatus, ok
 }
+
+// resourceNames are the resource names the generated CRDs declare. They are
+// written out rather than derived from the kind: English plurals cannot be
+// guessed, and a wrong guess reaches the wrong resource.
+var resourceNames = map[string]string{
+	"Application":           "applications",
+	"ApplicationDefinition": "applicationdefinitions",
+	"BackupPolicy":          "backuppolicies",
+	"Endpoint":              "endpoints",
+	"NodeDevice":            "nodedevices",
+	"Provider":              "providers",
+	"RestoreJob":            "restorejobs",
+	"SystemComponent":       "systemcomponents",
+	"Volume":                "volumes",
+	"VolumeMigration":       "volumemigrations",
+}
+
+// ResourceName returns the resource name a kind is served under; ok is false
+// for a kind outside the kernel model.
+func ResourceName(kind string) (name string, ok bool) {
+	name, ok = resourceNames[kind]
+	return name, ok
+}

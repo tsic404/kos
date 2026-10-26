@@ -60,6 +60,30 @@ const (
 	CodeWriteFailed = "write_failed"
 	// CodeInternal marks a failure on this side of the API.
 	CodeInternal = "internal"
+	// CodeUnauthenticated marks a request that carries no usable session
+	// (C-63).
+	CodeUnauthenticated = "unauthenticated"
+	// CodeLoginFailed marks a login that names no usable account. The three
+	// ways to fail a login share this one code (C-63).
+	CodeLoginFailed = "login_failed"
+	// CodeAccountLocked marks a login name inside its lock window (C-63).
+	CodeAccountLocked = "account_locked"
+	// CodePasswordChangeRequired marks a first-login session that has not
+	// changed its one-time password yet (C-63).
+	CodePasswordChangeRequired = "password_change_required"
+	// CodeDatabaseUnavailable marks a request the control-plane database
+	// cannot serve right now (C-61).
+	CodeDatabaseUnavailable = "database_unavailable"
+	// CodeAccountExists marks a create whose login name is taken.
+	CodeAccountExists = "account_exists"
+	// CodeLastOwner marks a change that would leave no usable Owner (C-63).
+	CodeLastOwner = "last_owner"
+	// CodeAccountHasObjects marks a delete that still owns objects (C-60,
+	// C-63); OwnedObjects lists them.
+	CodeAccountHasObjects = "account_has_objects"
+	// CodeOwnershipCheckFailed marks a delete whose ownership check could not
+	// run, so the account is kept rather than stranding objects (C-60).
+	CodeOwnershipCheckFailed = "ownership_check_failed"
 )
 
 // Error is the failure envelope every non-2xx response carries (C-12). The
@@ -86,6 +110,12 @@ type Error struct {
 	// Current is the object as the cluster holds it now; a conflict carries it so
 	// the caller can reconcile instead of guessing (C-05).
 	Current map[string]any `json:"current,omitempty"`
+	// RetryAfterSeconds is how long a caller must wait before repeating a
+	// request that is locked or unavailable (C-63).
+	RetryAfterSeconds int64 `json:"retryAfterSeconds,omitempty"`
+	// OwnedObjects lists the objects that keep an account from being deleted
+	// (C-60, C-63).
+	OwnedObjects []ObjectRef `json:"ownedObjects,omitempty"`
 }
 
 // Error renders the code and message for wrapping in other errors.
@@ -98,16 +128,22 @@ func (e *Error) status() int {
 	switch e.Code {
 	case CodeInvalidRequest, CodeInvalidField:
 		return http.StatusBadRequest
+	case CodeUnauthenticated, CodeLoginFailed:
+		return http.StatusUnauthorized
 	case CodeNotFound:
 		return http.StatusNotFound
-	case CodePermissionDenied:
+	case CodePermissionDenied, CodePasswordChangeRequired:
 		return http.StatusForbidden
+	case CodeAccountLocked:
+		return http.StatusLocked
 	case CodeCapabilityMissing:
 		return http.StatusUnprocessableEntity
-	case CodeObjectExists, CodeConflict:
+	case CodeObjectExists, CodeConflict, CodeAccountExists, CodeLastOwner, CodeAccountHasObjects:
 		return http.StatusConflict
 	case CodeWriteFailed:
 		return http.StatusBadGateway
+	case CodeDatabaseUnavailable, CodeOwnershipCheckFailed:
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
 	}

@@ -664,6 +664,12 @@ func writeError(w http.ResponseWriter, failure *Error) {
 	writeJSON(w, failure.status(), map[string]any{"error": failure})
 }
 
+// WriteError writes the failure envelope for a surface outside this package
+// (C-12). The status follows the code, so callers never invent their own.
+func WriteError(w http.ResponseWriter, failure *Error) {
+	writeError(w, failure)
+}
+
 // decodeObjectBody reads one object manifest as generic JSON.
 func decodeObjectBody(r *http.Request) (map[string]any, *Error) {
 	object := map[string]any{}

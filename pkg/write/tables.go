@@ -1,6 +1,8 @@
 package write
 
 import (
+	"sort"
+
 	"github.com/tsic404/kos/pkg/markers"
 )
 
@@ -39,6 +41,17 @@ var ownedKinds = map[string]bool{
 	"BackupPolicy":    true,
 	"RestoreJob":      true,
 	"VolumeMigration": true,
+}
+
+// OwnedKinds returns the kinds that carry spec.owner (C-60), sorted. It is the
+// list an account's remaining ownership is checked against (C-63).
+func OwnedKinds() []string {
+	kinds := make([]string, 0, len(ownedKinds))
+	for kind := range ownedKinds {
+		kinds = append(kinds, kind)
+	}
+	sort.Strings(kinds)
+	return kinds
 }
 
 // markerClasses is the marker class each subject may write (C-03). Attribution
