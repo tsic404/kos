@@ -5,6 +5,12 @@ import (
 	"testing"
 )
 
+// missingCapabilityFailure resolves an unserved class and returns its failure.
+func missingCapabilityFailure(kind, apiVersion string) *Error {
+	_, failure := resolveType(kind, apiVersion, nil)
+	return failure
+}
+
 // TestErrorEnvelopeCarriesEveryContractField pins the failure fields C-12
 // requires for each failure class a write can produce.
 func TestErrorEnvelopeCarriesEveryContractField(t *testing.T) {
@@ -25,7 +31,7 @@ func TestErrorEnvelopeCarriesEveryContractField(t *testing.T) {
 			Retryable:   true,
 			SideEffects: SideEffectsNone,
 		}).about(ref),
-		"capability missing": resolveKind("Widget", "example.test/v1").about(ref),
+		"capability missing": missingCapabilityFailure("Widget", "example.test/v1").about(ref),
 		"write failed mid way": (&Error{
 			Code:        CodeWriteFailed,
 			Message:     "写入失败",

@@ -8,7 +8,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	"github.com/tsic404/kos/api"
 	"github.com/tsic404/kos/pkg/markers"
 )
 
@@ -18,10 +17,10 @@ type fakeSource struct {
 }
 
 // List implements ObjectSource.
-func (f *fakeSource) List(_ context.Context, kind, namespace string) ([]ObservedObject, error) {
+func (f *fakeSource) List(_ context.Context, objectType ObjectType, namespace string) ([]ObservedObject, error) {
 	listed := make([]ObservedObject, 0, len(f.objects))
 	for _, object := range f.objects {
-		if text(object.Object["kind"]) != kind {
+		if text(object.Object["kind"]) != objectType.Kind {
 			continue
 		}
 		if namespace != "" && nestedText(object.Object, "metadata", "namespace") != namespace {
@@ -33,9 +32,9 @@ func (f *fakeSource) List(_ context.Context, kind, namespace string) ([]Observed
 }
 
 // Get implements ObjectSource.
-func (f *fakeSource) Get(_ context.Context, kind, namespace, name string) (ObservedObject, error) {
+func (f *fakeSource) Get(_ context.Context, objectType ObjectType, namespace, name string) (ObservedObject, error) {
 	for _, object := range f.objects {
-		if text(object.Object["kind"]) != kind || nestedText(object.Object, "metadata", "name") != name {
+		if text(object.Object["kind"]) != objectType.Kind || nestedText(object.Object, "metadata", "name") != name {
 			continue
 		}
 		if namespace != "" && nestedText(object.Object, "metadata", "namespace") != namespace {
@@ -43,7 +42,7 @@ func (f *fakeSource) Get(_ context.Context, kind, namespace, name string) (Obser
 		}
 		return object, nil
 	}
-	return ObservedObject{}, apierrors.NewNotFound(schema.GroupResource{Group: api.Group, Resource: kind}, name)
+	return ObservedObject{}, apierrors.NewNotFound(schema.GroupResource{Group: objectType.Group, Resource: objectType.Resource}, name)
 }
 
 // observe wraps an object as a source observation.

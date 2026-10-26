@@ -14,8 +14,9 @@ func TestPageTokenResumesWithinOneQuery(t *testing.T) {
 	}
 	sortProjections(projections)
 
-	token := encodePageToken("Application", "default", "app=web", projections[0].Ref.String())
-	last, failure := decodePageToken(token, "Application", "default", "app=web")
+	applicationType := kernelTypeOf(t, "Application")
+	token := encodePageToken(applicationType, "default", "app=web", projections[0].Ref.String())
+	last, failure := decodePageToken(token, applicationType, "default", "app=web")
 	if failure != nil {
 		t.Fatalf("decode token: %v", failure)
 	}
@@ -27,17 +28,18 @@ func TestPageTokenResumesWithinOneQuery(t *testing.T) {
 	// resume it, or objects would be skipped without a word.
 	otherQueries := []struct {
 		name      string
-		kind      string
+		object    ObjectType
 		namespace string
 		selector  string
 	}{
-		{name: "another kind", kind: "Volume", namespace: "default", selector: "app=web"},
-		{name: "another namespace", kind: "Application", namespace: "other", selector: "app=web"},
-		{name: "another filter", kind: "Application", namespace: "default", selector: "app=api"},
+		{name: "another kind", object: kernelTypeOf(t, "Volume"), namespace: "default", selector: "app=web"},
+		{name: "another namespace", object: applicationType, namespace: "other", selector: "app=web"},
+		{name: "another filter", object: applicationType, namespace: "default", selector: "app=api"},
+		{name: "another version", object: ObjectType{Group: "kos.tsic.top", Version: "v1", Kind: "Application", Resource: "applications"}, namespace: "default", selector: "app=web"},
 	}
 	for _, query := range otherQueries {
 		t.Run(query.name, func(t *testing.T) {
-			if _, failure := decodePageToken(token, query.kind, query.namespace, query.selector); failure == nil {
+			if _, failure := decodePageToken(token, query.object, query.namespace, query.selector); failure == nil {
 				t.Fatal("the cursor was accepted by another query")
 			} else if failure.Code != CodeInvalidField {
 				t.Fatalf("code = %s, want %s", failure.Code, CodeInvalidField)

@@ -46,6 +46,9 @@ type Warning struct {
 // PlannedObject is one object a plan creates or deletes.
 type PlannedObject struct {
 	Ref ObjectRef `json:"ref"`
+	// objectType is the class the object belongs to; a plan answer does not
+	// carry it, the execution uses it.
+	objectType ObjectType
 }
 
 // PlannedUpdate is one object a plan rewrites, with the fields that differ.
@@ -96,7 +99,12 @@ func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (
 		if kind == "" {
 			return nil, nil, invalidField("每个对象都必须给出 kind")
 		}
-		object, failure := decodeObject(kind, "", raw)
+		objectType, failure := resolveType(kind, text(raw["apiVersion"]), s.extensions)
+		if failure != nil {
+			return nil, nil, withIdentity(failure,
+				nestedText(raw, "metadata", "namespace"), nestedText(raw, "metadata", "name"))
+		}
+		object, failure := decodeObject(objectType, "", raw)
 		if failure != nil {
 			return nil, nil, failure
 		}
@@ -119,10 +127,10 @@ func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (
 				Object:  new(object.Ref),
 			})
 		}
-		current, err := s.source.Get(ctx, object.Ref.Kind, object.Ref.Namespace, object.Ref.Name)
+		current, err := s.source.Get(ctx, object.Type, object.Ref.Namespace, object.Ref.Name)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				plan.Create = append(plan.Create, PlannedObject{Ref: object.Ref})
+				plan.Create = append(plan.Create, PlannedObject{Ref: object.Ref, objectType: object.Type})
 				continue
 			}
 			s.log.Error("plan read failed", "object", object.Ref.String(), "error", err)
@@ -151,7 +159,11 @@ func (s *Server) planDeletes(ctx context.Context, scope *Scope, desired map[stri
 	}
 	retained := 0
 	for _, kind := range api.Kinds() {
-		observed, err := s.source.List(ctx, kind, "")
+		objectType, known := kernelType(kind)
+		if !known {
+			continue
+		}
+		observed, err := s.source.List(ctx, objectType, "")
 		if err != nil {
 			s.log.Error("plan read failed", "kind", kind, "error", err)
 			return 0, internal(StagePlan, "读取 "+kind+" 失败").about(kernelRef(kind, "", ""))
@@ -160,7 +172,7 @@ func (s *Server) planDeletes(ctx context.Context, scope *Scope, desired map[stri
 			if text(labelOf(item.Object, markers.OwnerUID)) != scope.OwnerUID {
 				continue
 			}
-			ref := refOf(item.Object, kind)
+			ref := refOf(item.Object, objectType)
 			if desired[ref.String()] {
 				continue
 			}
@@ -176,7 +188,7 @@ func (s *Server) planDeletes(ctx context.Context, scope *Scope, desired map[stri
 			if failure := s.authorize(ctx, VerbDelete, ref); failure != nil {
 				return 0, failure
 			}
-			plan.Delete = append(plan.Delete, PlannedObject{Ref: ref})
+			plan.Delete = append(plan.Delete, PlannedObject{Ref: ref, objectType: objectType})
 		}
 	}
 	return retained, nil
@@ -231,7 +243,7 @@ func (s *Server) execute(ctx context.Context, plan *Plan, desired []desiredObjec
 		}
 	}
 	for _, planned := range plan.Delete {
-		if failure := s.delete(ctx, planned.Ref, ""); failure != nil {
+		if failure := s.delete(ctx, planned.objectType, planned.Ref, ""); failure != nil {
 			return
 		}
 	}

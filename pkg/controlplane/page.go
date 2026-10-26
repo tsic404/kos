@@ -20,6 +20,8 @@ const (
 // carries the whole query it belongs to: a token replayed against another kind,
 // namespace or filter is refused rather than silently skipping objects (C-12).
 type pageToken struct {
+	Group     string `json:"group"`
+	Version   string `json:"version"`
 	Kind      string `json:"kind"`
 	Namespace string `json:"namespace"`
 	Selector  string `json:"selector"`
@@ -49,8 +51,8 @@ func parseSelector(raw string) (labels.Selector, *Error) {
 }
 
 // decodePageToken reads the continue parameter and checks it belongs to the
-// current query.
-func decodePageToken(raw, kind, namespace, selector string) (string, *Error) {
+// current query, object class included.
+func decodePageToken(raw string, object ObjectType, namespace, selector string) (string, *Error) {
 	if raw == "" {
 		return "", nil
 	}
@@ -62,15 +64,19 @@ func decodePageToken(raw, kind, namespace, selector string) (string, *Error) {
 	if err := json.Unmarshal(decoded, &token); err != nil {
 		return "", invalidField("continue 不是合法的分页游标")
 	}
-	if token.Kind != kind || token.Namespace != namespace || token.Selector != selector {
+	if token.Group != object.Group || token.Version != object.Version || token.Kind != object.Kind ||
+		token.Namespace != namespace || token.Selector != selector {
 		return "", invalidField("continue 属于另一次查询（对象类型、命名空间或过滤条件不同），请从头读取")
 	}
 	return token.Last, nil
 }
 
 // encodePageToken builds the cursor pointing behind last for this query.
-func encodePageToken(kind, namespace, selector, last string) string {
-	encoded, err := json.Marshal(pageToken{Kind: kind, Namespace: namespace, Selector: selector, Last: last})
+func encodePageToken(object ObjectType, namespace, selector, last string) string {
+	encoded, err := json.Marshal(pageToken{
+		Group: object.Group, Version: object.Version, Kind: object.Kind,
+		Namespace: namespace, Selector: selector, Last: last,
+	})
 	if err != nil {
 		return ""
 	}

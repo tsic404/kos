@@ -222,7 +222,23 @@ type SystemComponent struct {
 }
 
 // SystemComponentSpec holds the installation request of an extension.
-type SystemComponentSpec struct{}
+type SystemComponentSpec struct {
+	// Package is the artifact this component installs (C-17). An adopted
+	// component installs no package and leaves it empty.
+	// +optional
+	Package ExtensionPackage `json:"package,omitempty"`
+}
+
+// ExtensionPackage identifies one extension package artifact and the digest it
+// must match; a mismatch rejects the install (C-17).
+type ExtensionPackage struct {
+	// Reference locates the artifact.
+	// +optional
+	Reference string `json:"reference,omitempty"`
+	// Digest is the artifact's sha256 in the form sha256:<hex>.
+	// +optional
+	Digest string `json:"digest,omitempty"`
+}
 
 // SystemComponentList is the list form of SystemComponent.
 //

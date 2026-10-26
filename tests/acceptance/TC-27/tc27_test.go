@@ -23,8 +23,8 @@ type agedSource struct {
 }
 
 // List implements ObjectSource.
-func (s agedSource) List(ctx context.Context, kind, namespace string) ([]controlplane.ObservedObject, error) {
-	objects, err := s.base.List(ctx, kind, namespace)
+func (s agedSource) List(ctx context.Context, object controlplane.ObjectType, namespace string) ([]controlplane.ObservedObject, error) {
+	objects, err := s.base.List(ctx, object, namespace)
 	for index := range objects {
 		objects[index].ObservedAt = time.Now().Add(-s.age)
 	}
@@ -32,8 +32,8 @@ func (s agedSource) List(ctx context.Context, kind, namespace string) ([]control
 }
 
 // Get implements ObjectSource.
-func (s agedSource) Get(ctx context.Context, kind, namespace, name string) (controlplane.ObservedObject, error) {
-	object, err := s.base.Get(ctx, kind, namespace, name)
+func (s agedSource) Get(ctx context.Context, class controlplane.ObjectType, namespace, name string) (controlplane.ObservedObject, error) {
+	object, err := s.base.Get(ctx, class, namespace, name)
 	if err != nil {
 		return object, err
 	}

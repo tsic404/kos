@@ -14,8 +14,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/dynamic"
-
-	"github.com/tsic404/kos/api"
 )
 
 // Verb names what a request does, so one decision covers reads, writes and
@@ -78,6 +76,12 @@ type Config struct {
 	Dynamic dynamic.Interface
 	// Source reads projections; defaults to a live source over Dynamic.
 	Source ObjectSource
+	// Extensions resolves the object classes active extension components
+	// declare (C-19); nil serves kernel kinds only.
+	Extensions ExtensionKinds
+	// Controllers projects the status of extension objects whose controller is
+	// unavailable (C-20); nil shows every stored status as observed.
+	Controllers ControllerAvailability
 	// Authorizer judges requests; defaults to AllowAll.
 	Authorizer Authorizer
 	// Now supplies the read clock; defaults to time.Now.
@@ -92,15 +96,17 @@ type Config struct {
 // Server is the control plane API. It holds the cluster client and never hands
 // one to a caller (C-13, F9).
 type Server struct {
-	dynamic    dynamic.Interface
-	source     ObjectSource
-	authorizer Authorizer
-	now        func() time.Time
-	timeout    time.Duration
-	log        *slog.Logger
-	operations context.Context
-	stop       context.CancelFunc
-	mux        *http.ServeMux
+	dynamic     dynamic.Interface
+	source      ObjectSource
+	extensions  ExtensionKinds
+	controllers ControllerAvailability
+	authorizer  Authorizer
+	now         func() time.Time
+	timeout     time.Duration
+	log         *slog.Logger
+	operations  context.Context
+	stop        context.CancelFunc
+	mux         *http.ServeMux
 }
 
 // New builds the API surface.
@@ -109,12 +115,14 @@ func New(config Config) (*Server, error) {
 		return nil, errors.New("controlplane: a dynamic client is required")
 	}
 	server := &Server{
-		dynamic:    config.Dynamic,
-		source:     config.Source,
-		authorizer: config.Authorizer,
-		now:        config.Now,
-		timeout:    config.OperationTimeout,
-		log:        config.Log,
+		dynamic:     config.Dynamic,
+		source:      config.Source,
+		extensions:  config.Extensions,
+		controllers: config.Controllers,
+		authorizer:  config.Authorizer,
+		now:         config.Now,
+		timeout:     config.OperationTimeout,
+		log:         config.Log,
 	}
 	if server.source == nil {
 		server.source = NewClusterSource(config.Dynamic)
@@ -164,17 +172,21 @@ func (s *Server) Close() {
 
 // handleList returns one page of projections with their observation time (C-13).
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
-	kind := r.PathValue("kind")
-	if failure := resolveKind(kind, ""); failure != nil {
-		writeError(w, failure)
-		return
-	}
 	query := r.URL.Query()
-	namespace := query.Get("namespace")
-	if scope, _ := api.ScopeOf(kind); scope == api.ScopeCluster && namespace != "" {
-		writeError(w, invalidField("集群作用域对象不能带 namespace"))
+	kind := r.PathValue("kind")
+	objectType, failure := resolveType(kind, query.Get("apiVersion"), s.extensions)
+	if failure != nil {
+		writeError(w, withIdentity(failure, query.Get("namespace"), ""))
 		return
 	}
+	namespace := query.Get("namespace")
+	if !objectType.Namespaced {
+		if namespace != "" {
+			writeError(w, invalidField("集群作用域对象不能带 namespace"))
+			return
+		}
+	}
+	ref := ObjectRef{Group: objectType.Group, Kind: objectType.Kind, Namespace: namespace}
 	selector, failure := parseSelector(query.Get("labelSelector"))
 	if failure != nil {
 		writeError(w, failure)
@@ -185,20 +197,20 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure)
 		return
 	}
-	last, failure := decodePageToken(query.Get("continue"), kind, namespace, selector.String())
+	last, failure := decodePageToken(query.Get("continue"), objectType, namespace, selector.String())
 	if failure != nil {
 		writeError(w, failure)
 		return
 	}
-	if failure := s.authorize(r.Context(), VerbRead, kernelRef(kind, namespace, "")); failure != nil {
+	if failure := s.authorize(r.Context(), VerbRead, ref); failure != nil {
 		writeError(w, failure)
 		return
 	}
 
-	observed, err := s.source.List(r.Context(), kind, namespace)
+	observed, err := s.source.List(r.Context(), objectType, namespace)
 	if err != nil {
 		s.log.Error("list failed", "kind", kind, "namespace", namespace, "error", err)
-		writeError(w, internal(StageRead, "读取 "+kind+" 失败").about(kernelRef(kind, namespace, "")))
+		writeError(w, internal(StageRead, "读取 "+kind+" 失败").about(ref))
 		return
 	}
 	now := s.now()
@@ -208,7 +220,8 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		if !selector.Matches(labels.Set(stringMap(metadata["labels"]))) {
 			continue
 		}
-		projections = append(projections, newProjection(refOf(item.Object, kind), item.Object, item.ObservedAt, now))
+		object := s.projectedObject(objectType, item.Object)
+		projections = append(projections, newProjection(refOf(object, objectType), object, item.ObservedAt, now))
 	}
 	sortProjections(projections)
 
@@ -221,7 +234,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	page := projections[start:end]
 	response := listResponse{Items: page}
 	if end < len(projections) {
-		response.Continue = encodePageToken(kind, namespace, selector.String(), page[len(page)-1].Ref.String())
+		response.Continue = encodePageToken(objectType, namespace, selector.String(), page[len(page)-1].Ref.String())
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -230,26 +243,28 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	kind := r.PathValue("kind")
 	name := r.PathValue("name")
-	if failure := resolveKind(kind, ""); failure != nil {
-		writeError(w, failure)
+	objectType, failure := resolveType(kind, r.URL.Query().Get("apiVersion"), s.extensions)
+	if failure != nil {
+		writeError(w, withIdentity(failure, r.URL.Query().Get("namespace"), name))
 		return
 	}
-	namespace, failure := readNamespace(r, kind)
+	namespace, failure := readNamespace(r, objectType)
 	if failure != nil {
 		writeError(w, failure)
 		return
 	}
-	ref := kernelRef(kind, namespace, name)
+	ref := ObjectRef{Group: objectType.Group, Kind: objectType.Kind, Namespace: namespace, Name: name}
 	if failure := s.authorize(r.Context(), VerbRead, ref); failure != nil {
 		writeError(w, failure)
 		return
 	}
-	observed, err := s.source.Get(r.Context(), kind, namespace, name)
+	observed, err := s.source.Get(r.Context(), objectType, namespace, name)
 	if err != nil {
 		writeError(w, s.readFailure(err, ref))
 		return
 	}
-	writeJSON(w, http.StatusOK, newProjection(refOf(observed.Object, kind), observed.Object, observed.ObservedAt, s.now()))
+	object := s.projectedObject(objectType, observed.Object)
+	writeJSON(w, http.StatusOK, newProjection(refOf(object, objectType), object, observed.ObservedAt, s.now()))
 }
 
 // handleCreate writes one object idempotently: the same request submitted twice
@@ -261,7 +276,13 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure)
 		return
 	}
-	object, failure := decodeObject(kind, r.URL.Query().Get("namespace"), raw)
+	objectType, failure := resolveType(kind, text(raw["apiVersion"]), s.extensions)
+	if failure != nil {
+		writeError(w, withIdentity(failure, firstNonEmpty(nestedText(raw, "metadata", "namespace"), r.URL.Query().Get("namespace")),
+			nestedText(raw, "metadata", "name")))
+		return
+	}
+	object, failure := decodeObject(objectType, r.URL.Query().Get("namespace"), raw)
 	if failure != nil {
 		writeError(w, failure)
 		return
@@ -273,7 +294,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
 	defer cancel()
 
-	current, err := s.source.Get(ctx, object.Ref.Kind, object.Ref.Namespace, object.Ref.Name)
+	current, err := s.source.Get(ctx, object.Type, object.Ref.Namespace, object.Ref.Name)
 	switch {
 	case err == nil:
 		if len(changes(current.Object, object.Object.Object)) > 0 {
@@ -306,21 +327,22 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	kind := r.PathValue("kind")
 	name := r.PathValue("name")
-	if failure := resolveKind(kind, ""); failure != nil {
-		writeError(w, failure)
-		return
-	}
-	namespace, failure := readNamespace(r, kind)
-	if failure != nil {
-		writeError(w, failure)
-		return
-	}
 	raw, failure := decodeObjectBody(r)
 	if failure != nil {
 		writeError(w, failure)
 		return
 	}
-	object, failure := decodeObject(kind, namespace, raw)
+	objectType, failure := resolveType(kind, text(raw["apiVersion"]), s.extensions)
+	if failure != nil {
+		writeError(w, withIdentity(failure, firstNonEmpty(nestedText(raw, "metadata", "namespace"), r.URL.Query().Get("namespace")), name))
+		return
+	}
+	namespace, failure := readNamespace(r, objectType)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	object, failure := decodeObject(objectType, namespace, raw)
 	if failure != nil {
 		writeError(w, failure)
 		return
@@ -336,7 +358,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
 	defer cancel()
 
-	current, err := s.source.Get(ctx, kind, namespace, name)
+	current, err := s.source.Get(ctx, object.Type, namespace, name)
 	if err != nil {
 		writeError(w, s.readFailure(err, object.Ref))
 		return
@@ -369,23 +391,24 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	kind := r.PathValue("kind")
 	name := r.PathValue("name")
-	if failure := resolveKind(kind, ""); failure != nil {
-		writeError(w, failure)
+	objectType, failure := resolveType(kind, r.URL.Query().Get("apiVersion"), s.extensions)
+	if failure != nil {
+		writeError(w, withIdentity(failure, r.URL.Query().Get("namespace"), name))
 		return
 	}
-	namespace, failure := readNamespace(r, kind)
+	namespace, failure := readNamespace(r, objectType)
 	if failure != nil {
 		writeError(w, failure)
 		return
 	}
-	ref := kernelRef(kind, namespace, name)
+	ref := ObjectRef{Group: objectType.Group, Kind: objectType.Kind, Namespace: namespace, Name: name}
 	if failure := s.authorize(r.Context(), VerbDelete, ref); failure != nil {
 		writeError(w, failure)
 		return
 	}
 	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
 	defer cancel()
-	current, err := s.source.Get(ctx, kind, namespace, name)
+	current, err := s.source.Get(ctx, objectType, namespace, name)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Ref: new(ref), Idempotent: true})
@@ -403,7 +426,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, conflict(ref, "对象 "+ref.String()+" 已被其他写入修改，请重新读取后再删除", current.Object))
 		return
 	}
-	if failure := s.delete(ctx, ref, precondition); failure != nil {
+	if failure := s.delete(ctx, objectType, ref, precondition); failure != nil {
 		writeError(w, failure)
 		return
 	}
@@ -453,15 +476,12 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 // desired state is not an error: repeating a write must converge, not fork
 // (C-12).
 func (s *Server) create(ctx context.Context, object desiredObject) *Error {
-	resource, err := resourceOf(s.dynamic, object.Ref.Kind, object.Ref.Namespace)
-	if err != nil {
-		return internal(StageApply, err.Error()).about(object.Ref)
-	}
+	resource := resourceOf(s.dynamic, object.Type, object.Ref.Namespace)
 	if _, err := resource.Create(ctx, object.Object, metav1.CreateOptions{}); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
-			return s.writeFailure(ctx, err, object.Ref)
+			return s.writeFailure(ctx, object.Type, err, object.Ref)
 		}
-		current, readErr := s.awaitObject(ctx, object.Ref)
+		current, readErr := s.awaitObject(ctx, object.Type, object.Ref)
 		if readErr != nil {
 			// The identity already exists, which is what the request asked for; a
 			// cached source that has not caught up must not turn a repeat into a
@@ -488,20 +508,17 @@ func (s *Server) create(ctx context.Context, object desiredObject) *Error {
 // slipped in between the read and this call is refused by the API server instead
 // of being overwritten (C-05).
 func (s *Server) update(ctx context.Context, object desiredObject, expected string) *Error {
-	resource, err := resourceOf(s.dynamic, object.Ref.Kind, object.Ref.Namespace)
-	if err != nil {
-		return internal(StageApply, err.Error()).about(object.Ref)
-	}
+	resource := resourceOf(s.dynamic, object.Type, object.Ref.Namespace)
 	current, err := resource.Get(ctx, object.Ref.Name, metav1.GetOptions{})
 	if err != nil {
-		return s.writeFailure(ctx, err, object.Ref)
+		return s.writeFailure(ctx, object.Type, err, object.Ref)
 	}
 	updated := applyDesired(current, object.Object)
 	if expected != "" {
 		updated.SetResourceVersion(expected)
 	}
 	if _, err := resource.Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
-		return s.writeFailure(ctx, err, object.Ref)
+		return s.writeFailure(ctx, object.Type, err, object.Ref)
 	}
 	return nil
 }
@@ -509,17 +526,14 @@ func (s *Server) update(ctx context.Context, object desiredObject, expected stri
 // delete removes one object. The version precondition makes the API server the
 // judge: an update that landed since the caller read the object stops the
 // delete instead of being destroyed by it (C-05).
-func (s *Server) delete(ctx context.Context, ref ObjectRef, expected string) *Error {
-	resource, err := resourceOf(s.dynamic, ref.Kind, ref.Namespace)
-	if err != nil {
-		return internal(StageApply, err.Error()).about(ref)
-	}
+func (s *Server) delete(ctx context.Context, object ObjectType, ref ObjectRef, expected string) *Error {
+	resource := resourceOf(s.dynamic, object, ref.Namespace)
 	current, err := resource.Get(ctx, ref.Name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
-		return s.writeFailure(ctx, err, ref)
+		return s.writeFailure(ctx, object, err, ref)
 	}
 	uid := current.GetUID()
 	if expected == "" {
@@ -528,17 +542,17 @@ func (s *Server) delete(ctx context.Context, ref ObjectRef, expected string) *Er
 	if err := resource.Delete(ctx, ref.Name, metav1.DeleteOptions{
 		Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &expected},
 	}); err != nil && !apierrors.IsNotFound(err) {
-		return s.writeFailure(ctx, err, ref)
+		return s.writeFailure(ctx, object, err, ref)
 	}
 	return nil
 }
 
 // awaitObject re-reads an object another writer just created: a cached source
 // lags behind the write, so the read is retried briefly.
-func (s *Server) awaitObject(ctx context.Context, ref ObjectRef) (ObservedObject, error) {
+func (s *Server) awaitObject(ctx context.Context, object ObjectType, ref ObjectRef) (ObservedObject, error) {
 	var last error
 	for attempt := 0; attempt < readRetryAttempts; attempt++ {
-		observed, err := s.source.Get(ctx, ref.Kind, ref.Namespace, ref.Name)
+		observed, err := s.source.Get(ctx, object, ref.Namespace, ref.Name)
 		if err == nil {
 			return observed, nil
 		}
@@ -581,11 +595,11 @@ func (s *Server) readFailure(err error, ref ObjectRef) *Error {
 // writeFailure turns a cluster write error into the failure envelope. A conflict
 // carries the object as the cluster holds it now, so the caller reconciles
 // instead of repeating a blind overwrite (C-05).
-func (s *Server) writeFailure(ctx context.Context, err error, ref ObjectRef) *Error {
+func (s *Server) writeFailure(ctx context.Context, object ObjectType, err error, ref ObjectRef) *Error {
 	switch {
 	case apierrors.IsConflict(err):
 		s.log.Warn("write conflict", "object", ref.String(), "error", err)
-		return conflict(ref, "对象 "+ref.String()+" 已被其他写入修改，请重新读取后再提交", s.currentObject(ctx, ref))
+		return conflict(ref, "对象 "+ref.String()+" 已被其他写入修改，请重新读取后再提交", s.currentObject(ctx, object, ref))
 	case apierrors.IsInvalid(err):
 		s.log.Warn("cluster rejected fields", "object", ref.String(), "error", err)
 		return (&Error{
@@ -618,8 +632,8 @@ func (s *Server) writeFailure(ctx context.Context, err error, ref ObjectRef) *Er
 
 // currentObject reads the object as the cluster holds it now; the conflict
 // answer carries it (C-05).
-func (s *Server) currentObject(ctx context.Context, ref ObjectRef) map[string]any {
-	observed, err := s.source.Get(ctx, ref.Kind, ref.Namespace, ref.Name)
+func (s *Server) currentObject(ctx context.Context, object ObjectType, ref ObjectRef) map[string]any {
+	observed, err := s.source.Get(ctx, object, ref.Namespace, ref.Name)
 	if err != nil {
 		s.log.Debug("conflict object unreadable", "object", ref.String(), "error", err)
 		return nil
@@ -670,6 +684,36 @@ func WriteError(w http.ResponseWriter, failure *Error) {
 	writeError(w, failure)
 }
 
+// withIdentity completes a resolution failure with the object the request names,
+// so the failure envelope still identifies it (C-12).
+func withIdentity(failure *Error, namespace, name string) *Error {
+	if failure == nil || failure.Object == nil {
+		return failure
+	}
+	if namespace == "" && name == "" {
+		return failure
+	}
+	ref := *failure.Object
+	if ref.Namespace == "" {
+		ref.Namespace = namespace
+	}
+	if ref.Name == "" {
+		ref.Name = name
+	}
+	failure.Object = &ref
+	return failure
+}
+
+// firstNonEmpty returns the first value that is not empty.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // decodeObjectBody reads one object manifest as generic JSON.
 func decodeObjectBody(r *http.Request) (map[string]any, *Error) {
 	object := map[string]any{}
@@ -714,11 +758,10 @@ func decodeBody(r *http.Request, strict bool, target any) *Error {
 	return nil
 }
 
-// readNamespace reads the namespace parameter of a namespaced kind.
-func readNamespace(r *http.Request, kind string) (string, *Error) {
+// readNamespace reads the namespace parameter of the resolved class.
+func readNamespace(r *http.Request, object ObjectType) (string, *Error) {
 	namespace := r.URL.Query().Get("namespace")
-	scope, _ := api.ScopeOf(kind)
-	if scope == api.ScopeCluster {
+	if !object.Namespaced {
 		if namespace != "" {
 			return "", invalidField("集群作用域对象不能带 namespace")
 		}

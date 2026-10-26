@@ -202,14 +202,14 @@ type competingWriter struct {
 }
 
 // List implements controlplane.ObjectSource.
-func (w *competingWriter) List(ctx context.Context, kind, namespace string) ([]controlplane.ObservedObject, error) {
-	return w.base.List(ctx, kind, namespace)
+func (w *competingWriter) List(ctx context.Context, object controlplane.ObjectType, namespace string) ([]controlplane.ObservedObject, error) {
+	return w.base.List(ctx, object, namespace)
 }
 
 // Get implements controlplane.ObjectSource.
-func (w *competingWriter) Get(ctx context.Context, kind, namespace, name string) (controlplane.ObservedObject, error) {
-	observed, err := w.base.Get(ctx, kind, namespace, name)
-	if err == nil && kind == w.kind && namespace == w.namespace && name == w.name {
+func (w *competingWriter) Get(ctx context.Context, object controlplane.ObjectType, namespace, name string) (controlplane.ObservedObject, error) {
+	observed, err := w.base.Get(ctx, object, namespace, name)
+	if err == nil && object.Kind == w.kind && namespace == w.namespace && name == w.name {
 		w.once.Do(func() { w.compete(ctx) })
 	}
 	return observed, err

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -418,6 +419,68 @@ func (c *Cluster) EnsureNamespace(t *testing.T, name string) {
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		t.Fatalf("create namespace %s: %v", name, err)
 	}
+}
+
+// InstallCRD installs one extension object class definition and waits until the
+// class is served. An extension package carries its own definitions; a case
+// installs them when the component is provisioned.
+func (c *Cluster) InstallCRD(t *testing.T, group, version, kind, plural string, namespaced bool) {
+	t.Helper()
+	scope := apiextensionsv1.ClusterScoped
+	if namespaced {
+		scope = apiextensionsv1.NamespaceScoped
+	}
+	preserve := true
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: plural + "." + group},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: group,
+			Scope: scope,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Plural:   plural,
+				Singular: strings.ToLower(kind),
+				Kind:     kind,
+				ListKind: kind + "List",
+			},
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
+				Name:    version,
+				Served:  true,
+				Storage: true,
+				Schema: &apiextensionsv1.CustomResourceValidation{
+					OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+						Type:                   "object",
+						XPreserveUnknownFields: &preserve,
+					},
+				},
+			}},
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	if _, err := c.APIExtensions.ApiextensionsV1().CustomResourceDefinitions().Create(ctx, crd, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("install CRD %s: %v", crd.Name, err)
+	}
+	Eventually(t, 15*time.Second, "CRD "+crd.Name+" to be established", func() bool {
+		stored, err := c.APIExtensions.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, crd.Name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		for _, condition := range stored.Status.Conditions {
+			if condition.Type == apiextensionsv1.Established && condition.Status == apiextensionsv1.ConditionTrue {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// ExtensionResource resolves the client of one extension object class.
+func (c *Cluster) ExtensionResource(group, version, plural, namespace string) dynamic.ResourceInterface {
+	resource := c.Dynamic.Resource(schema.GroupVersionResource{Group: group, Version: version, Resource: plural})
+	if namespace == "" {
+		return resource
+	}
+	return resource.Namespace(namespace)
 }
 
 // Direct returns the client of any object class by group, version and kind.
