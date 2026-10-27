@@ -92,6 +92,16 @@ var downstreamWriters = map[Subject]map[Verb]bool{
 	SubjectExtensionReconciler:   allVerbs(),
 }
 
+// forceWriters is the allocation for forced applies. A force takes a field set
+// away from whoever holds it, so C-05 grants it only to the subject C-04 makes
+// the writer of the object: the application reconciler, whose reconcile policy
+// has to win against a write made outside KOS (C-04, C-35). Claim writes take
+// the force their own claim row allocates (C-04); every other subject applies
+// without force and loses with a 409.
+var forceWriters = map[Subject]bool{
+	SubjectApplicationReconciler: true,
+}
+
 // claimWriters is the C-04 allocation for claims, keyed by the role the write
 // declares: a bound claim is created, expanded and deleted by the volume
 // reconciler alone; a migration target is created and deleted by the migration

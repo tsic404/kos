@@ -1187,3 +1187,54 @@ func TestApplicationReconcilerDeletesOnlyActionRecords(t *testing.T) {
 		})
 	}
 }
+
+// TestForcedWritesNeedTheAllocatedSubject covers C-05: a force takes a field set
+// from whoever holds it, so the allocation grants it to the application
+// reconciler alone; every other subject applies without force and loses with a
+// conflict.
+func TestForcedWritesNeedTheAllocatedSubject(t *testing.T) {
+	downstream := Ref{Version: "v1", Kind: "Service", Namespace: "apps", Name: "web"}
+	apply := func(subject Subject, session Session, force bool) Request {
+		return Request{
+			Subject: subject, Session: session,
+			Object: downstream, Verb: VerbApply,
+			Parts: []Part{PartObject},
+			Scope: namespaces("apps"),
+			Current: nativeStored("Service", "apps", "web", map[string]string{
+				markers.ManagedBy: ManagedByValue, markers.OwnerUID: "uid-application",
+			}),
+			Force: force,
+		}
+	}
+	if err := Admit(apply(SubjectApplicationReconciler, Session{}, true)); err != nil {
+		t.Fatalf("the application reconciler cannot force its own downstream write: %v", err)
+	}
+	if err := Admit(apply(SubjectApplicationReconciler, Session{}, false)); err != nil {
+		t.Fatalf("an unforced write of the application reconciler was refused: %v", err)
+	}
+	// The same request succeeds without force and fails with it, so the refusal
+	// is the force allocation rather than the class row.
+	for _, subject := range []Subject{SubjectInstaller, SubjectEndpointReconciler} {
+		if err := Admit(apply(subject, Session{}, false)); err != nil {
+			t.Fatalf("%s cannot write its object without force: %v", subject, err)
+		}
+		if err := Admit(apply(subject, Session{}, true)); err == nil {
+			t.Fatalf("%s forced a downstream write", subject)
+		}
+	}
+	if err := Admit(apply(SubjectUser, member(), true)); err == nil {
+		t.Fatal("a user forced a downstream write")
+	}
+	deleteRequest := Request{
+		Subject: SubjectApplicationReconciler, Object: downstream, Verb: VerbDelete,
+		Parts: []Part{PartObject},
+		Scope: namespaces("apps"),
+		Current: nativeStored("Service", "apps", "web", map[string]string{
+			markers.ManagedBy: ManagedByValue, markers.OwnerUID: "uid-application",
+		}),
+		Force: true,
+	}
+	if err := Admit(deleteRequest); err == nil {
+		t.Fatal("a delete was admitted as a forced write")
+	}
+}

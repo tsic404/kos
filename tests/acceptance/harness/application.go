@@ -16,8 +16,10 @@ import (
 	"github.com/tsic404/kos/pkg/write"
 )
 
-// InstallDefinition writes one application definition as the catalogue would
-// (C-03).
+// InstallDefinition publishes one application definition as the catalogue does
+// (C-03). Publishing the same name again with new content is the definition
+// update of C-32: the entry keeps its name and the applications that name it
+// keep their installed objects.
 func (c *Cluster) InstallDefinition(t *testing.T, definition *v1beta1.ApplicationDefinition) {
 	t.Helper()
 	document, err := runtime.DefaultUnstructuredConverter.ToUnstructured(definition)
@@ -29,7 +31,7 @@ func (c *Cluster) InstallDefinition(t *testing.T, definition *v1beta1.Applicatio
 	object.SetLabels(map[string]string{markers.ManagedBy: write.ManagedByValue})
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
-	if _, err := c.Writer().Create(ctx, write.SubjectCatalogueSync, write.Session{}, object); err != nil {
+	if _, err := c.Writer().Apply(ctx, write.SubjectCatalogueSync, write.Session{}, write.PartSpec, object); err != nil {
 		t.Fatalf("install definition %q: %v", definition.Name, err)
 	}
 }
@@ -70,6 +72,32 @@ metadata:
 data:
   mode: "acceptance"
 `
+
+// DefinitionContent builds a definition from explicit package content: the
+// template it renders, the hooks it runs and the data format it declares. Its
+// digest is computed from the content, as the catalogue does (C-32).
+func DefinitionContent(t *testing.T, name, dataFormat, template string, hooks []v1beta1.Hook, fields []v1beta1.ConfigField) *v1beta1.ApplicationDefinition {
+	t.Helper()
+	definition := &v1beta1.ApplicationDefinition{
+		TypeMeta:   metav1.TypeMeta{APIVersion: api.Group + "/v1beta1", Kind: "ApplicationDefinition"},
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: v1beta1.ApplicationDefinitionSpec{
+			Package:  v1beta1.PackageIdentity{Version: "1.0.0", DataFormat: dataFormat},
+			Config:   fields,
+			Template: template,
+			Hooks:    hooks,
+		},
+	}
+	digest, err := app.DefinitionDigest(definition.Spec)
+	if err != nil {
+		t.Fatalf("digest definition %q: %v", name, err)
+	}
+	definition.Spec.Package.Digest = digest
+	if err := app.ValidateDefinition(definition.Spec); err != nil {
+		t.Fatalf("definition %q is invalid: %v", name, err)
+	}
+	return definition
+}
 
 // Definition builds a definition that renders one ConfigMap and carries the
 // given capability requirements. Its package digest is computed from the

@@ -14,6 +14,7 @@ import (
 	"github.com/tsic404/kos/api/v1beta1"
 	"github.com/tsic404/kos/pkg/app"
 	"github.com/tsic404/kos/pkg/markers"
+	"github.com/tsic404/kos/pkg/state"
 	"github.com/tsic404/kos/pkg/write"
 )
 
@@ -25,8 +26,11 @@ type actionRequest struct {
 	Namespace string `json:"namespace"`
 	// Name is the application's name.
 	Name string `json:"name"`
-	// Action is retry or orphan.
+	// Action is retry, orphan or confirm.
 	Action string `json:"action"`
+	// TargetDigest is the digest a confirmation accepts as the new baseline
+	// (C-35); only confirm carries it.
+	TargetDigest string `json:"targetDigest,omitempty"`
 }
 
 // actionResponse accepts an action and names the records it wrote (C-12).
@@ -63,6 +67,11 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	}
 	switch request.Action {
 	case app.ActionRetry, app.ActionOrphan:
+	case app.ActionConfirm:
+		if request.TargetDigest == "" {
+			writeError(w, invalidField("确认必须给出目标摘要"))
+			return
+		}
 	default:
 		writeError(w, invalidField("未知动作 "+request.Action))
 		return
@@ -95,7 +104,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	record, created, failure := s.writeActionRecord(ctx, request.Action, application)
+	record, created, failure := s.writeActionRecord(ctx, request.Action, application, request.TargetDigest)
 	if failure != nil {
 		writeError(w, failure)
 		return
@@ -108,7 +117,11 @@ func acceptAction(action string, application *v1beta1.Application) *Error {
 	switch action {
 	case app.ActionRetry:
 		if application.Status.Phase != app.PhaseFailed {
-			return invalidField("retry 只对 Failed 的应用有效")
+			// A rolled-back upgrade is retried the same way: the application
+			// stays Ready and the record clears the failed attempt (C-34).
+			if application.Status.Upgrade == nil || !application.Status.Upgrade.RolledBack {
+				return invalidField("retry 只对 Failed 或已回滚升级的应用有效")
+			}
 		}
 	case app.ActionOrphan:
 		if application.Status.Phase != app.PhaseUninstalling {
@@ -120,19 +133,41 @@ func acceptAction(action string, application *v1beta1.Application) *Error {
 		if !application.Status.Uninstall.Stalled {
 			return invalidField("orphan 只在卸载阻塞超过十分钟后可用；先修复阻塞对象")
 		}
+	case app.ActionConfirm:
+		condition, present := state.Find(application.Status.Conditions, api.ConditionReconciled)
+		if !present || condition.Status != metav1.ConditionFalse || condition.Reason != app.ReasonExternalChangePending {
+			return invalidField("confirm 只对外部改动待确认的应用有效")
+		}
 	}
 	return nil
 }
 
 // writeActionRecord writes the one-shot record of one action. A record already
-// in place makes the request idempotent (C-12).
-func (s *Server) writeActionRecord(ctx context.Context, action string, application *v1beta1.Application) (*unstructured.Unstructured, bool, *Error) {
+// in place makes the request idempotent (C-12). A confirmation also carries the
+// digest of the spec that was stored when the user submitted it, so the
+// reconciler judges the three-way agreement of C-35.
+func (s *Server) writeActionRecord(ctx context.Context, action string, application *v1beta1.Application, targetDigest string) (*unstructured.Unstructured, bool, *Error) {
 	uid := string(application.UID)
+	data := map[string]any{
+		app.ActionDataKey: application.Namespace + "/" + application.Name,
+	}
+	if action == app.ActionConfirm {
+		digest, err := app.SpecDigest(application.Spec)
+		if err != nil {
+			return nil, false, internal(StageApply, "计算应用 spec 摘要失败").about(kernelRef("Application", application.Namespace, application.Name))
+		}
+		data[app.ActionTargetDigestKey] = targetDigest
+		data[app.ActionSpecDigestKey] = digest
+	}
+	name := app.ActionRecordName(uid, action)
+	if action == app.ActionConfirm {
+		name = app.ConfirmRecordName(uid, targetDigest)
+	}
 	record := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "v1",
 		"kind":       "ConfigMap",
 		"metadata": map[string]any{
-			"name":      app.ActionRecordName(uid, action),
+			"name":      name,
 			"namespace": api.SystemNamespace,
 			"labels": map[string]any{
 				markers.ManagedBy:    write.ManagedByValue,
@@ -140,9 +175,7 @@ func (s *Server) writeActionRecord(ctx context.Context, action string, applicati
 				app.ActionOwnerLabel: uid,
 			},
 		},
-		"data": map[string]any{
-			app.ActionDataKey: application.Namespace + "/" + application.Name,
-		},
+		"data": data,
 	}}
 	resource := s.dynamic.Resource(configMapType.GVR()).Namespace(api.SystemNamespace)
 	created, err := resource.Create(ctx, record, metav1.CreateOptions{})

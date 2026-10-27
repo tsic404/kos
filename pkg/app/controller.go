@@ -47,6 +47,18 @@ const (
 	ConditionRetrying              = "Retrying"
 	ConditionFailed                = "Failed"
 	ConditionUninstallBlocked      = "UninstallBlocked"
+	ConditionIrreversibleUpgrade   = "IrreversibleUpgrade"
+	ConditionMigrationRequired     = "MigrationRequired"
+	ConditionDrifted               = "Drifted"
+	ConditionUpgradeFailed         = "UpgradeFailed"
+)
+
+// Reasons of the Reconciled condition the application controller writes itself
+// (C-34, C-35).
+const (
+	// ReasonExternalChangePending is the pause an external write forces on an
+	// application whose upgrade declares an irreversible change (C-35).
+	ReasonExternalChangePending = "ExternalChangePending"
 )
 
 // Finalizer is what keeps a deleting application observable until its
@@ -74,6 +86,10 @@ var failureConditions = []string{
 	ConditionRetrying,
 	ConditionFailed,
 	ConditionUninstallBlocked,
+	ConditionIrreversibleUpgrade,
+	ConditionMigrationRequired,
+	ConditionDrifted,
+	ConditionUpgradeFailed,
 }
 
 // Store is the object access one application round needs. NewWriterStore is the
@@ -83,7 +99,9 @@ type Store interface {
 	Get(ctx context.Context, ref write.Ref) (*unstructured.Unstructured, error)
 	// List reads the objects of one resource matching a label selector.
 	List(ctx context.Context, resource schema.GroupVersionResource, namespace, selector string) ([]unstructured.Unstructured, error)
-	// Apply writes one rendered object into its namespace (C-04).
+	// Apply writes one rendered object into its namespace (C-04). The
+	// reconciler is the writer of its downstream objects, so the desired value
+	// wins against a write made outside KOS (C-35).
 	Apply(ctx context.Context, namespace string, document *unstructured.Unstructured) (*unstructured.Unstructured, error)
 	// ApplyStatus writes the status of one application (C-03).
 	ApplyStatus(ctx context.Context, document *unstructured.Unstructured) (*unstructured.Unstructured, error)
@@ -94,6 +112,8 @@ type Store interface {
 	Delete(ctx context.Context, namespace string, ref write.Ref) error
 	// SetFinalizers writes the finalizer list of one application (C-33).
 	SetFinalizers(ctx context.Context, ref write.Ref, finalizers []string) (*unstructured.Unstructured, error)
+	// RecordEvent appends one event to the application's stream (C-64).
+	RecordEvent(ctx context.Context, application *v1beta1.Application, eventType, reason, message string, now time.Time) error
 }
 
 // CapabilitySource lists the capabilities providers register (C-09).
@@ -111,6 +131,9 @@ func (s StaticCapabilities) Capabilities(context.Context) ([]Capability, error) 
 type Options struct {
 	// Capabilities supplies the registered capabilities; nil registers none.
 	Capabilities CapabilitySource
+	// Volumes answers the volume facts the upgrade preflight reads; nil reads
+	// the Volume objects the application declares.
+	Volumes VolumeSource
 	// Clock supplies the round time; defaults to time.Now.
 	Clock func() time.Time
 }
@@ -120,14 +143,18 @@ type Options struct {
 type Controller struct {
 	store        Store
 	capabilities CapabilitySource
+	volumes      VolumeSource
 	clock        func() time.Time
 }
 
 // NewController builds a controller over one store.
 func NewController(store Store, options Options) *Controller {
-	controller := &Controller{store: store, capabilities: options.Capabilities, clock: options.Clock}
+	controller := &Controller{store: store, capabilities: options.Capabilities, volumes: options.Volumes, clock: options.Clock}
 	if controller.capabilities == nil {
 		controller.capabilities = StaticCapabilities(nil)
+	}
+	if controller.volumes == nil {
+		controller.volumes = storeVolumes{store: store}
 	}
 	if controller.clock == nil {
 		controller.clock = time.Now
@@ -169,6 +196,9 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	}
 	if action == ActionRetry {
 		return c.retry(ctx, application, record, now)
+	}
+	if action == ActionConfirm {
+		return c.confirm(ctx, application, record, now)
 	}
 	if record != nil {
 		// An orphan without an uninstall has nothing to abandon; drop it so it
@@ -229,7 +259,7 @@ func (c *Controller) install(ctx context.Context, application *v1beta1.Applicati
 
 	// The move out of Pending is observable as its own phase before any
 	// downstream write happens (C-33, TC-54).
-	if application.Status.Phase != PhaseInstalling && application.Status.Phase != PhaseReady {
+	if application.Status.Phase != PhaseInstalling && application.Status.Phase != PhaseReady && application.Status.Phase != PhaseUpgrading {
 		status := baseStatus(application)
 		status.Phase = PhaseInstalling
 		resetBudget(&status)
@@ -241,48 +271,18 @@ func (c *Controller) install(ctx context.Context, application *v1beta1.Applicati
 		return reconcile.Result{RequeueAfter: retryAt.Sub(now)}, nil
 	}
 
-	objects, err := Render(definition.Spec, RenderInput{
-		Name:      application.Name,
-		Namespace: application.Spec.Namespace,
-		Config:    resolved,
-		Volumes:   volumeClaims(application.Spec.Volumes),
-	})
+	// A ready application is judged by the baseline it applied, not by a fresh
+	// render: a catalogue update alone never changes installed objects, and a
+	// spec write is the upgrade request of C-34.
+	if application.Status.Phase == PhaseReady || application.Status.Phase == PhaseUpgrading {
+		return c.steady(ctx, application, definition, resolved, comparison, now)
+	}
+
+	next, err := c.buildTarget(application, definition, resolved)
 	if err != nil {
 		return c.fail(ctx, application, ConditionInvalidPackage, err.Error())
 	}
-
-	// rendered starts from what earlier rounds wrote, and every successful apply
-	// joins it. A failure therefore leaves everything this application already
-	// wrote visible to a later uninstall (C-33).
-	rendered := append([]v1beta1.ObjectRef(nil), application.Status.Rendered...)
-	observed := make([]*unstructured.Unstructured, 0, len(objects))
-	for _, object := range objects {
-		stampOwner(object, string(application.UID))
-		applied, err := c.store.Apply(ctx, application.Spec.Namespace, object)
-		if err != nil {
-			application.Status.Rendered = rendered
-			if permanent(err) {
-				return c.fail(ctx, application, ConditionInvalidPackage, err.Error())
-			}
-			return c.recordFailure(ctx, application, now, err.Error())
-		}
-		rendered = appendUniqueRef(rendered, objectRefOf(applied))
-		observed = append(observed, applied)
-	}
-
-	status := baseStatus(application)
-	status.Phase = PhaseReady
-	status.Rendered = rendered
-	resetBudget(&status)
-	status.Conditions = state.Set(status.Conditions, state.Applied(application.Generation, "desired state applied"))
-	// Health reads the stored objects, whose status carries the ready replicas;
-	// the desired documents never do (C-08).
-	status.Health = v1beta1.Health{State: applicationHealth(observed, comparison)}
-	if len(comparison.Unsatisfied) > 0 {
-		message := "guarantees not met: " + strings.Join(comparison.Unsatisfied, ", ")
-		status.Conditions = withFailure(status.Conditions, application.Generation, ConditionCapabilityUnsatisfied, message)
-	}
-	return reconcile.Result{RequeueAfter: readyResync}, c.writeStatus(ctx, application, status)
+	return c.recordBaseline(ctx, application, next, comparison, now)
 }
 
 // block writes a blocked state with the reason a prerequisite is missing
@@ -377,6 +377,23 @@ func (c *Controller) recordFailure(ctx context.Context, application *v1beta1.App
 // retry consumes a retry action: the budget resets, the phase returns to
 // Installing and no attempt runs in the same round (C-33).
 func (c *Controller) retry(ctx context.Context, application *v1beta1.Application, record *unstructured.Unstructured, now time.Time) (reconcile.Result, error) {
+	if application.Status.Phase != PhaseFailed && rolledBackReport(application) != nil {
+		// A rolled-back upgrade is retried by the user, not by the schedule:
+		// clearing the record lets the next round attempt the target again while
+		// the application stays Ready (C-34).
+		status := baseStatus(application)
+		status.Phase = application.Status.Phase
+		status.Upgrade = nil
+		meta.RemoveStatusCondition(&status.Conditions, ConditionUpgradeFailed)
+		status.Conditions = state.Set(status.Conditions, state.Applied(application.Generation, "the upgrade will be attempted again"))
+		if err := c.writeStatus(ctx, application, status); err != nil {
+			return reconcile.Result{}, err
+		}
+		if err := c.deleteRecord(ctx, record); err != nil {
+			return reconcile.Result{}, err
+		}
+		return reconcile.Result{RequeueAfter: time.Second}, nil
+	}
 	status := baseStatus(application)
 	resetBudget(&status)
 	status.Phase = PhaseInstalling
@@ -653,6 +670,9 @@ func baseStatus(application *v1beta1.Application) v1beta1.ApplicationStatus {
 		RetryCount:  application.Status.RetryCount,
 		NextRetryAt: application.Status.NextRetryAt,
 		Rendered:    append([]v1beta1.ObjectRef(nil), application.Status.Rendered...),
+		Applied:     application.Status.Applied,
+		Upgrade:     application.Status.Upgrade,
+		Drift:       append([]v1beta1.DriftEntry(nil), application.Status.Drift...),
 	}
 }
 
@@ -661,6 +681,15 @@ func baseStatus(application *v1beta1.Application) v1beta1.ApplicationStatus {
 func resetBudget(status *v1beta1.ApplicationStatus) {
 	status.RetryCount = 0
 	status.NextRetryAt = nil
+}
+
+// clearFailures removes every failure condition of a round that found nothing
+// to report; C-07 keeps a condition only while it applies.
+func clearFailures(conditions []metav1.Condition) []metav1.Condition {
+	for _, other := range failureConditions {
+		meta.RemoveStatusCondition(&conditions, other)
+	}
+	return conditions
 }
 
 // withFailure sets one failure condition and removes the ones that no longer

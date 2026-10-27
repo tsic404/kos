@@ -49,6 +49,15 @@ spec:
                   DefinitionRef names the application definition the application was
                   installed from (C-32).
                 type: string
+              driftPolicy:
+                description: |-
+                  DriftPolicy decides what happens when a downstream object is written
+                  outside KOS (C-35); empty reads as reconcile.
+                enum:
+                - reconcile
+                - adopt
+                - ignore
+                type: string
               namespace:
                 description: |-
                   Namespace is the namespace the application declares for everything it
@@ -86,6 +95,50 @@ spec:
             description: Status is written by the application reconciler (C-03, C-07,
               C-33).
             properties:
+              applied:
+                description: |-
+                  Applied is the baseline the last completed install or upgrade established
+                  (C-34).
+                properties:
+                  config:
+                    description: Config is the resolved config the baseline rendered
+                      with (C-34).
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  dataFormat:
+                    description: DataFormat is the data format the package declared
+                      (C-34).
+                    type: string
+                  definitionDigest:
+                    description: |-
+                      DefinitionDigest is the package digest the baseline rendered from
+                      (C-32, C-34).
+                    type: string
+                  render:
+                    description: |-
+                      Render is the manifest set the baseline wrote. It is kept so an automatic
+                      rollback re-applies the previous manifests and an external write is told
+                      from the desired shape (C-34, C-35).
+                    items:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    type: array
+                  renderDigest:
+                    description: |-
+                      RenderDigest is the digest of the manifest set the baseline wrote
+                      (C-34, C-35).
+                    type: string
+                  specDigest:
+                    description: SpecDigest is the digest of the user spec the baseline
+                      answers (C-34).
+                    type: string
+                  volumes:
+                    description: Volumes are the volume declarations the baseline
+                      was applied with (C-34).
+                    items:
+                      type: string
+                    type: array
+                type: object
               conditions:
                 description: Conditions carries Reconciled and the object's failure
                   conditions (C-07).
@@ -147,6 +200,54 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              drift:
+                description: |-
+                  Drift carries the downstream values an external write changed and the
+                  adopt policy accepted (C-35).
+                items:
+                  description: |-
+                    DriftEntry is one downstream value written outside KOS and recorded under the
+                    adopt policy (C-35).
+                  properties:
+                    expected:
+                      description: Expected is the value KOS renders, as JSON (C-35).
+                      type: string
+                    external:
+                      description: External is the value found outside KOS, as JSON
+                        (C-35).
+                      type: string
+                    object:
+                      description: Object is the object the value was found on.
+                      properties:
+                        group:
+                          description: Group is the API group; empty for the core
+                            group.
+                          type: string
+                        kind:
+                          description: Kind is the object kind.
+                          type: string
+                        name:
+                          description: Name is the object name.
+                          type: string
+                        namespace:
+                          description: Namespace is the object namespace; empty for
+                            cluster-scoped objects.
+                          type: string
+                        version:
+                          description: Version is the object version.
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      type: object
+                    path:
+                      description: Path is the field path of the value.
+                      type: string
+                  required:
+                  - object
+                  - path
+                  type: object
+                type: array
               health:
                 description: Health is the availability axis of the object (C-08).
                 properties:
@@ -244,6 +345,169 @@ spec:
                     description: Stalled reports a block that has outlasted the stall
                       window.
                     type: boolean
+                type: object
+              upgrade:
+                description: Upgrade is the preflight report of a requested upgrade
+                  (C-34, C-35).
+                properties:
+                  configChanges:
+                    description: ConfigChanges lists the config fields the upgrade
+                      rewrites (C-34).
+                    items:
+                      description: |-
+                        ConfigChange is one config field an upgrade rewrites (C-34). Values are
+                        rendered as JSON so a change keeps its shape.
+                      properties:
+                        field:
+                          description: Field is the config field name.
+                          type: string
+                        from:
+                          description: From is the value the baseline held, as JSON.
+                          type: string
+                        to:
+                          description: To is the value the upgrade writes, as JSON.
+                          type: string
+                      required:
+                      - field
+                      type: object
+                    type: array
+                  irreversible:
+                    description: Irreversible lists the items the preflight refuses
+                      (C-34).
+                    items:
+                      description: |-
+                        IrreversibleItem is one upgrade item the preflight refuses; no confirmation
+                        bypasses it (C-34).
+                      properties:
+                        detail:
+                          description: Detail explains why KOS cannot perform the
+                            upgrade.
+                          type: string
+                        kind:
+                          description: Kind is volumeShrink, volumeDelete or dataFormat.
+                          type: string
+                        object:
+                          description: Object is the object the item is about.
+                          properties:
+                            group:
+                              description: Group is the API group; empty for the core
+                                group.
+                              type: string
+                            kind:
+                              description: Kind is the object kind.
+                              type: string
+                            name:
+                              description: Name is the object name.
+                              type: string
+                            namespace:
+                              description: Namespace is the object namespace; empty
+                                for cluster-scoped objects.
+                              type: string
+                            version:
+                              description: Version is the object version.
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                      required:
+                      - kind
+                      type: object
+                    type: array
+                  migrations:
+                    description: |-
+                      Migrations names the migration objects a storage-class change requires
+                      (C-34).
+                    items:
+                      description: ObjectRef identifies one object inside a status
+                        list.
+                      properties:
+                        group:
+                          description: Group is the API group; empty for the core
+                            group.
+                          type: string
+                        kind:
+                          description: Kind is the object kind.
+                          type: string
+                        name:
+                          description: Name is the object name.
+                          type: string
+                        namespace:
+                          description: Namespace is the object namespace; empty for
+                            cluster-scoped objects.
+                          type: string
+                        version:
+                          description: Version is the object version.
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      type: object
+                    type: array
+                  renderChanges:
+                    description: |-
+                      RenderChanges lists the manifests the upgrade creates, rewrites or drops
+                      (C-34).
+                    items:
+                      description: RenderChange is one manifest an upgrade creates,
+                        rewrites or drops (C-34).
+                      properties:
+                        fields:
+                          description: Fields lists the changed field paths of an
+                            update, sorted.
+                          items:
+                            type: string
+                          type: array
+                        object:
+                          description: Object is the manifest the change is about.
+                          properties:
+                            group:
+                              description: Group is the API group; empty for the core
+                                group.
+                              type: string
+                            kind:
+                              description: Kind is the object kind.
+                              type: string
+                            name:
+                              description: Name is the object name.
+                              type: string
+                            namespace:
+                              description: Namespace is the object namespace; empty
+                                for cluster-scoped objects.
+                              type: string
+                            version:
+                              description: Version is the object version.
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        operation:
+                          description: Operation is create, update or delete.
+                          type: string
+                      required:
+                      - object
+                      - operation
+                      type: object
+                    type: array
+                  renderDigest:
+                    description: |-
+                      RenderDigest is the digest of the manifest set the target renders; a
+                      confirmation of an external change names it (C-34, C-35).
+                    type: string
+                  rolledBack:
+                    description: |-
+                      RolledBack reports that this target was applied and reverted; KOS does
+                      not attempt the same target again (C-34).
+                    type: boolean
+                  specDigest:
+                    description: SpecDigest is the digest of the spec that requests
+                      the target (C-34).
+                    type: string
+                  target:
+                    description: Target is the package digest the current spec names
+                      (C-34).
+                    type: string
                 type: object
             type: object
         type: object
@@ -286,6 +550,15 @@ spec:
                   DefinitionRef names the application definition the application was
                   installed from (C-32).
                 type: string
+              driftPolicy:
+                description: |-
+                  DriftPolicy decides what happens when a downstream object is written
+                  outside KOS (C-35); empty reads as reconcile.
+                enum:
+                - reconcile
+                - adopt
+                - ignore
+                type: string
               namespace:
                 description: |-
                   Namespace is the namespace the application declares for everything it
@@ -323,6 +596,50 @@ spec:
             description: Status is written by the application reconciler (C-03, C-07,
               C-33).
             properties:
+              applied:
+                description: |-
+                  Applied is the baseline the last completed install or upgrade established
+                  (C-34).
+                properties:
+                  config:
+                    description: Config is the resolved config the baseline rendered
+                      with (C-34).
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  dataFormat:
+                    description: DataFormat is the data format the package declared
+                      (C-34).
+                    type: string
+                  definitionDigest:
+                    description: |-
+                      DefinitionDigest is the package digest the baseline rendered from
+                      (C-32, C-34).
+                    type: string
+                  render:
+                    description: |-
+                      Render is the manifest set the baseline wrote. It is kept so an automatic
+                      rollback re-applies the previous manifests and an external write is told
+                      from the desired shape (C-34, C-35).
+                    items:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    type: array
+                  renderDigest:
+                    description: |-
+                      RenderDigest is the digest of the manifest set the baseline wrote
+                      (C-34, C-35).
+                    type: string
+                  specDigest:
+                    description: SpecDigest is the digest of the user spec the baseline
+                      answers (C-34).
+                    type: string
+                  volumes:
+                    description: Volumes are the volume declarations the baseline
+                      was applied with (C-34).
+                    items:
+                      type: string
+                    type: array
+                type: object
               conditions:
                 description: Conditions carries Reconciled and the object's failure
                   conditions (C-07).
@@ -384,6 +701,54 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              drift:
+                description: |-
+                  Drift carries the downstream values an external write changed and the
+                  adopt policy accepted (C-35).
+                items:
+                  description: |-
+                    DriftEntry is one downstream value written outside KOS and recorded under the
+                    adopt policy (C-35).
+                  properties:
+                    expected:
+                      description: Expected is the value KOS renders, as JSON (C-35).
+                      type: string
+                    external:
+                      description: External is the value found outside KOS, as JSON
+                        (C-35).
+                      type: string
+                    object:
+                      description: Object is the object the value was found on.
+                      properties:
+                        group:
+                          description: Group is the API group; empty for the core
+                            group.
+                          type: string
+                        kind:
+                          description: Kind is the object kind.
+                          type: string
+                        name:
+                          description: Name is the object name.
+                          type: string
+                        namespace:
+                          description: Namespace is the object namespace; empty for
+                            cluster-scoped objects.
+                          type: string
+                        version:
+                          description: Version is the object version.
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      type: object
+                    path:
+                      description: Path is the field path of the value.
+                      type: string
+                  required:
+                  - object
+                  - path
+                  type: object
+                type: array
               health:
                 description: Health is the availability axis of the object (C-08).
                 properties:
@@ -481,6 +846,169 @@ spec:
                     description: Stalled reports a block that has outlasted the stall
                       window.
                     type: boolean
+                type: object
+              upgrade:
+                description: Upgrade is the preflight report of a requested upgrade
+                  (C-34, C-35).
+                properties:
+                  configChanges:
+                    description: ConfigChanges lists the config fields the upgrade
+                      rewrites (C-34).
+                    items:
+                      description: |-
+                        ConfigChange is one config field an upgrade rewrites (C-34). Values are
+                        rendered as JSON so a change keeps its shape.
+                      properties:
+                        field:
+                          description: Field is the config field name.
+                          type: string
+                        from:
+                          description: From is the value the baseline held, as JSON.
+                          type: string
+                        to:
+                          description: To is the value the upgrade writes, as JSON.
+                          type: string
+                      required:
+                      - field
+                      type: object
+                    type: array
+                  irreversible:
+                    description: Irreversible lists the items the preflight refuses
+                      (C-34).
+                    items:
+                      description: |-
+                        IrreversibleItem is one upgrade item the preflight refuses; no confirmation
+                        bypasses it (C-34).
+                      properties:
+                        detail:
+                          description: Detail explains why KOS cannot perform the
+                            upgrade.
+                          type: string
+                        kind:
+                          description: Kind is volumeShrink, volumeDelete or dataFormat.
+                          type: string
+                        object:
+                          description: Object is the object the item is about.
+                          properties:
+                            group:
+                              description: Group is the API group; empty for the core
+                                group.
+                              type: string
+                            kind:
+                              description: Kind is the object kind.
+                              type: string
+                            name:
+                              description: Name is the object name.
+                              type: string
+                            namespace:
+                              description: Namespace is the object namespace; empty
+                                for cluster-scoped objects.
+                              type: string
+                            version:
+                              description: Version is the object version.
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                      required:
+                      - kind
+                      type: object
+                    type: array
+                  migrations:
+                    description: |-
+                      Migrations names the migration objects a storage-class change requires
+                      (C-34).
+                    items:
+                      description: ObjectRef identifies one object inside a status
+                        list.
+                      properties:
+                        group:
+                          description: Group is the API group; empty for the core
+                            group.
+                          type: string
+                        kind:
+                          description: Kind is the object kind.
+                          type: string
+                        name:
+                          description: Name is the object name.
+                          type: string
+                        namespace:
+                          description: Namespace is the object namespace; empty for
+                            cluster-scoped objects.
+                          type: string
+                        version:
+                          description: Version is the object version.
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      type: object
+                    type: array
+                  renderChanges:
+                    description: |-
+                      RenderChanges lists the manifests the upgrade creates, rewrites or drops
+                      (C-34).
+                    items:
+                      description: RenderChange is one manifest an upgrade creates,
+                        rewrites or drops (C-34).
+                      properties:
+                        fields:
+                          description: Fields lists the changed field paths of an
+                            update, sorted.
+                          items:
+                            type: string
+                          type: array
+                        object:
+                          description: Object is the manifest the change is about.
+                          properties:
+                            group:
+                              description: Group is the API group; empty for the core
+                                group.
+                              type: string
+                            kind:
+                              description: Kind is the object kind.
+                              type: string
+                            name:
+                              description: Name is the object name.
+                              type: string
+                            namespace:
+                              description: Namespace is the object namespace; empty
+                                for cluster-scoped objects.
+                              type: string
+                            version:
+                              description: Version is the object version.
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          type: object
+                        operation:
+                          description: Operation is create, update or delete.
+                          type: string
+                      required:
+                      - object
+                      - operation
+                      type: object
+                    type: array
+                  renderDigest:
+                    description: |-
+                      RenderDigest is the digest of the manifest set the target renders; a
+                      confirmation of an external change names it (C-34, C-35).
+                    type: string
+                  rolledBack:
+                    description: |-
+                      RolledBack reports that this target was applied and reverted; KOS does
+                      not attempt the same target again (C-34).
+                    type: boolean
+                  specDigest:
+                    description: SpecDigest is the digest of the spec that requests
+                      the target (C-34).
+                    type: string
+                  target:
+                    description: Target is the package digest the current spec names
+                      (C-34).
+                    type: string
                 type: object
             type: object
         type: object
