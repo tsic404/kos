@@ -103,7 +103,7 @@ func Validate(ctx context.Context, namespace string, spec v1beta1.EndpointSpec, 
 		if spec.ServiceName != "" {
 			return field("spec.serviceName", "在 http.host 形态中禁止")
 		}
-		return nil
+		return checkForwardAuth(spec)
 	case v1beta1.EndpointKindHTTPPath:
 		if failure := checkHost(spec.Host); failure != nil {
 			return failure
@@ -119,6 +119,9 @@ func Validate(ctx context.Context, namespace string, spec v1beta1.EndpointSpec, 
 		}
 		if spec.ServiceName != "" {
 			return field("spec.serviceName", "在 http.path 形态中禁止")
+		}
+		if failure := checkForwardAuth(spec); failure != nil {
+			return failure
 		}
 		return checkPathPrefix(ctx, namespace, spec, facts)
 	case v1beta1.EndpointKindTCP, v1beta1.EndpointKindUDP:
@@ -164,6 +167,16 @@ func Validate(ctx context.Context, namespace string, spec v1beta1.EndpointSpec, 
 	default:
 		return fieldf("spec.kind", "取值 %q 不是 http.host、http.path、l4.tcp、l4.udp 或 mdns", spec.Kind)
 	}
+}
+
+// checkForwardAuth requires a provider component for the forward-auth mode
+// C-46 makes optional: an endpoint that names no auth provider is authenticated
+// by the application itself.
+func checkForwardAuth(spec v1beta1.EndpointSpec) *FieldError {
+	if spec.Auth != nil && spec.Auth.ProviderRef == "" {
+		return field("spec.auth.providerRef", "必填：forward-auth 必须绑定提供者组件")
+	}
+	return nil
 }
 
 // checkHost requires a hostname a URL can carry.

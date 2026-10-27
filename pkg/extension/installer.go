@@ -63,6 +63,14 @@ func (i *Installer) Install(ctx context.Context) (*Installation, error) {
 	if i.Dynamic == nil || i.Artifacts == nil || i.Status == nil {
 		return nil, errors.New("installer needs a dynamic client, an artifact source and a status writer")
 	}
+	// The gate runs first: a component whose deletion nothing blocks leaves the
+	// install set in this same pass, and one a dependent holds stays installed
+	// with the blocked condition already on it (C-17, C-48).
+	blocked, err := (&Gate{Dynamic: i.Dynamic, Resources: i.Resources, Status: i.Status}).Reconcile(ctx)
+	if err != nil {
+		return nil, err
+	}
+	held := BlockedNames(blocked)
 	resource, err := i.resource()
 	if err != nil {
 		return nil, err
@@ -76,6 +84,9 @@ func (i *Installer) Install(ctx context.Context) (*Installation, error) {
 	objects := make(map[string]*unstructured.Unstructured, len(list.Items))
 	for index := range list.Items {
 		object := &list.Items[index]
+		if object.GetDeletionTimestamp() != nil && !held[object.GetName()] {
+			continue
+		}
 		attribution, err := markers.AttributionOf(object.GetLabels())
 		if err != nil {
 			return nil, fmt.Errorf("component %s: %w", object.GetName(), err)

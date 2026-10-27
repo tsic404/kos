@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
@@ -40,6 +41,9 @@ type Entry struct {
 	TargetMissing bool `json:"targetMissing,omitempty"`
 	// Invalid carries a C-43 rejection; an invalid endpoint holds no keys.
 	Invalid *FieldError `json:"invalid,omitempty"`
+	// Certificate is the observed certificate state of an endpoint that
+	// serves TLS (C-46); nil when it serves none.
+	Certificate *Certificate `json:"certificate,omitempty"`
 }
 
 // EntryOf describes one endpoint without the reconciler's declaration checks:
@@ -201,10 +205,18 @@ type Projection struct {
 	SharedMedium bool `json:"sharedMedium,omitempty"`
 	// Note carries the security impact the panel must show (C-43).
 	Note string `json:"note,omitempty"`
+	// CertificateAlert is the expiry warning the network page shows; it is
+	// computed from the served certificate's validity (C-46, C-50).
+	CertificateAlert string `json:"certificateAlert,omitempty"`
 }
 
 // Projection returns every row ordered by reference.
 func (l *Ledger) Projection() []Projection {
+	return l.ProjectionAt(time.Now())
+}
+
+// ProjectionAt is Projection with the read clock the alert is computed against.
+func (l *Ledger) ProjectionAt(now time.Time) []Projection {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	entries := orderedEntries(l.entries)
@@ -218,6 +230,9 @@ func (l *Ledger) Projection() []Projection {
 		if entry.Spec.Kind == v1beta1.EndpointKindMDNS {
 			row.SharedMedium = true
 			row.Note = SharedMediumNote
+		}
+		if entry.Certificate != nil {
+			row.CertificateAlert = certificateExpiryAlert(*entry.Certificate, now)
 		}
 		projections = append(projections, row)
 	}

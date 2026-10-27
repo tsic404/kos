@@ -5,8 +5,8 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 <https://gitea.tsic.top/tsic/kos-design>，契约以 `docs/02-contracts.md` 为准。
 
 当前阶段交付内核对象模型、归属三态、写入路径、ABI、控制面 API、通用调和内核、
-扩展装载（包摘要、声明、九类贡献、依赖激活与可见性投影）、应用渲染与本地账号会话；
-不含升级回滚、停用与卸载、各贡献类自身的语义与 Provider 能力验证。
+扩展装载（包摘要、声明、九类贡献、依赖激活与可见性投影）、应用渲染、入口形态与证书状态、
+本地账号会话；不含升级回滚、停用与卸载、各贡献类自身的语义与 Provider 能力验证。
 
 ## 布局
 
@@ -27,7 +27,8 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `pkg/identity/` | 账号与会话：本地账号、锁定计数、一次性口令、会话边界与失效、自身数据库与每日导出 |
 | `pkg/adoption/` | 归属动作：接管、释放、放弃与接管前的不可变快照 |
 | `pkg/serial/` | 调和循环之外显式写入动作的按对象串行门（调和轮次由 `pkg/reconcile` 串行） |
-| `pkg/extension/` | C-17 至 C-20/C-28：包摘要、声明、九类贡献、依赖激活、可见性投影与贡献类控制器 |
+| `pkg/endpoint/` | C-43 至 C-46：五种入口形态、唯一性台账、应用反查、证书状态与组件依赖边 |
+| `pkg/extension/` | C-17 至 C-20/C-28/C-48：包摘要、声明、九类贡献、依赖激活、可见性投影、贡献类控制器与删除受阻门 |
 | `tests/acceptance/TC-27/` | 读投影带观测时间，超阈值标记陈旧 |
 | `tests/acceptance/TC-28/` | 同一写请求重复提交只产生一个对象 |
 | `tests/acceptance/TC-29/` | 四类失败的错误包络，断线后操作仍到终态 |
@@ -50,6 +51,8 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `tests/acceptance/TC-72/` | 自身数据库的每日导出与离线恢复 |
 | `tests/acceptance/TC-117/` | 登录失败同一结果、按登录名锁定与退出 |
 | `tests/acceptance/TC-118/` | 角色变更、改口令、停用与删除前置转移 |
+| `tests/acceptance/TC-79/` | 删除被入口依赖边引用的组件被阻塞并逐个列出依赖者 |
+| `tests/acceptance/TC-80/` | 入口证书状态一等项与到期前 14 天告警 |
 | `tests/acceptance/TC-1/` | 安装与卸载产品不改变内核 kind 集合；对象类只在其 API 组 |
 | `tests/acceptance/TC-2/` | 能力基线不变；扩展能力只在安装期间可读 |
 | `tests/acceptance/TC-3/` | 第一方与第三方同类贡献装载、权限判定与卸载一致 |
@@ -70,8 +73,9 @@ ApplicationDefinition 与 NodeDevice 没有 status 写者，因此没有 status 
 C-60 的 `spec.owner`（五类带所有者的对象）、C-59 的 `Application.spec.visibility`、
 C-17 的 `SystemComponent.spec.package`（工件引用与 sha256 摘要）、
 C-32 的 `Application.spec.definitionRef`/`namespace`/`config`/`volumes` 与定义侧
-`spec.package`/`config`/`template`/`hooks`/`chart`/`requires`，以及 C-33 的
-`status.retryCount`、`status.nextRetryAt`、`status.uninstall`。
+`spec.package`/`config`/`template`/`hooks`/`chart`/`requires`，C-33 的
+`status.retryCount`、`status.nextRetryAt`、`status.uninstall`，以及 C-46 的
+`Endpoint.status.certificate`（签发者、就绪、到期与告警窗口）与 `CertificateReady` 条件。
 
 ## ABI
 
@@ -156,7 +160,15 @@ KOS 不再写它；放弃写入 `declined`，对象留在 unmanaged，不再被�
 - **组件状态**：`Installer` 以组件调和者的身份写 `status`，含 `phase`、`health` 与
   `PackageVerified`、`DependenciesMet`、`ContributionsLoaded` 三个条件；状态未变化时不写。
 
-停用、卸载、框架版本兼容与各贡献类自身的语义不在本阶段实现，分别属于独立契约。
+- **删除受阻**（C-17、C-46、C-48）：组件调和者在首次 install 轮给每个受管组件加 finalizer；
+  删除仍被入口依赖边引用的组件时对象停在 Terminating，`DeprovisionBlocked` 为真并逐个列出
+  依赖者，依赖消失后才释放。前提是门已附加：首次观察之前就删除的组件不被持有（apiserver
+  拒绝给删除中的对象新增 finalizer），按卸载退出装载集。依赖边有两条建立路径：入口 spec 的
+  `tls.issuerRef`/`auth.providerRef`，以及省略签发者时状态记录的解析结果；入口侧把证书状态
+  写成 `status.certificate` 与 `CertificateReady` 条件，投影对到期窗口内的证书给出告警。
+
+停用、扩展数据保留、框架版本兼容与各贡献类自身的语义不在本阶段实现，分别属于独立契约；
+组件删除只做依赖检查阻塞，被阻塞期间的数据与工作负载处理不在本阶段。
 
 ## 调和与状态轴
 
