@@ -92,6 +92,9 @@ type Config struct {
 	// readable, and that shape is refused (ADR-008: path prefixes are off by
 	// default).
 	EndpointFacts endpoint.Facts
+	// VolumeExpansion answers C-38's expansion preflight a capacity plan
+	// reports; nil leaves such plans without a preflight warning.
+	VolumeExpansion VolumeExpansion
 	// Now supplies the read clock; defaults to time.Now.
 	Now func() time.Time
 	// OperationTimeout bounds one accepted write; defaults to two minutes.
@@ -104,18 +107,19 @@ type Config struct {
 // Server is the control plane API. It holds the cluster client and never hands
 // one to a caller (C-13, F9).
 type Server struct {
-	dynamic       dynamic.Interface
-	source        ObjectSource
-	extensions    ExtensionKinds
-	controllers   ControllerAvailability
-	authorizer    Authorizer
-	endpointFacts endpoint.Facts
-	now           func() time.Time
-	timeout       time.Duration
-	log           *slog.Logger
-	operations    context.Context
-	stop          context.CancelFunc
-	mux           *http.ServeMux
+	dynamic         dynamic.Interface
+	source          ObjectSource
+	extensions      ExtensionKinds
+	controllers     ControllerAvailability
+	authorizer      Authorizer
+	endpointFacts   endpoint.Facts
+	volumeExpansion VolumeExpansion
+	now             func() time.Time
+	timeout         time.Duration
+	log             *slog.Logger
+	operations      context.Context
+	stop            context.CancelFunc
+	mux             *http.ServeMux
 }
 
 // New builds the API surface.
@@ -124,15 +128,16 @@ func New(config Config) (*Server, error) {
 		return nil, errors.New("controlplane: a dynamic client is required")
 	}
 	server := &Server{
-		dynamic:       config.Dynamic,
-		source:        config.Source,
-		extensions:    config.Extensions,
-		controllers:   config.Controllers,
-		authorizer:    config.Authorizer,
-		endpointFacts: config.EndpointFacts,
-		now:           config.Now,
-		timeout:       config.OperationTimeout,
-		log:           config.Log,
+		dynamic:         config.Dynamic,
+		source:          config.Source,
+		extensions:      config.Extensions,
+		controllers:     config.Controllers,
+		authorizer:      config.Authorizer,
+		endpointFacts:   config.EndpointFacts,
+		volumeExpansion: config.VolumeExpansion,
+		now:             config.Now,
+		timeout:         config.OperationTimeout,
+		log:             config.Log,
 	}
 	if server.source == nil {
 		server.source = NewClusterSource(config.Dynamic)
@@ -259,6 +264,10 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 	end := min(start+size, len(projections))
 	page := projections[start:end]
+	if failure := s.attachVolumeBindings(r.Context(), page); failure != nil {
+		writeError(w, failure)
+		return
+	}
 	response := listResponse{Items: page}
 	if end < len(projections) {
 		response.Continue = encodePageToken(objectType, namespace, selector.String(), targetApp, page[len(page)-1].Ref.String())
@@ -296,7 +305,12 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure)
 		return
 	}
-	writeJSON(w, http.StatusOK, newProjection(refOf(masked, objectType), masked, observed.ObservedAt, s.now()))
+	page := []Projection{newProjection(refOf(masked, objectType), masked, observed.ObservedAt, s.now())}
+	if failure := s.attachVolumeBindings(r.Context(), page); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	writeJSON(w, http.StatusOK, page[0])
 }
 
 // handleCreate writes one object idempotently: the same request submitted twice

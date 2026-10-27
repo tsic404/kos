@@ -39,15 +39,66 @@ spec:
           spec:
             description: Spec is the desired state owned by the user (C-03).
             properties:
+              capacity:
+                description: Capacity is the size the claim requests and expands to
+                  (C-38).
+                type: string
+              mobility:
+                description: |-
+                  Mobility is how far the volume can move with its data; it is required
+                  and has no default (C-38, ADR-006).
+                enum:
+                - node-local
+                - cluster-movable
+                - shared-rwx
+                type: string
               owner:
                 description: |-
                   Owner is the local username of the creating session; the API writes it
                   and only the global Owner may transfer it (C-60).
                 type: string
+              purgeToken:
+                description: |-
+                  PurgeToken authorizes deleting the claim: only the volume's own name
+                  deletes it (C-39).
+                type: string
+              storageClass:
+                description: |-
+                  StorageClass is the backend policy of the claim. A package may not
+                  declare it, so it lives on the volume (C-32, C-38).
+                type: string
             type: object
           status:
-            description: Status is written by the volume reconciler (C-03, C-07).
+            description: Status is written by the volume reconciler (C-03, C-07, C-38).
             properties:
+              boundClaim:
+                description: |-
+                  BoundClaim is the claim the volume is bound to; before a migration it
+                  equals the volume name (C-38, C-40).
+                type: string
+              capabilities:
+                description: |-
+                  Capabilities is the capability set the backend resolved, each an item
+                  carrying a name and a version (C-38).
+                items:
+                  description: |-
+                    VolumeCapability is one capability a volume backend resolved, with the
+                    version it resolved at (C-09, C-38).
+                  properties:
+                    name:
+                      description: Name is the capability name.
+                      type: string
+                    version:
+                      description: Version is the resolved capability version.
+                      type: string
+                  required:
+                  - name
+                  - version
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               conditions:
                 description: Conditions carries Reconciled and the object's failure
                   conditions (C-07).
@@ -121,8 +172,32 @@ spec:
                     - Unknown
                     type: string
                 type: object
+              node:
+                description: Node is the node a node-local volume is bound to (C-38).
+                type: string
               phase:
                 description: Phase is the flow stage; it is orthogonal to health (C-07).
+                type: string
+              provider:
+                description: Provider is the storage provider the claim resolved to
+                  (C-38).
+                properties:
+                  name:
+                    description: Name is the provisioner or driver name.
+                    type: string
+                  version:
+                    description: Version is the backend version when it reports one.
+                    type: string
+                type: object
+              reclaimPolicy:
+                description: |-
+                  ReclaimPolicy is the policy the resolved volume carries; KOS never
+                  rewrites it (C-39).
+                type: string
+              snapshotConsistency:
+                description: |-
+                  SnapshotConsistency is the consistency a snapshot of this volume can
+                  reach; it is crash-consistent for shared-rwx (C-38).
                 type: string
             type: object
         type: object
@@ -155,15 +230,66 @@ spec:
           spec:
             description: Spec is the desired state owned by the user (C-03).
             properties:
+              capacity:
+                description: Capacity is the size the claim requests and expands to
+                  (C-38).
+                type: string
+              mobility:
+                description: |-
+                  Mobility is how far the volume can move with its data; it is required
+                  and has no default (C-38, ADR-006).
+                enum:
+                - node-local
+                - cluster-movable
+                - shared-rwx
+                type: string
               owner:
                 description: |-
                   Owner is the local username of the creating session; the API writes it
                   and only the global Owner may transfer it (C-60).
                 type: string
+              purgeToken:
+                description: |-
+                  PurgeToken authorizes deleting the claim: only the volume's own name
+                  deletes it (C-39).
+                type: string
+              storageClass:
+                description: |-
+                  StorageClass is the backend policy of the claim. A package may not
+                  declare it, so it lives on the volume (C-32, C-38).
+                type: string
             type: object
           status:
-            description: Status is written by the volume reconciler (C-03, C-07).
+            description: Status is written by the volume reconciler (C-03, C-07, C-38).
             properties:
+              boundClaim:
+                description: |-
+                  BoundClaim is the claim the volume is bound to; before a migration it
+                  equals the volume name (C-38, C-40).
+                type: string
+              capabilities:
+                description: |-
+                  Capabilities is the capability set the backend resolved, each an item
+                  carrying a name and a version (C-38).
+                items:
+                  description: |-
+                    VolumeCapability is one capability a volume backend resolved, with the
+                    version it resolved at (C-09, C-38).
+                  properties:
+                    name:
+                      description: Name is the capability name.
+                      type: string
+                    version:
+                      description: Version is the resolved capability version.
+                      type: string
+                  required:
+                  - name
+                  - version
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               conditions:
                 description: Conditions carries Reconciled and the object's failure
                   conditions (C-07).
@@ -237,8 +363,32 @@ spec:
                     - Unknown
                     type: string
                 type: object
+              node:
+                description: Node is the node a node-local volume is bound to (C-38).
+                type: string
               phase:
                 description: Phase is the flow stage; it is orthogonal to health (C-07).
+                type: string
+              provider:
+                description: Provider is the storage provider the claim resolved to
+                  (C-38).
+                properties:
+                  name:
+                    description: Name is the provisioner or driver name.
+                    type: string
+                  version:
+                    description: Version is the backend version when it reports one.
+                    type: string
+                type: object
+              reclaimPolicy:
+                description: |-
+                  ReclaimPolicy is the policy the resolved volume carries; KOS never
+                  rewrites it (C-39).
+                type: string
+              snapshotConsistency:
+                description: |-
+                  SnapshotConsistency is the consistency a snapshot of this volume can
+                  reach; it is crash-consistent for shared-rwx (C-38).
                 type: string
             type: object
         type: object

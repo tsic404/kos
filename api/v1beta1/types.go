@@ -312,10 +312,28 @@ type Volume struct {
 	// Spec is the desired state owned by the user (C-03).
 	// +optional
 	Spec VolumeSpec `json:"spec,omitempty"`
-	// Status is written by the volume reconciler (C-03, C-07).
+	// Status is written by the volume reconciler (C-03, C-07, C-38).
 	// +optional
-	Status ObjectStatus `json:"status,omitempty"`
+	Status VolumeStatus `json:"status,omitempty"`
 }
+
+// VolumeMobility is how far a volume can follow its data (C-38, ADR-006). It is
+// required and has no default: an omitted value is an invalid spec, not a
+// local volume.
+//
+// +kubebuilder:validation:Enum=node-local;cluster-movable;shared-rwx
+type VolumeMobility string
+
+const (
+	// VolumeMobilityNodeLocal pins the volume to one node (C-38).
+	VolumeMobilityNodeLocal VolumeMobility = "node-local"
+	// VolumeMobilityClusterMovable lets the volume follow its workload to
+	// another node (C-38).
+	VolumeMobilityClusterMovable VolumeMobility = "cluster-movable"
+	// VolumeMobilitySharedRWX serves several nodes from one read-write
+	// volume (C-38).
+	VolumeMobilitySharedRWX VolumeMobility = "shared-rwx"
+)
 
 // VolumeSpec holds the user-owned desired state of a volume.
 type VolumeSpec struct {
@@ -323,6 +341,70 @@ type VolumeSpec struct {
 	// and only the global Owner may transfer it (C-60).
 	// +optional
 	Owner string `json:"owner,omitempty"`
+	// Mobility is how far the volume can move with its data; it is required
+	// and has no default (C-38, ADR-006).
+	// +optional
+	Mobility VolumeMobility `json:"mobility,omitempty"`
+	// Capacity is the size the claim requests and expands to (C-38).
+	// +optional
+	Capacity string `json:"capacity,omitempty"`
+	// StorageClass is the backend policy of the claim. A package may not
+	// declare it, so it lives on the volume (C-32, C-38).
+	// +optional
+	StorageClass string `json:"storageClass,omitempty"`
+	// PurgeToken authorizes deleting the claim: only the volume's own name
+	// deletes it (C-39).
+	// +optional
+	PurgeToken string `json:"purgeToken,omitempty"`
+}
+
+// VolumeStatus is the status of a volume: the two shared axes plus the facts
+// C-38 and C-39 make observable.
+type VolumeStatus struct {
+	ObjectStatus `json:",inline"`
+	// BoundClaim is the claim the volume is bound to; before a migration it
+	// equals the volume name (C-38, C-40).
+	// +optional
+	BoundClaim string `json:"boundClaim,omitempty"`
+	// Provider is the storage provider the claim resolved to (C-38).
+	// +optional
+	Provider VolumeBackend `json:"provider,omitempty"`
+	// Capabilities is the capability set the backend resolved, each an item
+	// carrying a name and a version (C-38).
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Capabilities []VolumeCapability `json:"capabilities,omitempty"`
+	// ReclaimPolicy is the policy the resolved volume carries; KOS never
+	// rewrites it (C-39).
+	// +optional
+	ReclaimPolicy string `json:"reclaimPolicy,omitempty"`
+	// Node is the node a node-local volume is bound to (C-38).
+	// +optional
+	Node string `json:"node,omitempty"`
+	// SnapshotConsistency is the consistency a snapshot of this volume can
+	// reach; it is crash-consistent for shared-rwx (C-38).
+	// +optional
+	SnapshotConsistency string `json:"snapshotConsistency,omitempty"`
+}
+
+// VolumeBackend names the storage backend a claim resolved to (C-38).
+type VolumeBackend struct {
+	// Name is the provisioner or driver name.
+	// +optional
+	Name string `json:"name,omitempty"`
+	// Version is the backend version when it reports one.
+	// +optional
+	Version string `json:"version,omitempty"`
+}
+
+// VolumeCapability is one capability a volume backend resolved, with the
+// version it resolved at (C-09, C-38).
+type VolumeCapability struct {
+	// Name is the capability name.
+	Name string `json:"name"`
+	// Version is the resolved capability version.
+	Version string `json:"version"`
 }
 
 // VolumeList is the list form of Volume.

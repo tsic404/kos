@@ -2,14 +2,17 @@ package controlplane
 
 import (
 	"context"
+	"log/slog"
 	"sort"
 	"strconv"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/tsic404/kos/api"
 	"github.com/tsic404/kos/pkg/markers"
+	"github.com/tsic404/kos/pkg/volume"
 )
 
 // Warning codes are stable like error codes: a client can branch on them.
@@ -20,6 +23,16 @@ const (
 	// WarningRetained marks an object the plan keeps because deleting it would
 	// release data (C-39, F5).
 	WarningRetained = "retained"
+	// WarningReclaimDelete marks a volume whose storage class reclaims the
+	// backend data when its claim is deleted (C-39).
+	WarningReclaimDelete = "reclaim-delete"
+	// WarningReclaimUnknown marks a volume whose reclaim policy cannot be
+	// resolved; the warning is conservative because an unknown policy may
+	// reclaim data (C-39).
+	WarningReclaimUnknown = "reclaim-unknown"
+	// WarningExpansionPreflight carries C-38's three expansion answers before a
+	// capacity change is applied.
+	WarningExpansionPreflight = "expansion-preflight"
 )
 
 // maxSetObjects bounds one plan or apply request.
@@ -27,6 +40,21 @@ const maxSetObjects = 200
 
 // volumeKind is the kind whose deletion would release data (C-39).
 const volumeKind = "Volume"
+
+// storageClassType is the native class whose reclaim policy C-39 requires the
+// plan to read; it resolves through the same source as the domain objects.
+var storageClassType = ObjectType{
+	Group:    "storage.k8s.io",
+	Version:  "v1",
+	Kind:     "StorageClass",
+	Resource: "storageclasses",
+}
+
+// VolumeExpansion answers C-38's expansion preflight for one volume; a nil
+// implementation leaves capacity plans without a preflight warning.
+type VolumeExpansion interface {
+	ExpansionPreflight(ctx context.Context, namespace, name string) (volume.ExpansionPlan, error)
+}
 
 // Change is one field a plan would rewrite (C-62). A null from or to means the
 // field is absent on that side.
@@ -129,6 +157,9 @@ func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (
 	}
 
 	plan := &Plan{Create: []PlannedObject{}, Update: []PlannedUpdate{}, Delete: []PlannedObject{}, Warnings: []Warning{}}
+	// C-39's reclaim judgement reads the class set once for the whole plan: the
+	// set does not change between two creates in the same request.
+	classes := newStorageClassIndex(s.source, s.log)
 	for index := range desired {
 		object := desired[index]
 		current, err := s.source.Get(ctx, object.Type, object.Ref.Namespace, object.Ref.Name)
@@ -144,6 +175,9 @@ func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (
 				object = withCreationAttribution(object)
 				desired[index] = object
 				plan.Create = append(plan.Create, PlannedObject{Ref: object.Ref, objectType: object.Type})
+				if warning := reclaimWarning(ctx, classes, object); warning != nil {
+					plan.Warnings = append(plan.Warnings, *warning)
+				}
 				continue
 			}
 			s.log.Error("plan read failed", "object", object.Ref.String(), "error", err)
@@ -168,6 +202,9 @@ func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (
 				return nil, nil, failure
 			}
 			plan.Update = append(plan.Update, PlannedUpdate{Ref: object.Ref, Changes: differences})
+			if warning := s.expansionWarning(ctx, object, current.Object); warning != nil {
+				plan.Warnings = append(plan.Warnings, *warning)
+			}
 		}
 	}
 
@@ -222,6 +259,193 @@ func (s *Server) planDeletes(ctx context.Context, scope *Scope, desired map[stri
 		}
 	}
 	return retained, nil
+}
+
+// storageClassIndex answers C-39's reclaim questions from one read of the
+// class set per plan: however many volumes a request creates, the classes are
+// listed once and both the named and the unnamed branch read that index.
+type storageClassIndex struct {
+	source ObjectSource
+	log    *slog.Logger
+	loaded bool
+	err    error
+	names  []string
+	byName map[string]map[string]any
+}
+
+// newStorageClassIndex returns an index over a plan's source.
+func newStorageClassIndex(source ObjectSource, log *slog.Logger) *storageClassIndex {
+	return &storageClassIndex{source: source, log: log}
+}
+
+// read loads the class set on first use and remembers a failed read, so every
+// volume it affects still gets the conservative warning without another list.
+// The failed read is logged here, once per plan, because every later volume
+// shares the same error.
+func (i *storageClassIndex) read(ctx context.Context) error {
+	if i.loaded {
+		return i.err
+	}
+	i.loaded = true
+	classes, err := i.source.List(ctx, storageClassType, "")
+	if err != nil {
+		i.err = err
+		if i.log != nil {
+			i.log.Warn("storage class read failed", "error", err)
+		}
+		return err
+	}
+	i.byName = make(map[string]map[string]any, len(classes))
+	for _, class := range classes {
+		name := nestedText(class.Object, "metadata", "name")
+		i.names = append(i.names, name)
+		i.byName[name] = class.Object
+	}
+	return nil
+}
+
+// defaultName is the class the cluster provisions an unnamed claim with, empty
+// when no class is marked default; the first marked class wins, as before.
+func (i *storageClassIndex) defaultName() string {
+	for _, name := range i.names {
+		if defaultStorageClass(i.byName[name]) {
+			return name
+		}
+	}
+	return ""
+}
+
+// reclaimWarning answers C-39 before a volume is created: the storage class it
+// names reclaims the backend data when the claim is deleted, so the plan says
+// so rather than leaving the user to discover it on deletion. An unnamed class
+// resolves through the cluster default class, and a class set the plan cannot
+// read warns conservatively (C-39).
+func reclaimWarning(ctx context.Context, classes *storageClassIndex, object desiredObject) *Warning {
+	if object.Ref.Kind != volumeKind {
+		return nil
+	}
+	if err := classes.read(ctx); err != nil {
+		return unknownReclaimWarning(object.Ref)
+	}
+	className := nestedText(object.Object.Object, "spec", "storageClass")
+	unnamed := className == ""
+	if unnamed {
+		className = classes.defaultName()
+	}
+	class, found := classes.byName[className]
+	if className == "" || !found {
+		// No class will provision the claim, so there is no backend data to
+		// reclaim.
+		return nil
+	}
+	policy, _, _ := unstructured.NestedString(class, "reclaimPolicy")
+	if !reclaimsOnDelete(policy) {
+		return nil
+	}
+	ref := object.Ref
+	if unnamed {
+		return &Warning{
+			Code:    WarningReclaimDelete,
+			Message: "卷 " + ref.String() + " 的集群默认存储类 " + className + " 回收策略为 Delete，删除 PVC 会回收后端数据",
+			Object:  &ref,
+		}
+	}
+	return &Warning{
+		Code:    WarningReclaimDelete,
+		Message: "卷 " + ref.String() + " 的存储类 " + className + " 回收策略为 Delete，删除 PVC 会回收后端数据",
+		Object:  &ref,
+	}
+}
+
+// unknownReclaimWarning is the conservative answer: a policy the plan cannot
+// resolve must not read as safe (C-39).
+func unknownReclaimWarning(ref ObjectRef) *Warning {
+	return &Warning{
+		Code:    WarningReclaimUnknown,
+		Message: "卷 " + ref.String() + " 的回收策略无法解析，删除 PVC 可能回收后端数据",
+		Object:  &ref,
+	}
+}
+
+// reclaimsOnDelete reports a policy that keeps its data: only Delete, or the
+// empty value Kubernetes defaults dynamically provisioned volumes to, reclaims
+// it (C-39).
+func reclaimsOnDelete(policy string) bool {
+	return policy == "" || policy == "Delete"
+}
+
+// defaultStorageClass reports the class a cluster provisions an unnamed claim
+// with.
+func defaultStorageClass(object map[string]any) bool {
+	for _, key := range []string{
+		"storageclass.kubernetes.io/is-default-class",
+		"storageclass.beta.kubernetes.io/is-default-class",
+	} {
+		if nestedText(object, "metadata", "annotations", key) == "true" {
+			return true
+		}
+	}
+	return false
+}
+
+// expansionWarning answers C-38's three expansion questions before a plan
+// applies a capacity increase. A nil VolumeExpansion leaves the plan without a
+// preflight; a failed preflight is not a plan failure.
+func (s *Server) expansionWarning(ctx context.Context, object desiredObject, current map[string]any) *Warning {
+	if object.Ref.Kind != volumeKind || s.volumeExpansion == nil {
+		return nil
+	}
+	wanted, ok := quantityOf(object.Object.Object, "spec", "capacity")
+	if !ok {
+		return nil
+	}
+	stored, ok := quantityOf(current, "spec", "capacity")
+	if !ok || wanted.Cmp(stored) <= 0 {
+		return nil
+	}
+	plan, err := s.volumeExpansion.ExpansionPreflight(ctx, object.Ref.Namespace, object.Ref.Name)
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("expansion preflight failed", "volume", object.Ref.String(), "error", err)
+		}
+		return nil
+	}
+	ref := object.Ref
+	return &Warning{Code: WarningExpansionPreflight, Message: expansionMessage(ref, plan), Object: &ref}
+}
+
+// expansionMessage renders C-38's three answers; an unanswerable duration is
+// what makes the expansion require downtime.
+func expansionMessage(ref ObjectRef, plan volume.ExpansionPlan) string {
+	online := func(value bool) string {
+		if value {
+			return "支持"
+		}
+		return "不支持"
+	}
+	estimate := plan.EstimatedDuration.String()
+	if estimate == "0s" {
+		estimate = "不可判定"
+	}
+	downtime := "无需停机"
+	if plan.DowntimeRequired {
+		downtime = "需要停机"
+	}
+	return "卷 " + ref.String() + " 扩容预检：后端在线扩容=" + online(plan.BackendOnline) +
+		"，文件系统在线扩容=" + online(plan.FilesystemOnline) + "，预计耗时=" + estimate + "，" + downtime
+}
+
+// quantityOf reads one resource quantity from an object.
+func quantityOf(object map[string]any, path ...string) (resource.Quantity, bool) {
+	value, found, err := unstructured.NestedString(object, path...)
+	if err != nil || !found || value == "" {
+		return resource.Quantity{}, false
+	}
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return resource.Quantity{}, false
+	}
+	return quantity, true
 }
 
 // sort orders the three classes and the warnings so two identical requests
