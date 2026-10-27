@@ -4,6 +4,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // HealthState is the availability axis of an object (C-08).
@@ -56,9 +57,60 @@ type Application struct {
 	// Spec is the desired state owned by the user (C-03).
 	// +optional
 	Spec ApplicationSpec `json:"spec,omitempty"`
-	// Status is written by the application reconciler (C-03, C-07).
+	// Status is written by the application reconciler (C-03, C-07, C-33).
 	// +optional
-	Status ObjectStatus `json:"status,omitempty"`
+	Status ApplicationStatus `json:"status,omitempty"`
+}
+
+// ApplicationStatus is the status of an application: the two shared axes plus
+// the lifecycle facts C-33 makes observable.
+type ApplicationStatus struct {
+	ObjectStatus `json:",inline"`
+	// RetryCount is the number of failed attempts in the current retry budget
+	// (C-33).
+	// +optional
+	RetryCount int32 `json:"retryCount,omitempty"`
+	// NextRetryAt is the earliest time the next automatic attempt may run
+	// (C-33).
+	// +optional
+	NextRetryAt *metav1.Time `json:"nextRetryAt,omitempty"`
+	// Uninstall carries the objects that block an uninstall (C-33).
+	// +optional
+	Uninstall *UninstallStatus `json:"uninstall,omitempty"`
+	// Rendered lists the objects the last applied render wrote, so an uninstall
+	// does not depend on the definition still existing (C-33).
+	// +optional
+	Rendered []ObjectRef `json:"rendered,omitempty"`
+}
+
+// UninstallStatus is the uninstall blocking state of C-33.
+type UninstallStatus struct {
+	// Blocked lists the objects that have not gone away yet.
+	// +optional
+	Blocked []ObjectRef `json:"blocked,omitempty"`
+	// BlockedSince is when the first blocking object was observed.
+	// +optional
+	BlockedSince *metav1.Time `json:"blockedSince,omitempty"`
+	// Stalled reports a block that has outlasted the stall window.
+	// +optional
+	Stalled bool `json:"stalled,omitempty"`
+}
+
+// ObjectRef identifies one object inside a status list.
+type ObjectRef struct {
+	// Group is the API group; empty for the core group.
+	// +optional
+	Group string `json:"group,omitempty"`
+	// Version is the object version.
+	// +optional
+	Version string `json:"version,omitempty"`
+	// Kind is the object kind.
+	Kind string `json:"kind"`
+	// Namespace is the object namespace; empty for cluster-scoped objects.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+	// Name is the object name.
+	Name string `json:"name"`
 }
 
 // Visibility decides who sees an application in the panel; it does not gate
@@ -81,6 +133,21 @@ type ApplicationSpec struct {
 	// Visibility decides who sees the application in the panel (C-59).
 	// +optional
 	Visibility Visibility `json:"visibility,omitempty"`
+	// DefinitionRef names the application definition the application was
+	// installed from (C-32).
+	// +optional
+	DefinitionRef string `json:"definitionRef,omitempty"`
+	// Namespace is the namespace the application declares for everything it
+	// renders; it must already exist (C-32, C-54).
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
+	// Config carries the values of the definition's config structure (C-32).
+	// +optional
+	Config runtime.RawExtension `json:"config,omitempty"`
+	// Volumes names the volume objects whose claims the render references
+	// (C-32, C-38).
+	// +optional
+	Volumes []string `json:"volumes,omitempty"`
 }
 
 // ApplicationList is the list form of Application.
@@ -104,8 +171,123 @@ type ApplicationDefinition struct {
 	Spec ApplicationDefinitionSpec `json:"spec,omitempty"`
 }
 
-// ApplicationDefinitionSpec holds the catalogue-owned definition.
-type ApplicationDefinitionSpec struct{}
+// ApplicationDefinitionSpec holds the catalogue-owned definition: the package
+// identity, the config structure that is the sole source of interface fields,
+// the one-way translation template and the optional hooks (C-32).
+type ApplicationDefinitionSpec struct {
+	// Package identifies the packaged artifact the definition was installed
+	// from (C-32).
+	// +optional
+	Package PackageIdentity `json:"package,omitempty"`
+	// Config is the config structure the interface fields are generated from
+	// (C-32).
+	// +optional
+	Config []ConfigField `json:"config,omitempty"`
+	// Template is the one-way translation template; it is a pure function of
+	// the application and its config (C-32).
+	// +optional
+	Template string `json:"template,omitempty"`
+	// Hooks are optional lifecycle hooks; an exit status expresses the result
+	// (C-32).
+	// +optional
+	Hooks []Hook `json:"hooks,omitempty"`
+	// Chart references the chart the package ships (C-32).
+	// +optional
+	Chart string `json:"chart,omitempty"`
+	// Requires lists the capability requirements of the definition (C-11).
+	// +optional
+	Requires []CapabilityRequirement `json:"requires,omitempty"`
+}
+
+// PackageIdentity is the identity of a packaged artifact (C-32).
+type PackageIdentity struct {
+	// Version is the package version.
+	// +optional
+	Version string `json:"version,omitempty"`
+	// Digest is the package digest; the catalogue locks it instead of a tag
+	// (C-32).
+	// +optional
+	Digest string `json:"digest,omitempty"`
+}
+
+// ConfigField is one entry of a config structure. Type decides the value
+// shape: string, integer, number, boolean or enum (C-32).
+type ConfigField struct {
+	// Name is the field name a submitted config uses.
+	Name string `json:"name"`
+	// Type is one of string, integer, number, boolean or enum (C-32).
+	// +kubebuilder:validation:Enum=string;integer;number;boolean;enum
+	Type string `json:"type"`
+	// Required rejects a submission that omits the field.
+	// +optional
+	Required bool `json:"required,omitempty"`
+	// Default is the textual default, interpreted by Type.
+	// +optional
+	Default *string `json:"default,omitempty"`
+	// Minimum is the textual inclusive lower bound of an integer or number
+	// field, interpreted by Type.
+	// +optional
+	Minimum *string `json:"minimum,omitempty"`
+	// Maximum is the textual inclusive upper bound of an integer or number
+	// field, interpreted by Type.
+	// +optional
+	Maximum *string `json:"maximum,omitempty"`
+	// Enum lists the accepted values of an enum field.
+	// +optional
+	Enum []string `json:"enum,omitempty"`
+	// Sensitive marks a value the read path masks; it is never returned to a
+	// browser (C-31).
+	// +optional
+	Sensitive bool `json:"sensitive,omitempty"`
+	// Description is the help text the interface shows.
+	// +optional
+	Description string `json:"description,omitempty"`
+}
+
+// Hook is one package hook; a zero exit status succeeds and any other value
+// fails (C-32).
+type Hook struct {
+	// Name identifies the hook.
+	Name string `json:"name"`
+	// Command is the command the hook runs.
+	// +optional
+	Command []string `json:"command,omitempty"`
+	// TimeoutSeconds bounds one run.
+	// +optional
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+}
+
+// CapabilityRequirement is one capability an application needs (C-11).
+type CapabilityRequirement struct {
+	// Name is the capability name.
+	Name string `json:"name"`
+	// Version is the optional version range; empty matches any version.
+	// +optional
+	Version string `json:"version,omitempty"`
+	// Guarantees are the guarantee values the capability must hold (C-11).
+	// +optional
+	Guarantees []GuaranteeRequirement `json:"guarantees,omitempty"`
+	// Optional makes a failed requirement degrade the application instead of
+	// keeping it Pending (C-11).
+	// +optional
+	Optional bool `json:"optional,omitempty"`
+}
+
+// GuaranteeRequirement declares one guarantee value: a boolean must be equal,
+// an enum must be equal or inside the declared set (C-11).
+type GuaranteeRequirement struct {
+	// Key is the guarantee key.
+	Key string `json:"key"`
+	// Bool is the required boolean value.
+	// +optional
+	Bool *bool `json:"bool,omitempty"`
+	// Enum is the required enum value.
+	// +optional
+	Enum string `json:"enum,omitempty"`
+	// OneOf is the set an enum value may come from.
+	// +optional
+	OneOf []string `json:"oneOf,omitempty"`
+}
 
 // ApplicationDefinitionList is the list form of ApplicationDefinition.
 //

@@ -2,6 +2,7 @@ package write
 
 import (
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -37,7 +38,7 @@ func Admit(req Request) error {
 	case ClassExtension:
 		err = admitExtension(req)
 	case ClassSystem:
-		err = admitClass(req, systemWriters, "KOS namespace objects", true)
+		err = admitSystem(req)
 	case ClassPVC:
 		err = admitClaim(req)
 	case ClassNode:
@@ -73,6 +74,10 @@ func admitKernel(req Request) error {
 			}
 		case PartMarker:
 			if err := admitMarkers(req, false); err != nil {
+				return err
+			}
+		case PartMeta:
+			if err := admitKernelMeta(req); err != nil {
 				return err
 			}
 		default:
@@ -122,6 +127,23 @@ func admitKernelStatus(req Request) error {
 	}
 	if req.Subject != writer {
 		return denyf(req, "status is written by %q", writer)
+	}
+	return admitAttributed(req)
+}
+
+// admitKernelMeta applies the finalizer rule: an object's finalizers belong to
+// the reconciler that writes its status, so uninstall is observed and released
+// by the same subject (C-33, C-54).
+func admitKernelMeta(req Request) error {
+	writer, hasWriter := statusWriters[req.Object.Kind]
+	if !hasWriter {
+		return denyf(req, "the kind has no reconciler of its own")
+	}
+	if req.Subject != writer {
+		return denyf(req, "finalizers are written by %q", writer)
+	}
+	if req.Current == nil {
+		return denyf(req, "finalizers need the stored object")
 	}
 	return admitAttributed(req)
 }
@@ -255,6 +277,33 @@ func admitExtension(req Request) error {
 		return err
 	}
 	return admitMarkers(req, creates(req))
+}
+
+// admitSystem applies C-04 to the KOS namespace. The installer owns the
+// namespace, the API process creates action records, and the application
+// reconciler creates one abandonment manifest per application and deletes the
+// records it consumed; no subject gets the whole namespace by class.
+func admitSystem(req Request) error {
+	if req.Subject == SubjectApplicationReconciler {
+		switch req.Verb {
+		case VerbDelete:
+			// C-04 grants this subject "action records (delete)", not the whole
+			// namespace: a consumed record is a ConfigMap under the record prefix
+			// and carrying the action label. The abandonment manifest is immutable
+			// and never deletable. A missing object has nothing to judge; the
+			// delete itself reports it gone.
+			if req.Current != nil && (req.Object.Kind != "ConfigMap" ||
+				req.Current.GetLabels()[ActionRecordLabel] == "" ||
+				!strings.HasPrefix(req.Object.Name, ActionRecordPrefix)) {
+				return denyf(req, "the application reconciler deletes only consumed action records")
+			}
+		default:
+			if req.Object.Kind != "ConfigMap" || req.Labels[AbandonmentLabel] == "" {
+				return denyf(req, "the application reconciler creates only abandonment manifests in the KOS namespace")
+			}
+		}
+	}
+	return admitClass(req, systemWriters, "KOS namespace objects", true)
 }
 
 // admitClass applies one C-04 verb table. attributed adds C-02's unmanaged

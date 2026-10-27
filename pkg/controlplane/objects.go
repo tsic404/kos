@@ -14,6 +14,8 @@ import (
 
 	"github.com/tsic404/kos/api"
 	"github.com/tsic404/kos/api/v1beta1"
+	"github.com/tsic404/kos/pkg/markers"
+	"github.com/tsic404/kos/pkg/write"
 )
 
 // kernelScheme resolves a kind to its typed object so a submitted manifest can
@@ -128,6 +130,125 @@ func decodeStrict(raw map[string]any, typed runtime.Object) *Error {
 		return invalidField("对象字段不符合模型定义：" + message)
 	}
 	return nil
+}
+
+// withCreationAttribution stamps the managed-by marker the creator writes
+// (C-02). Only a create calls it: the control plane is the creator of every
+// object it creates, and without the marker no later KOS subject may write the
+// object's status or finalizers (C-03).
+func withCreationAttribution(object desiredObject) desiredObject {
+	if object.Object.GetLabels()[markers.ManagedBy] != "" {
+		return object
+	}
+	labels := object.Object.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[markers.ManagedBy] = write.ManagedByValue
+	object.Object.SetLabels(labels)
+	return object
+}
+
+// withStoredAttribution keeps the attribution and decline markers an existing
+// object already carries (C-02): an update neither drops a marker the body omits
+// nor rewrites one it names. Only a key the body leaves out is filled back, and
+// the result must still describe the stored object's attribution, so a plain
+// write cannot forge an adoption record or grant a marker.
+func withStoredAttribution(object desiredObject, current map[string]any) (desiredObject, *Error) {
+	for _, key := range markers.Keys() {
+		class, isMarker := markers.ClassOf(key)
+		if !isMarker || (class != markers.ClassAttribution && class != markers.ClassDecline) {
+			continue
+		}
+		stored := nestedText(current, "metadata", carrierField(key), key)
+		if stored == "" || markerOf(object.Object, key) != "" {
+			continue
+		}
+		setMarker(object.Object, key, stored)
+	}
+	if failure := checkStoredAttribution(object.Object, current); failure != nil {
+		return desiredObject{}, failure.about(object.Ref)
+	}
+	return object, nil
+}
+
+// carrierField names the metadata field a marker key lives on.
+func carrierField(key string) string {
+	if carrier, _ := markers.CarrierOf(key); carrier == markers.CarrierAnnotation {
+		return "annotations"
+	}
+	return "labels"
+}
+
+// markerOf reads one marker from its carrier on a desired object.
+func markerOf(object *unstructured.Unstructured, key string) string {
+	if carrierField(key) == "annotations" {
+		return object.GetAnnotations()[key]
+	}
+	return object.GetLabels()[key]
+}
+
+// setMarker writes one marker on its carrier, allocating the map on first use.
+func setMarker(object *unstructured.Unstructured, key, value string) {
+	if carrierField(key) == "annotations" {
+		annotations := object.GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[key] = value
+		object.SetAnnotations(annotations)
+		return
+	}
+	labels := object.GetLabels()
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	labels[key] = value
+	object.SetLabels(labels)
+}
+
+// checkStoredAttribution refuses a write whose markers would escape C-02: the
+// result must satisfy the marker rules and agree with the stored attribution key
+// by key. A body that repeats the stored markers unchanged still passes.
+func checkStoredAttribution(object *unstructured.Unstructured, current map[string]any) *Error {
+	if err := markers.Validate(object.GetLabels(), object.GetAnnotations()); err != nil {
+		return invalidField("标记不满足归属规则：" + err.Error())
+	}
+	attribution, err := markers.AttributionOf(object.GetLabels())
+	if err != nil {
+		return invalidField("归属不可判定：" + err.Error())
+	}
+	storedAttribution, err := markers.AttributionOf(storedMarkerLabels(current))
+	if err != nil {
+		return invalidField("存储态归属不可判定：" + err.Error())
+	}
+	if attribution != storedAttribution {
+		return invalidField("一次更新不能改变对象的归属状态")
+	}
+	for _, key := range markers.Keys() {
+		class, isMarker := markers.ClassOf(key)
+		if !isMarker || (class != markers.ClassAttribution && class != markers.ClassDecline) {
+			continue
+		}
+		if markerOf(object, key) != nestedText(current, "metadata", carrierField(key), key) {
+			return invalidField("一次更新不能改写标记 " + key)
+		}
+	}
+	return nil
+}
+
+// storedMarkerLabels reads the stored marker labels that decide attribution.
+func storedMarkerLabels(current map[string]any) map[string]string {
+	labels := map[string]string{}
+	for _, key := range markers.Keys() {
+		if carrierField(key) == "annotations" {
+			continue
+		}
+		if value := nestedText(current, "metadata", "labels", key); value != "" {
+			labels[key] = value
+		}
+	}
+	return labels
 }
 
 // normalize keeps the client-owned part of a decoded object: identity, labels,

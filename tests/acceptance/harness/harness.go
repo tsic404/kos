@@ -433,9 +433,29 @@ func (c *Cluster) discoverPlurals(t *testing.T) map[string]string {
 
 // Resources maps every kernel kind to the resource the API server serves.
 func (c *Cluster) Resources() map[schema.GroupKind]string {
-	resources := make(map[schema.GroupKind]string, len(c.Plurals))
-	for kind, plural := range c.Plurals {
-		resources[schema.GroupKind{Group: api.Group, Kind: kind}] = plural
+	resources := make(map[schema.GroupKind]string, len(api.Kinds())+16)
+	for _, kind := range api.Kinds() {
+		if plural, known := c.Plurals[kind]; known {
+			resources[schema.GroupKind{Group: api.Group, Kind: kind}] = plural
+		}
+	}
+	// Rendered application objects are native ones: the write path resolves
+	// their resources from discovery here, as an installed controller would
+	// (C-04, C-32).
+	for _, groupVersion := range []schema.GroupVersion{{Version: "v1"}, {Group: "apps", Version: "v1"}} {
+		list, err := c.Kube.Discovery().ServerResourcesForGroupVersion(groupVersion.String())
+		if err != nil {
+			continue
+		}
+		for _, resource := range list.APIResources {
+			if strings.Contains(resource.Name, "/") {
+				continue
+			}
+			key := schema.GroupKind{Group: groupVersion.Group, Kind: resource.Kind}
+			if _, known := resources[key]; !known {
+				resources[key] = resource.Name
+			}
+		}
 	}
 	return resources
 }
@@ -524,9 +544,9 @@ func (c *Cluster) ExtensionResource(group, version, plural, namespace string) dy
 // A case uses it to write exactly the object it needs, without admission.
 func (c *Cluster) Direct(t *testing.T, group, version, kind, namespace string) dynamic.ResourceInterface {
 	t.Helper()
-	plural, ok := c.Plurals[kind]
+	plural, ok := c.Resources()[schema.GroupKind{Group: group, Kind: kind}]
 	if !ok {
-		t.Fatalf("no plural discovered for kind %q", kind)
+		t.Fatalf("no plural discovered for kind %q in group %q", kind, group)
 	}
 	resource := c.Dynamic.Resource(schema.GroupVersionResource{Group: group, Version: version, Resource: plural})
 	if namespace == "" {

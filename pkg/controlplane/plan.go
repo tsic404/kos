@@ -111,6 +111,8 @@ func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (
 		if failure := s.validateDesired(ctx, object); failure != nil {
 			return nil, nil, failure
 		}
+		// Attribution is not stamped here: only an object this request creates
+		// gets the creation marker, and an existing object keeps its own (C-02).
 		if seen[object.Ref.String()] {
 			return nil, nil, invalidField("请求重复给出了对象 " + object.Ref.String()).about(object.Ref)
 		}
@@ -118,21 +120,29 @@ func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (
 		if failure := s.authorize(ctx, verb, object.Ref); failure != nil {
 			return nil, nil, failure
 		}
+		// An Application in a desired set meets the same C-32/F3 judgement as a
+		// single-object write; the set path must not be a way around it (C-12).
+		if failure := s.validateApplicationWrite(ctx, object.Object); failure != nil {
+			return nil, nil, failure
+		}
 		desired = append(desired, object)
 	}
 
 	plan := &Plan{Create: []PlannedObject{}, Update: []PlannedUpdate{}, Delete: []PlannedObject{}, Warnings: []Warning{}}
-	for _, object := range desired {
-		if !hasLabel(object.Object, markers.ManagedBy) {
-			plan.Warnings = append(plan.Warnings, Warning{
-				Code:    WarningUnattributed,
-				Message: "对象 " + object.Ref.String() + " 没有归属标记，写入后不归属任何安装",
-				Object:  new(object.Ref),
-			})
-		}
+	for index := range desired {
+		object := desired[index]
 		current, err := s.source.Get(ctx, object.Type, object.Ref.Namespace, object.Ref.Name)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
+				if !hasLabel(object.Object, markers.ManagedBy) {
+					plan.Warnings = append(plan.Warnings, Warning{
+						Code:    WarningUnattributed,
+						Message: "对象 " + object.Ref.String() + " 的请求体没有归属标记，控制面创建时会补创建者标记",
+						Object:  new(object.Ref),
+					})
+				}
+				object = withCreationAttribution(object)
+				desired[index] = object
 				plan.Create = append(plan.Create, PlannedObject{Ref: object.Ref, objectType: object.Type})
 				continue
 			}
@@ -142,7 +152,21 @@ func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (
 		if failure := validateEndpointUpdate(current.Object, object); failure != nil {
 			return nil, nil, failure
 		}
+		// An update keeps the attribution and decline markers the object already
+		// carries, so a body that omits labels neither drops them nor grants new
+		// ones (C-02).
+		object, failure := withStoredAttribution(object, current.Object)
+		if failure != nil {
+			return nil, nil, failure
+		}
+		desired[index] = object
 		if differences := changes(current.Object, object.Object.Object); len(differences) > 0 {
+			// A plan is an outbound payload too: a stored sensitive value must not
+			// come back through the diff (C-31).
+			differences, failure := s.maskChanges(ctx, object, differences)
+			if failure != nil {
+				return nil, nil, failure
+			}
 			plan.Update = append(plan.Update, PlannedUpdate{Ref: object.Ref, Changes: differences})
 		}
 	}

@@ -1,0 +1,59 @@
+apiVersion: kos.tsic.top/v1beta1
+kind: ApplicationDefinition
+metadata:
+  name: memcached
+spec:
+  package:
+    digest: "sha256:cb65d1ea300c436b5df211e54221f7d0643b487d2b7be16cabe7d9e48bea9d43"
+    version: "1.6.0"
+  config:
+    - name: replicas
+      type: integer
+      default: "1"
+      minimum: "1"
+      maximum: "5"
+      description: Number of cache replicas.
+    - name: image
+      type: string
+      default: "memcached:1.6"
+      description: Container image to run.
+    - name: memory
+      type: integer
+      default: "64"
+      minimum: "16"
+      maximum: "1024"
+      description: Cache size in megabytes.
+  template: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: {{ .Name }}
+      namespace: {{ .Namespace }}
+    spec:
+      replicas: {{ .Config.replicas }}
+      selector:
+        matchLabels:
+          app: {{ .Name }}
+      template:
+        metadata:
+          labels:
+            app: {{ .Name }}
+        spec:
+          containers:
+            - name: {{ .Name }}
+              image: {{ .Config.image }}
+              args: ["-m", "{{ .Config.memory }}"]
+              ports:
+                - containerPort: 11211
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: {{ .Name }}
+      namespace: {{ .Namespace }}
+    spec:
+      selector:
+        app: {{ .Name }}
+      ports:
+        - port: 11211
+          targetPort: 11211

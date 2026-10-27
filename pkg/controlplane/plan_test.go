@@ -8,6 +8,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/tsic404/kos/api"
 	"github.com/tsic404/kos/pkg/markers"
 )
 
@@ -161,5 +162,23 @@ func TestBuildPlanRejectsDuplicatesAndEmptySets(t *testing.T) {
 	}
 	if _, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{}); failure == nil || failure.Code != CodeInvalidField {
 		t.Fatalf("empty set = %v, want an invalid_field failure", failure)
+	}
+}
+
+// TestBuildPlanAppliesTheApplicationFieldBoundary covers F3 on the desired-set
+// path: a plan (and therefore an apply) refuses an Application whose config
+// repeats a field the Volume or Endpoint object owns.
+func TestBuildPlanAppliesTheApplicationFieldBoundary(t *testing.T) {
+	server := planServer()
+	_, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+		Objects: []map[string]any{{
+			"apiVersion": api.Group + "/v1beta1",
+			"kind":       "Application",
+			"metadata":   map[string]any{"name": "web", "namespace": "default"},
+			"spec":       map[string]any{"config": map[string]any{"size": "20Gi"}},
+		}},
+	})
+	if failure == nil || failure.Code != CodeInvalidField {
+		t.Fatalf("failure = %v, want %s", failure, CodeInvalidField)
 	}
 }

@@ -1,0 +1,62 @@
+apiVersion: kos.tsic.top/v1beta1
+kind: ApplicationDefinition
+metadata:
+  name: nginx
+spec:
+  package:
+    digest: "sha256:f7af136cf34daa283214f61791d415009cd94353240322dec11cd752f6dff4bf"
+    version: "1.27.0"
+  config:
+    - name: replicas
+      type: integer
+      default: "1"
+      minimum: "1"
+      maximum: "10"
+      description: Number of web server replicas.
+    - name: image
+      type: string
+      default: "nginx:1.27"
+      description: Container image to run.
+    - name: logLevel
+      type: enum
+      enum: ["error", "warn", "info"]
+      default: "info"
+      description: Log verbosity of the web server.
+  # TODO(TSI-4279): execute declared hooks once the upgrade flow lands.
+  hooks:
+    - name: pre-stop
+      command: ["/bin/sh", "-c", "nginx -t"]
+  template: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: {{ .Name }}
+      namespace: {{ .Namespace }}
+    spec:
+      replicas: {{ .Config.replicas }}
+      selector:
+        matchLabels:
+          app: {{ .Name }}
+      template:
+        metadata:
+          labels:
+            app: {{ .Name }}
+        spec:
+          containers:
+            - name: {{ .Name }}
+              image: {{ .Config.image }}
+              args: ["--log-level={{ .Config.logLevel }}"]
+              ports:
+                - containerPort: 80
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: {{ .Name }}
+      namespace: {{ .Namespace }}
+    spec:
+      selector:
+        app: {{ .Name }}
+      ports:
+        - port: 80
+          targetPort: 80

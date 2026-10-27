@@ -115,11 +115,12 @@ var nodeWriters = map[Subject]map[Verb]bool{
 
 // systemWriters is the C-04 allocation for objects in the KOS namespace: the
 // installer owns them, the API process creates action records, and the
-// application reconciler deletes records it consumed.
+// application reconciler creates the abandonment manifest and deletes the
+// records it consumed.
 var systemWriters = map[Subject]map[Verb]bool{
 	SubjectInstaller:             allVerbs(),
 	SubjectAPIProcess:            {VerbCreate: true},
-	SubjectApplicationReconciler: {VerbDelete: true},
+	SubjectApplicationReconciler: {VerbCreate: true, VerbDelete: true},
 }
 
 // extensionWriters is the C-20 allocation for extension objects: the extension

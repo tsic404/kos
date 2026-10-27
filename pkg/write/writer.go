@@ -21,6 +21,21 @@ const fieldManagerLimit = 128
 // its carrier, not a vocabulary for the value.
 const ManagedByValue = "kos-shell"
 
+// AbandonmentLabel marks the immutable abandonment manifest the application
+// reconciler creates in the KOS namespace (C-04, C-33). It is a plain label, not
+// a C-02 marker: it tells the write allocation which KOS-namespace record a
+// creation writes.
+const AbandonmentLabel = "kos.tsic.top/abandonment"
+
+// ActionRecordLabel and ActionRecordPrefix identify the one-shot action records
+// the control plane creates and the application reconciler consumes (C-04,
+// C-33). The allocation uses them to scope the reconciler's KOS-namespace
+// deletions to those records.
+const (
+	ActionRecordLabel  = "kos.tsic.top/action"
+	ActionRecordPrefix = "kos-action-"
+)
+
 // nativeResources names the native kinds the allocation tables talk about. Any
 // other native kind must come from discovery rather than a guess.
 var nativeResources = map[schema.GroupKind]string{
@@ -72,6 +87,7 @@ func (w *Writer) create(ctx context.Context, subject Subject, session Session, c
 		Parts:   partsOf(object),
 		Fields:  fields,
 		Markers: markerWrites(object),
+		Labels:  object.GetLabels(),
 		Scope:   w.Scope,
 		Claim:   claim,
 	}
@@ -126,6 +142,7 @@ func (w *Writer) apply(ctx context.Context, subject Subject, session Session, cl
 		Parts:   parts,
 		Fields:  fieldsOf(document),
 		Markers: markers,
+		Labels:  document.GetLabels(),
 		Current: current,
 		Scope:   w.Scope,
 		Claim:   claim,
@@ -211,6 +228,38 @@ func (w *Writer) transferOwner(ctx context.Context, subject Subject, session Ses
 		"spec":       map[string]any{"owner": owner},
 	}}
 	return w.applyDocument(ctx, ref, PartSpec, ownerDocument, true, ownerManager)
+}
+
+// SetFinalizers writes the finalizer list of one object as the reconciler that
+// also writes its status. Finalizers are the uninstall gate of C-33/C-54: the
+// object stays until its own reconciler says the work is done.
+func (w *Writer) SetFinalizers(ctx context.Context, subject Subject, ref Ref, finalizers []string) (*unstructured.Unstructured, error) {
+	current, err := w.Get(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	request := Request{
+		Subject: subject,
+		Object:  ref,
+		Verb:    VerbApply,
+		Parts:   []Part{PartMeta},
+		Current: current,
+		Scope:   w.Scope,
+	}
+	if err := Admit(request); err != nil {
+		return nil, err
+	}
+	updated := current.DeepCopy()
+	updated.SetFinalizers(finalizers)
+	resource, err := w.resource(ref)
+	if err != nil {
+		return nil, err
+	}
+	stored, err := resource.Update(ctx, updated, metav1.UpdateOptions{})
+	if err != nil {
+		return nil, w.mapError(ctx, ref, err)
+	}
+	return stored, nil
 }
 
 // Markers sets and removes marker keys on an existing object, reading it
@@ -334,7 +383,7 @@ func (w *Writer) resource(ref Ref) (dynamic.ResourceInterface, error) {
 		plural, known = nativeResources[ref.GroupKind()]
 	}
 	if !known {
-		return nil, fmt.Errorf("no resource known for %s", ref)
+		return nil, &UnknownResource{Ref: ref}
 	}
 	resource := w.Dynamic.Resource(schema.GroupVersionResource{
 		Group:    ref.Group,
@@ -345,6 +394,18 @@ func (w *Writer) resource(ref Ref) (dynamic.ResourceInterface, error) {
 		return resource, nil
 	}
 	return resource.Namespace(ref.Namespace), nil
+}
+
+// UnknownResource reports a kind or version the write path cannot map to a
+// cluster resource. Repeating the write cannot make it succeed (C-33).
+type UnknownResource struct {
+	// Ref is the object the write addressed.
+	Ref Ref
+}
+
+// Error names the object the write path could not resolve.
+func (e *UnknownResource) Error() string {
+	return fmt.Sprintf("no resource known for %s", e.Ref)
 }
 
 // mapError turns a server conflict into the object-carrying conflict C-05

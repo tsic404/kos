@@ -818,7 +818,14 @@ func TestNodeAllocation(t *testing.T) {
 		{subject: SubjectVolumeReconciler, verb: VerbApply},
 	} {
 		t.Run(fmt.Sprintf("%s-%s", test.subject, test.verb), func(t *testing.T) {
-			err := Admit(Request{Subject: test.subject, Session: owner(), Object: ref, Verb: test.verb, Parts: []Part{PartObject}})
+			request := Request{Subject: test.subject, Session: owner(), Object: ref, Verb: test.verb, Parts: []Part{PartObject}}
+			if test.subject == SubjectApplicationReconciler && test.verb == VerbDelete {
+				// C-04 grants the delete of consumed action records only.
+				request.Object = Ref{Version: "v1", Kind: "ConfigMap", Namespace: api.SystemNamespace, Name: ActionRecordPrefix + "uid-1-retry"}
+				request.Current = nativeStored("ConfigMap", api.SystemNamespace, request.Object.Name,
+					map[string]string{markers.ManagedBy: ManagedByValue, ActionRecordLabel: "retry"})
+			}
+			err := Admit(request)
 			if test.want && err != nil {
 				t.Fatalf("write refused: %v", err)
 			}
@@ -847,7 +854,14 @@ func TestSystemNamespaceAllocation(t *testing.T) {
 		{subject: SubjectUser, verb: VerbCreate},
 	} {
 		t.Run(fmt.Sprintf("%s-%s", test.subject, test.verb), func(t *testing.T) {
-			err := Admit(Request{Subject: test.subject, Session: owner(), Object: ref, Verb: test.verb, Parts: []Part{PartObject}})
+			request := Request{Subject: test.subject, Session: owner(), Object: ref, Verb: test.verb, Parts: []Part{PartObject}}
+			if test.subject == SubjectApplicationReconciler && test.verb == VerbDelete {
+				// C-04 grants the delete of consumed action records only.
+				request.Object = Ref{Version: "v1", Kind: "ConfigMap", Namespace: api.SystemNamespace, Name: ActionRecordPrefix + "uid-1-retry"}
+				request.Current = nativeStored("ConfigMap", api.SystemNamespace, request.Object.Name,
+					map[string]string{markers.ManagedBy: ManagedByValue, ActionRecordLabel: "retry"})
+			}
+			err := Admit(request)
 			if test.want && err != nil {
 				t.Fatalf("write refused: %v", err)
 			}
@@ -1046,6 +1060,129 @@ func TestEndpointRouteAllocation(t *testing.T) {
 			}
 			if !test.want && err == nil {
 				t.Fatal("write allowed")
+			}
+		})
+	}
+}
+
+// TestClassOfNativeGroupInDeclaredNamespace covers C-32's render rule: an
+// application writes its native downstream objects whatever group they belong
+// to, but only inside the namespace it declared.
+func TestClassOfNativeGroupInDeclaredNamespace(t *testing.T) {
+	scope := Scope{Namespaces: map[string]bool{"apps": true}}
+	inside := Ref{Group: "apps", Version: "v1", Kind: "Deployment", Namespace: "apps", Name: "web"}
+	if got := ClassOf(inside, scope); got != ClassDownstream {
+		t.Fatalf("a Deployment in the declared namespace is %q, want %q", got, ClassDownstream)
+	}
+	outside := Ref{Group: "apps", Version: "v1", Kind: "Deployment", Namespace: "other", Name: "web"}
+	if got := ClassOf(outside, scope); got != ClassForeign {
+		t.Fatalf("a Deployment outside the declared namespace is %q, want %q", got, ClassForeign)
+	}
+}
+
+// TestKOSNamespaceRecordAllocation covers C-04's KOS-namespace row: the
+// application reconciler creates only abandonment manifests, and no other
+// KOS-namespace object, through the label that names the record.
+func TestKOSNamespaceRecordAllocation(t *testing.T) {
+	record := func(kind string, labels map[string]string) Request {
+		return Request{
+			Subject: SubjectApplicationReconciler,
+			Object:  Ref{Version: "v1", Kind: kind, Namespace: api.SystemNamespace, Name: "record"},
+			Verb:    VerbCreate,
+			Parts:   []Part{PartObject},
+			Labels:  labels,
+			Markers: creatorMarkers(""),
+		}
+	}
+	if err := Admit(record("ConfigMap", map[string]string{AbandonmentLabel: "uid-1"})); err != nil {
+		t.Fatalf("the abandonment manifest was refused: %v", err)
+	}
+	if err := Admit(record("ConfigMap", nil)); err == nil {
+		t.Fatal("the reconciler created a KOS-namespace object without the abandonment label")
+	}
+	if err := Admit(record("Secret", map[string]string{AbandonmentLabel: "uid-1"})); err == nil {
+		t.Fatal("the reconciler created a non-ConfigMap KOS-namespace object")
+	}
+}
+
+// TestPrivilegedGroupsStayForeign covers C-04: a declared namespace admits a
+// render's workloads, not objects that grant or extend rights.
+func TestPrivilegedGroupsStayForeign(t *testing.T) {
+	for _, object := range []Ref{
+		{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "RoleBinding", Namespace: "apps", Name: "grant"},
+		{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition", Namespace: "apps", Name: "class"},
+	} {
+		err := Admit(Request{
+			Subject: SubjectApplicationReconciler,
+			Object:  object,
+			Verb:    VerbCreate,
+			Parts:   []Part{PartObject},
+			Markers: creatorMarkers("uid-1"),
+			Scope:   namespaces("apps"),
+		})
+		if err == nil {
+			t.Errorf("%s was admitted as a downstream object", object.String())
+		}
+	}
+}
+
+// TestApplicationReconcilerDeletesOnlyActionRecords covers C-04's delete row:
+// the reconciler removes the records it consumed, not the rest of the KOS
+// namespace and never the immutable abandonment manifest.
+func TestApplicationReconcilerDeletesOnlyActionRecords(t *testing.T) {
+	recordRef := Ref{Version: "v1", Kind: "ConfigMap", Namespace: api.SystemNamespace, Name: ActionRecordPrefix + "uid-1-orphan"}
+	installerRef := Ref{Version: "v1", Kind: "ConfigMap", Namespace: api.SystemNamespace, Name: "installer"}
+	manifestRef := Ref{Version: "v1", Kind: "ConfigMap", Namespace: api.SystemNamespace, Name: "kos-app-abandonment-uid-1"}
+	cases := []struct {
+		name    string
+		ref     Ref
+		current *unstructured.Unstructured
+		want    bool
+	}{
+		{
+			name: "consumed action record",
+			ref:  recordRef,
+			current: nativeStored("ConfigMap", api.SystemNamespace, recordRef.Name,
+				map[string]string{markers.ManagedBy: ManagedByValue, ActionRecordLabel: "orphan"}),
+			want: true,
+		},
+		{
+			name:    "installer object",
+			ref:     installerRef,
+			current: nativeStored("ConfigMap", api.SystemNamespace, installerRef.Name, map[string]string{markers.ManagedBy: ManagedByValue}),
+		},
+		{
+			name: "abandonment manifest",
+			ref:  manifestRef,
+			current: nativeStored("ConfigMap", api.SystemNamespace, manifestRef.Name,
+				map[string]string{markers.ManagedBy: ManagedByValue, AbandonmentLabel: "uid-1"}),
+		},
+		{
+			name: "already gone",
+			ref:  recordRef,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			err := Admit(Request{
+				Subject: SubjectApplicationReconciler,
+				Object:  test.ref,
+				Verb:    VerbDelete,
+				Parts:   []Part{PartObject},
+				Current: test.current,
+			})
+			if test.name == "already gone" {
+				// A missing object passes admission; the delete itself reports NotFound.
+				if err != nil {
+					t.Fatalf("a missing record was refused: %v", err)
+				}
+				return
+			}
+			if test.want && err != nil {
+				t.Fatalf("delete refused: %v", err)
+			}
+			if !test.want && err == nil {
+				t.Fatal("delete allowed")
 			}
 		})
 	}
