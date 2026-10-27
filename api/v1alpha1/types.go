@@ -859,7 +859,65 @@ type NodeDevice struct {
 }
 
 // NodeDeviceSpec holds the device fact; it has no status writer (C-07).
-type NodeDeviceSpec struct{}
+type NodeDeviceSpec struct {
+	// Node is the node the facts belong to; it must equal metadata.name (C-37).
+	// +optional
+	Node string `json:"node,omitempty"`
+	// Collector is the collection identity that reported the facts (C-25).
+	// +optional
+	Collector string `json:"collector,omitempty"`
+	// ObservedAt is when the collector last observed the facts (C-37).
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
+	// Devices lists the hardware facts of the node (C-37).
+	// +optional
+	Devices []DeviceFact `json:"devices,omitempty"`
+}
+
+// DeviceFact is one device the collector observed (C-37). The four layers are
+// independent facts: one being true never implies another.
+type DeviceFact struct {
+	// Name is the device's name on the node.
+	// +optional
+	Name string `json:"name,omitempty"`
+	// Serial is the device serial number; duplicate records keep the newest.
+	// +optional
+	Serial string `json:"serial,omitempty"`
+	// Model is the device model.
+	// +optional
+	Model string `json:"model,omitempty"`
+	// Kind is the device class, such as disk or gpu.
+	// +optional
+	Kind string `json:"kind,omitempty"`
+	// IsPresent reports that the hardware exists.
+	// +optional
+	IsPresent bool `json:"present,omitempty"`
+	// IsRecognized reports that Linux recognised the device.
+	// +optional
+	IsRecognized bool `json:"recognized,omitempty"`
+	// IsDriverReady reports that the device driver works.
+	// +optional
+	IsDriverReady bool `json:"driverReady,omitempty"`
+	// IsPublished reports that the device is published as a schedulable resource.
+	// +optional
+	IsPublished bool `json:"published,omitempty"`
+	// Occupancy names the system holding the device; empty means free (C-37).
+	// +optional
+	Occupancy *DeviceOccupancy `json:"occupancy,omitempty"`
+	// ObservedAt orders duplicate records of one serial number.
+	// +optional
+	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
+}
+
+// DeviceOccupancy is the system that holds a device (C-37).
+type DeviceOccupancy struct {
+	// Source names the holding system, such as a storage pool.
+	// +optional
+	Source string `json:"source,omitempty"`
+	// Reference names the holding object inside that system.
+	// +optional
+	Reference string `json:"reference,omitempty"`
+}
 
 // NodeDeviceList is the list form of NodeDevice.
 //

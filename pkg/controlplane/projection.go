@@ -50,6 +50,9 @@ type Projection struct {
 	ObservedAt time.Time `json:"observedAt"`
 	// Stale tells whether ObservedAt is older than StaleThreshold at read time.
 	Stale bool `json:"stale"`
+	// Sources lists the discovery adapters that reported this object; empty
+	// unless a discovery index is configured (C-25).
+	Sources []string `json:"sources,omitempty"`
 	// Object is the projected object as the source returned it.
 	Object map[string]any `json:"object"`
 }
@@ -210,6 +213,14 @@ func withVolumeBindings(object map[string]any, names []string, index map[string]
 	projected := maps.Clone(object)
 	projected["status"] = projectedStatus
 	return projected
+}
+
+// discoverySources names the adapters that reported one object (C-25).
+func (s *Server) discoverySources(ref ObjectRef) []string {
+	if s.discoveries == nil {
+		return nil
+	}
+	return s.discoveries.Sources(ref.Group, ref.Kind, ref.Namespace, ref.Name)
 }
 
 // projectedObject returns one object as a reader sees it: an extension object

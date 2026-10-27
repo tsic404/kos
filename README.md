@@ -6,8 +6,8 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 
 当前阶段交付内核对象模型、归属三态、写入路径、ABI、控制面 API、通用调和内核、
 扩展装载（包摘要、声明、九类贡献、依赖激活与可见性投影）、应用渲染与生命周期、入口形态与
-证书状态、升级回滚与外部改动仲裁、本地账号会话；不含停用与卸载、各贡献类自身的语义、卷迁移
-与 Provider 能力验证。
+证书状态、升级回滚与外部改动仲裁、本地账号会话、发现适配器与设备事实；不含停用与卸载、
+各贡献类自身的语义、卷迁移与 Provider 能力验证。
 
 ## 布局
 
@@ -27,6 +27,8 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `pkg/app/builtin/` | 发行版内置的五份应用定义，摘要由内容计算 |
 | `pkg/identity/` | 账号与会话：本地账号、锁定计数、一次性口令、会话边界与失效、自身数据库与每日导出 |
 | `pkg/adoption/` | 归属动作：接管、释放、放弃与接管前的不可变快照 |
+| `pkg/discovery/` | C-25 发现适配器运行：按声明的类别与范围只读上报，多来源索引 |
+| `pkg/device/` | C-37 设备采集、越界校验、陈旧与回收，以及设备视图与可分配推导 |
 | `pkg/serial/` | 调和循环之外显式写入动作的按对象串行门（调和轮次由 `pkg/reconcile` 串行） |
 | `pkg/endpoint/` | C-43 至 C-46：五种入口形态、唯一性台账、应用反查、证书状态与组件依赖边 |
 | `pkg/extension/` | C-17 至 C-20/C-28/C-48：包摘要、声明、九类贡献、依赖激活、可见性投影、贡献类控制器与删除受阻门 |
@@ -39,6 +41,11 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `tests/acceptance/TC-25/` | `Reconciled` 的 True、False、Unknown 三值 |
 | `tests/acceptance/TC-26/` | 重复调和无增量、超限单轮可被指标观察到 |
 | `tests/acceptance/TC-17/` | 接管、释放与放弃 |
+| `tests/acceptance/TC-11/` | 发现只读、接管显式与多来源并列 |
+| `tests/acceptance/TC-81/` | 越界写入标无效且不参与调度推导 |
+| `tests/acceptance/TC-82/` | 设备事实陈旧与节点消失后的回收 |
+| `tests/acceptance/TC-83/` | 设备占用来源与空闲设备 |
+| `tests/acceptance/TC-131/` | 同一序列号的重复条目只保留最新 |
 | `tests/acceptance/TC-18/` | 父对象调和器不写子对象 spec |
 | `tests/acceptance/TC-19/` | 归属标记的载体 |
 | `tests/acceptance/TC-24/` | 并发写入与角色写权限 |
@@ -80,8 +87,9 @@ C-60 的 `spec.owner`（五类带所有者的对象）、C-59 的 `Application.s
 C-17 的 `SystemComponent.spec.package`（工件引用与 sha256 摘要）、
 C-32 的 `Application.spec.definitionRef`/`namespace`/`config`/`volumes` 与定义侧
 `spec.package`/`config`/`template`/`hooks`/`chart`/`requires`，C-33 的
-`status.retryCount`、`status.nextRetryAt`、`status.uninstall`，以及 C-46 的
-`Endpoint.status.certificate`（签发者、就绪、到期与告警窗口）与 `CertificateReady` 条件。
+`status.retryCount`、`status.nextRetryAt`、`status.uninstall`，C-46 的
+`Endpoint.status.certificate`（签发者、就绪、到期与告警窗口）与 `CertificateReady` 条件，
+以及 C-70 的 `NodeDevice.spec.node`/`collector`/`observedAt`/`devices`。
 
 ## ABI
 
@@ -127,7 +135,7 @@ KOS 不再写它；放弃写入 `declined`，对象留在 unmanaged，不再被�
 | `POST` | `/api/v1/apply-requests` | 接受期望对象集后执行；进度从对象本身读取 |
 | `POST` | `/api/v1/action-requests` | 应用动作 `retry`/`orphan`/`confirm`；202 已接受 + 动作记录引用 |
 
-- 读投影每项带 `observedAt` 与 `stale`；陈旧阈值是 `controlplane.StaleThreshold`（2 分钟），所有来源共用。
+- 读投影每项带 `observedAt` 与 `stale`；陈旧阈值是 `controlplane.StaleThreshold`（2 分钟），所有来源共用。确知发现来源时，投影的 `sources` 列出全部上报的适配器标识。
 - 写请求返回 202 与对象引用，不返回已完成；工作在接受后继续，客户端断线不影响推进。
 - 同一写请求重复提交收敛到同一对象；已存在且期望状态不同时报 `object_exists`。
 - 写请求带 `If-Match`（或 `metadata.resourceVersion`）；版本已变时由 API server 判冲突，返回 409
