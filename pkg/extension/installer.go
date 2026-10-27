@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -28,6 +29,24 @@ type Installer struct {
 	Artifacts ArtifactSource
 	// Status writes component status as the component reconciler (C-03).
 	Status *write.Writer
+	// Preferences applies the declared fate of preference data when a component
+	// is withdrawn (C-27, C-29); nil keeps the store untouched.
+	Preferences PreferenceRetention
+	// Log records preference bookkeeping failures; nil discards them.
+	Log *slog.Logger
+}
+
+// PreferenceRetention is where the install pipeline settles the preference data
+// of a component that is no longer installed. An extension's preferences
+// survive its withdrawal only when its declaration asked for that (C-27, C-29).
+type PreferenceRetention interface {
+	// Retain records the declared fate of one installed component's preference
+	// data, keyed by the component object that declares it.
+	Retain(ctx context.Context, component, identifier string, keep bool) error
+	// Withdraw applies the recorded fates. present maps every live component
+	// object to the extension identifier it declares now; an empty identifier
+	// means this round could not read the declaration, so its domains stay.
+	Withdraw(ctx context.Context, present map[string]string) error
 }
 
 // Installation is the result of one install pass.
@@ -82,11 +101,14 @@ func (i *Installer) Install(ctx context.Context) (*Installation, error) {
 
 	requests := make([]Request, 0, len(list.Items))
 	objects := make(map[string]*unstructured.Unstructured, len(list.Items))
+	live := make(map[string]bool, len(list.Items))
 	for index := range list.Items {
 		object := &list.Items[index]
 		if object.GetDeletionTimestamp() != nil && !held[object.GetName()] {
 			continue
 		}
+		// A gate-released component has left the set, so it is not live here.
+		live[object.GetName()] = true
 		attribution, err := markers.AttributionOf(object.GetLabels())
 		if err != nil {
 			return nil, fmt.Errorf("component %s: %w", object.GetName(), err)
@@ -133,7 +155,65 @@ func (i *Installer) Install(ctx context.Context) (*Installation, error) {
 			return nil, err
 		}
 	}
+	// Preference bookkeeping records what it can and never fails the pass: the
+	// control-plane database is not on the reconciliation path (C-27, C-61).
+	i.retainPreferences(ctx, assessment, live)
 	return &Installation{components: assessment.Components, registry: assessment.Registry}, nil
+}
+
+// retainPreferences records the declared fate of every active extension's
+// preference data and then applies the recorded fates to the domains whose owner
+// is gone (C-27, C-29). A database failure is logged and changes nothing else:
+// the control-plane database is not on the reconciliation path (C-61).
+func (i *Installer) retainPreferences(ctx context.Context, assessment Assessment, live map[string]bool) {
+	if i.Preferences == nil {
+		return
+	}
+	present := make(map[string]string, len(live))
+	for name := range live {
+		// Every component object that still exists keeps its domains, whatever
+		// this round could read from it: only an object that is gone withdraws
+		// data.
+		present[name] = ""
+	}
+	recorded := true
+	for _, component := range assessment.Components {
+		present[component.Name] = component.Identifier
+		if component.Identifier == "" || !component.HasMetDependencies || len(component.Contributions.Preferences) == 0 {
+			continue
+		}
+		if err := i.Preferences.Retain(ctx, component.Name, component.Identifier, keepsContribution(component.Retention, ClassPreferences)); err != nil {
+			recorded = false
+			i.logger().Error("record preference domain", "component", component.Name, "identifier", component.Identifier, "error", err)
+		}
+	}
+	if !recorded {
+		// Acting on a partly recorded round could delete data whose declaration
+		// did not reach the store; the next round settles it.
+		return
+	}
+	if err := i.Preferences.Withdraw(ctx, present); err != nil {
+		i.logger().Error("settle preference domains", "error", err)
+	}
+}
+
+// logger resolves the install log.
+func (i *Installer) logger() *slog.Logger {
+	if i.Log != nil {
+		return i.Log
+	}
+	return slog.New(slog.DiscardHandler)
+}
+
+// keepsContribution reports whether the declaration kept the data of one
+// contribution class. An undeclared class is deleted, which is C-29's default.
+func keepsContribution(retention []Retention, class string) bool {
+	for _, entry := range retention {
+		if entry.Resource == class {
+			return entry.Keep
+		}
+	}
+	return false
 }
 
 // resource resolves the system component client.

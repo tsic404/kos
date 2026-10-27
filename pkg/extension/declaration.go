@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/tsic404/kos/api"
+	"github.com/tsic404/kos/api/v1beta1"
 	"github.com/tsic404/kos/pkg/write"
 )
 
@@ -253,10 +254,29 @@ type Setting struct {
 	Editable bool   `json:"editable,omitempty"`
 }
 
-// CatalogueSource is an application catalogue source (C-24).
+// CatalogueSource is an application catalogue source (C-24): the entries it
+// offers and how it keeps them current.
 type CatalogueSource struct {
-	ID   string `json:"id"`
-	Sync string `json:"sync,omitempty"`
+	ID      string           `json:"id"`
+	Sync    string           `json:"sync,omitempty"`
+	Entries []CatalogueEntry `json:"entries,omitempty"`
+}
+
+// CatalogueEntry is one installable offer of a catalogue source (C-24). The
+// definition is what installing the entry writes; Display is what the catalogue
+// shows for it. A malformed definition is not a declaration mistake: the entry
+// stays visible and reports why it cannot be installed.
+type CatalogueEntry struct {
+	ID         string                            `json:"id"`
+	Display    CatalogueDisplay                  `json:"display"`
+	Definition v1beta1.ApplicationDefinitionSpec `json:"definition"`
+}
+
+// CatalogueDisplay is the display information of one catalogue entry (C-24).
+type CatalogueDisplay struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Icon        string `json:"icon,omitempty"`
 }
 
 // DiscoveryAdapter is a discovery adapter contribution (C-25).
@@ -691,7 +711,10 @@ func loadSettings(entries []Setting) ([]Setting, []string) {
 	return kept, problems
 }
 
-// loadCatalogueSources validates catalogue source declarations (C-24).
+// loadCatalogueSources validates catalogue source declarations (C-24). Entry
+// identity is checked here because an entry names an application definition; its
+// package content is judged by the catalogue, which reports a bad package as an
+// entry that cannot be installed.
 func loadCatalogueSources(entries []CatalogueSource) ([]CatalogueSource, []string) {
 	ids := map[string]bool{}
 	kept := make([]CatalogueSource, 0, len(entries))
@@ -703,6 +726,21 @@ func loadCatalogueSources(entries []CatalogueSource) ([]CatalogueSource, []strin
 		}
 		if ids[entry.ID] {
 			entryProblems = append(entryProblems, "source "+entry.ID+" is declared twice")
+		}
+		entryIDs := map[string]bool{}
+		for entryIndex, offer := range entry.Entries {
+			if strings.TrimSpace(offer.ID) == "" || strings.TrimSpace(offer.ID) != offer.ID {
+				entryProblems = append(entryProblems, fmt.Sprintf("entries[%d]: id is required", entryIndex))
+			} else if problems := validation.IsDNS1123Subdomain(offer.ID); len(problems) > 0 {
+				entryProblems = append(entryProblems, fmt.Sprintf("entries[%d]: id %q is not a DNS subdomain: %s", entryIndex, offer.ID, problems[0]))
+			}
+			if entryIDs[offer.ID] {
+				entryProblems = append(entryProblems, fmt.Sprintf("entries[%d]: entry %s is declared twice", entryIndex, offer.ID))
+			}
+			entryIDs[offer.ID] = true
+			if strings.TrimSpace(offer.Display.Name) == "" {
+				entryProblems = append(entryProblems, fmt.Sprintf("entries[%d]: display.name is required", entryIndex))
+			}
 		}
 		if len(entryProblems) > 0 {
 			problems = append(problems, where(fmt.Sprintf("catalogueSources[%d]", index), entryProblems)...)

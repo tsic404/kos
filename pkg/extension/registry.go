@@ -21,6 +21,9 @@ type Registry struct {
 	discovery    []DiscoveryAdapter
 	diagnostics  []DiagnosticAdapter
 	preferences  []PreferenceSchema
+	// preferenceKeys maps an extension identifier to the keys it declared
+	// (C-27).
+	preferenceKeys map[string][]string
 }
 
 // ObjectClass resolves one served extension class (C-19).
@@ -145,6 +148,20 @@ func (r *Registry) CatalogueSources() []CatalogueSource {
 	return append([]CatalogueSource(nil), r.sources...)
 }
 
+// PreferenceKeys returns the preference keys one extension declared (C-27). The
+// second result is false when no active component declares that identifier, so
+// a request for a withdrawn extension is refused rather than served empty.
+func (r *Registry) PreferenceKeys(identifier string) ([]string, bool) {
+	if r == nil {
+		return nil, false
+	}
+	keys, ok := r.preferenceKeys[identifier]
+	if !ok {
+		return nil, false
+	}
+	return append([]string(nil), keys...), true
+}
+
 // DiscoveryAdapters returns the loaded discovery adapters.
 func (r *Registry) DiscoveryAdapters() []DiscoveryAdapter {
 	if r == nil {
@@ -177,10 +194,16 @@ type activated struct {
 
 // buildRegistry merges the activated contributions. A class two components both
 // declare stays with the earlier one; the later component keeps its other
-// contributions and loses that class (C-19, C-20). The returned map is the
-// effective contribution set of each component after conflicts.
+// contributions and loses that class (C-19, C-20). A catalogue entry is an
+// identity too: the first declaration keeps it, and a later claim is a
+// contribution conflict rather than a second writer of the same cluster-scoped
+// definition (C-24). The returned map is the effective contribution set of each
+// component after conflicts.
 func buildRegistry(components []activated) (*Registry, map[string]Contributions, map[string][]ClassProblem) {
-	registry := &Registry{classes: map[GroupKind]ObjectClass{}}
+	registry := &Registry{
+		classes:        map[GroupKind]ObjectClass{},
+		preferenceKeys: map[string][]string{},
+	}
 	conflicts := map[string][]ClassProblem{}
 	effective := make(map[string]Contributions, len(components))
 	serving := map[GroupKind]string{}
@@ -238,15 +261,38 @@ func buildRegistry(components []activated) (*Registry, map[string]Contributions,
 		effective[component.name] = entry
 	}
 
+	servingEntries := map[string]string{}
 	for _, component := range components {
 		entry := effective[component.name]
+		keptSources := make([]CatalogueSource, 0, len(entry.CatalogueSources))
+		for _, source := range entry.CatalogueSources {
+			keptEntries := make([]CatalogueEntry, 0, len(source.Entries))
+			for _, offer := range source.Entries {
+				if owner, taken := servingEntries[offer.ID]; taken {
+					recordConflict(conflicts, component.name, ClassCatalogueSources,
+						fmt.Sprintf("entry %s of source %s is already offered by source %s", offer.ID, source.ID, owner))
+					continue
+				}
+				servingEntries[offer.ID] = source.ID
+				keptEntries = append(keptEntries, offer)
+			}
+			source.Entries = keptEntries
+			keptSources = append(keptSources, source)
+		}
+		entry.CatalogueSources = keptSources
+		effective[component.name] = entry
 		registry.capabilities = append(registry.capabilities, entry.Capabilities...)
 		registry.pages = append(registry.pages, entry.Pages...)
 		registry.settings = append(registry.settings, entry.Settings...)
-		registry.sources = append(registry.sources, entry.CatalogueSources...)
+		registry.sources = append(registry.sources, keptSources...)
+		for _, schema := range entry.Preferences {
+			for _, key := range schema.Keys {
+				registry.preferenceKeys[component.loaded.Identifier] = appendUnique(registry.preferenceKeys[component.loaded.Identifier], key)
+			}
+		}
+		registry.preferences = append(registry.preferences, entry.Preferences...)
 		registry.discovery = append(registry.discovery, entry.DiscoveryAdapters...)
 		registry.diagnostics = append(registry.diagnostics, entry.DiagnosticAdapters...)
-		registry.preferences = append(registry.preferences, entry.Preferences...)
 	}
 	return registry, effective, conflicts
 }
@@ -260,6 +306,16 @@ func recordConflict(conflicts map[string][]ClassProblem, component, class, item 
 		}
 	}
 	conflicts[component] = append(conflicts[component], ClassProblem{Class: class, Items: []string{item}})
+}
+
+// appendUnique adds one item unless it is already present.
+func appendUnique(items []string, item string) []string {
+	for _, existing := range items {
+		if existing == item {
+			return items
+		}
+	}
+	return append(items, item)
 }
 
 // findCapability resolves one capability entry.

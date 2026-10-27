@@ -85,14 +85,29 @@ type LoginAttempt struct {
 	LockedUntil time.Time
 }
 
-// Preference is one stored user preference.
+// Preference is one stored user preference. Preferences are scoped by the
+// extension that declared the key set and by the account (C-27); the kernel
+// domain is the empty extension.
 type Preference struct {
+	// Extension is the extension identifier the preference belongs to.
+	Extension string
 	// Key names the preference.
 	Key string
 	// Value is the stored encoding the contributing extension owns.
 	Value string
 	// UpdatedAt is when it last changed.
 	UpdatedAt time.Time
+}
+
+// PreferenceDomain is the recorded fate of one extension's preference data and
+// the component object that declared it (C-27, C-29).
+type PreferenceDomain struct {
+	// Identifier is the extension identity the domain belongs to.
+	Identifier string
+	// Component is the system component object that declared the domain.
+	Component string
+	// Keep reports whether the declaration kept the data when withdrawn.
+	Keep bool
 }
 
 // AuditEntry is one stored audit record (C-14).
@@ -592,12 +607,18 @@ func (s *Store) ResetLoginAttempts(ctx context.Context, loginName string) error 
 	return nil
 }
 
-// SetPreference stores one preference of an account.
+// SetPreference stores one preference of an account in the kernel domain.
 func (s *Store) SetPreference(ctx context.Context, username, key, value string) error {
-	result, err := s.db.ExecContext(ctx, `INSERT INTO preferences (user_id, "key", value, updated_at)
-		SELECT id, ?, ?, ? FROM users WHERE username = ? AND true
-		ON CONFLICT(user_id, "key") DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-		key, value, toMillis(s.now()), username)
+	return s.SetScopedPreference(ctx, username, "", key, value)
+}
+
+// SetScopedPreference stores one preference of an account inside one
+// extension's domain (C-27).
+func (s *Store) SetScopedPreference(ctx context.Context, username, identifier, key, value string) error {
+	result, err := s.db.ExecContext(ctx, `INSERT INTO preferences (user_id, extension, "key", value, updated_at)
+		SELECT id, ?, ?, ?, ? FROM users WHERE username = ? AND true
+		ON CONFLICT(user_id, extension, "key") DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		identifier, key, value, toMillis(s.now()), username)
 	if err != nil {
 		return fmt.Errorf("identity: write preference: %w", err)
 	}
@@ -611,11 +632,12 @@ func (s *Store) SetPreference(ctx context.Context, username, key, value string) 
 	return nil
 }
 
-// Preferences reads an account's preferences, ordered by key.
+// Preferences reads an account's preferences in every domain, ordered by
+// extension and key.
 func (s *Store) Preferences(ctx context.Context, username string) ([]Preference, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT p."key", p.value, p.updated_at
+	rows, err := s.db.QueryContext(ctx, `SELECT p.extension, p."key", p.value, p.updated_at
 		FROM preferences p JOIN users u ON u.id = p.user_id
-		WHERE u.username = ? ORDER BY p."key"`, username)
+		WHERE u.username = ? ORDER BY p.extension, p."key"`, username)
 	if err != nil {
 		return nil, fmt.Errorf("identity: read preferences: %w", err)
 	}
@@ -626,7 +648,7 @@ func (s *Store) Preferences(ctx context.Context, username string) ([]Preference,
 			preference Preference
 			updatedAt  int64
 		)
-		if err := rows.Scan(&preference.Key, &preference.Value, &updatedAt); err != nil {
+		if err := rows.Scan(&preference.Extension, &preference.Key, &preference.Value, &updatedAt); err != nil {
 			return nil, fmt.Errorf("identity: read preference: %w", err)
 		}
 		preference.UpdatedAt = fromMillis(updatedAt)
@@ -636,6 +658,113 @@ func (s *Store) Preferences(ctx context.Context, username string) ([]Preference,
 		return nil, fmt.Errorf("identity: read preferences: %w", err)
 	}
 	return preferences, nil
+}
+
+// PreferencesOf reads one account's preferences inside one extension's domain.
+func (s *Store) PreferencesOf(ctx context.Context, username, identifier string) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT p."key", p.value
+		FROM preferences p JOIN users u ON u.id = p.user_id
+		WHERE u.username = ? AND p.extension = ? ORDER BY p."key"`, username, identifier)
+	if err != nil {
+		return nil, fmt.Errorf("identity: read preferences: %w", err)
+	}
+	defer rows.Close()
+	values := map[string]string{}
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, fmt.Errorf("identity: read preference: %w", err)
+		}
+		values[key] = value
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("identity: read preferences: %w", err)
+	}
+	return values, nil
+}
+
+// SetPreferenceDomain records the declared fate of one extension's preference
+// data and the component object it belongs to (C-27, C-29).
+func (s *Store) SetPreferenceDomain(ctx context.Context, component, identifier string, keep bool) error {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO preference_domains (identifier, component, keep, updated_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(identifier) DO UPDATE SET component = excluded.component, keep = excluded.keep, updated_at = excluded.updated_at`,
+		identifier, component, boolInt(keep), toMillis(s.now())); err != nil {
+		return fmt.Errorf("identity: record preference domain: %w", err)
+	}
+	return nil
+}
+
+// PreferenceDomains reads the recorded fate of every extension that declared
+// preferences.
+func (s *Store) PreferenceDomains(ctx context.Context) ([]PreferenceDomain, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT identifier, component, keep FROM preference_domains`)
+	if err != nil {
+		return nil, fmt.Errorf("identity: read preference domains: %w", err)
+	}
+	defer rows.Close()
+	domains := make([]PreferenceDomain, 0, 8)
+	for rows.Next() {
+		var (
+			domain PreferenceDomain
+			keep   int
+		)
+		if err := rows.Scan(&domain.Identifier, &domain.Component, &keep); err != nil {
+			return nil, fmt.Errorf("identity: read preference domain: %w", err)
+		}
+		domain.Keep = keep != 0
+		domains = append(domains, domain)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("identity: read preference domains: %w", err)
+	}
+	return domains, nil
+}
+
+// DeletePreferenceDomain removes every stored preference of one extension and
+// forgets its recorded fate (C-27, C-29).
+func (s *Store) DeletePreferenceDomain(ctx context.Context, identifier string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM preferences WHERE extension = ?`, identifier); err != nil {
+		return fmt.Errorf("identity: delete preferences: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM preference_domains WHERE identifier = ?`, identifier); err != nil {
+		return fmt.Errorf("identity: forget preference domain: %w", err)
+	}
+	return nil
+}
+
+// SettingValues reads the stored value of every setting item in one scope
+// target (C-23).
+func (s *Store) SettingValues(ctx context.Context, scope, target string) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT setting_id, value FROM setting_values
+		WHERE scope = ? AND target = ? ORDER BY setting_id`, scope, target)
+	if err != nil {
+		return nil, fmt.Errorf("identity: read setting values: %w", err)
+	}
+	defer rows.Close()
+	values := map[string]string{}
+	for rows.Next() {
+		var id, value string
+		if err := rows.Scan(&id, &value); err != nil {
+			return nil, fmt.Errorf("identity: read setting value: %w", err)
+		}
+		values[id] = value
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("identity: read setting values: %w", err)
+	}
+	return values, nil
+}
+
+// SetSettingValue stores the current value of one setting item (C-23).
+func (s *Store) SetSettingValue(ctx context.Context, scope, target, identifier, value string) error {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO setting_values (scope, target, setting_id, value, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(scope, target, setting_id) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		scope, target, identifier, value, toMillis(s.now())); err != nil {
+		return fmt.Errorf("identity: write setting value: %w", err)
+	}
+	return nil
 }
 
 // AppendAudit stores one audit record (C-14).

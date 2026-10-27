@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,9 @@ const (
 	MaxPasswordLength = 1024
 	// MaxUsernameLength is the longest login name.
 	MaxUsernameLength = 253
+	// MaxPreferenceValueLength is the longest preference value the interface
+	// stores; it keeps one request from filling the database (C-27).
+	MaxPreferenceValueLength = 8192
 )
 
 // Session is an authenticated identity for one request (C-63). The role is the
@@ -146,25 +150,30 @@ type Config struct {
 	// Owned finds the objects an account still owns; deletion is refused
 	// without it (C-60).
 	Owned OwnedObjects
+	// Preferences resolves the preference keys active extensions declare
+	// (C-27); nil serves no preference domain.
+	Preferences PreferenceSchemas
 }
 
 // Service is the account and session layer of the control plane (C-63).
 type Service struct {
-	store *Store
-	now   func() time.Time
-	log   *slog.Logger
-	owned OwnedObjects
-	cache *sessionCache
+	store       *Store
+	now         func() time.Time
+	log         *slog.Logger
+	owned       OwnedObjects
+	preferences PreferenceSchemas
+	cache       *sessionCache
 }
 
 // New builds the service over a store.
 func New(store *Store, config Config) *Service {
 	service := &Service{
-		store: store,
-		now:   config.Now,
-		log:   config.Log,
-		owned: config.Owned,
-		cache: newSessionCache(),
+		store:       store,
+		now:         config.Now,
+		log:         config.Log,
+		owned:       config.Owned,
+		preferences: config.Preferences,
+		cache:       newSessionCache(),
 	}
 	if service.now == nil {
 		service.now = time.Now
@@ -547,6 +556,122 @@ func (s *Service) BootstrapOwner(ctx context.Context, username string) (Bootstra
 // Now is the service clock, so response deadlines use the same instant the
 // decisions did.
 func (s *Service) Now() time.Time { return s.now() }
+
+// PreferenceSchemas answers the preference keys an active extension declares
+// (C-27). A control plane without loaded extensions declares none.
+type PreferenceSchemas interface {
+	// PreferenceKeys returns the keys one extension declared; ok is false when
+	// no active component declares that identifier.
+	PreferenceKeys(identifier string) ([]string, bool)
+}
+
+// Preferences reads one account's preferences inside one extension's domain.
+// The domain must belong to an active extension, and a stored key the schema no
+// longer declares is ignored rather than returned (C-27).
+func (s *Service) Preferences(ctx context.Context, session Session, identifier string) (map[string]string, error) {
+	keys, ok := s.preferenceKeys(identifier)
+	if !ok {
+		return nil, ErrPreferenceDomain
+	}
+	stored, err := s.store.PreferencesOf(ctx, session.Username, identifier)
+	if err != nil {
+		return nil, s.storeFailure("read preferences", err)
+	}
+	values := make(map[string]string, len(keys))
+	for _, key := range keys {
+		if value, found := stored[key]; found {
+			values[key] = value
+		}
+	}
+	return values, nil
+}
+
+// SetPreference stores one preference of the signed-in account. A key the
+// extension did not declare is refused, and only a session that may write can
+// change one (C-27, C-59).
+func (s *Service) SetPreference(ctx context.Context, session Session, identifier, key, value string) error {
+	if session.Role == write.RoleGuest {
+		return ErrPermissionDenied
+	}
+	keys, ok := s.preferenceKeys(identifier)
+	if !ok {
+		return ErrPreferenceDomain
+	}
+	if !containsKey(keys, key) {
+		return invalid("偏好键 " + key + " 未被扩展 " + identifier + " 声明")
+	}
+	if utf8.RuneCountInString(value) > MaxPreferenceValueLength {
+		return invalid("偏好值超过 " + strconv.Itoa(MaxPreferenceValueLength) + " 个字符")
+	}
+	if err := s.store.SetScopedPreference(ctx, session.Username, identifier, key, value); err != nil {
+		return s.storeFailure("write preference", err)
+	}
+	return nil
+}
+
+// Retain records the declared fate of one installed component's preference
+// data, keyed by the component object that declares it (C-27, C-29).
+func (s *Service) Retain(ctx context.Context, component, identifier string, keep bool) error {
+	if err := s.store.SetPreferenceDomain(ctx, component, identifier, keep); err != nil {
+		return s.storeFailure("record preference domain", err)
+	}
+	return nil
+}
+
+// Withdraw applies the recorded fate to every extension whose owner is gone. A
+// domain is withdrawn when its component object no longer exists, or when that
+// object now declares a different extension; a component that still exists
+// keeps its domains whatever this round could read from its package (C-27,
+// C-29). present maps every live component object to the identifier it declares
+// now, with an empty identifier for a declaration this round could not read.
+func (s *Service) Withdraw(ctx context.Context, present map[string]string) error {
+	domains, err := s.store.PreferenceDomains(ctx)
+	if err != nil {
+		return s.storeFailure("read preference domains", err)
+	}
+	for _, domain := range domains {
+		if !withdrawn(domain, present) {
+			continue
+		}
+		if err := s.store.DeletePreferenceDomain(ctx, domain.Identifier); err != nil {
+			return s.storeFailure("delete preferences", err)
+		}
+	}
+	return nil
+}
+
+// withdrawn reports whether one recorded domain lost its owner: the component
+// object is gone, or it now declares another extension. A kept domain, and one
+// whose live component has an unread identifier, stays.
+func withdrawn(domain PreferenceDomain, present map[string]string) bool {
+	if domain.Keep {
+		return false
+	}
+	identifier, installed := present[domain.Component]
+	if !installed {
+		return true
+	}
+	return identifier != "" && identifier != domain.Identifier
+}
+
+// preferenceKeys resolves the declared keys of one domain; a control plane
+// without a registry has no domain to serve.
+func (s *Service) preferenceKeys(identifier string) ([]string, bool) {
+	if s.preferences == nil {
+		return nil, false
+	}
+	return s.preferences.PreferenceKeys(identifier)
+}
+
+// containsKey reports whether one declared key set holds a key.
+func containsKey(keys []string, key string) bool {
+	for _, declared := range keys {
+		if declared == key {
+			return true
+		}
+	}
+	return false
+}
 
 // storeFailure logs a database failure and reports it as unavailability. A
 // caller maps it to the one stable code that tells a user to retry (C-61).
