@@ -67,6 +67,9 @@ func ValidateDefinition(spec v1beta1.ApplicationDefinitionSpec) error {
 			return &InvalidPackage{Reason: err.Error()}
 		}
 	}
+	if err := ValidateResources(spec.Resources, "spec.resources"); err != nil {
+		return &InvalidPackage{Reason: err.Error()}
+	}
 	return nil
 }
 

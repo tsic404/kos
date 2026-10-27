@@ -104,12 +104,19 @@ func DefinitionContent(t *testing.T, name, dataFormat, template string, hooks []
 // content, as the catalogue does (C-32).
 func Definition(t *testing.T, name string, requires []v1beta1.CapabilityRequirement) *v1beta1.ApplicationDefinition {
 	t.Helper()
-	return DefinitionWithTemplate(t, name, configTemplate, requires)
+	return TemplateDefinition(t, name, configTemplate, nil, requires...)
 }
 
 // DefinitionWithTemplate is Definition with a translation template the case
 // supplies, so a package can be shaped for what the case measures.
 func DefinitionWithTemplate(t *testing.T, name, template string, requires []v1beta1.CapabilityRequirement) *v1beta1.ApplicationDefinition {
+	t.Helper()
+	return TemplateDefinition(t, name, template, nil, requires...)
+}
+
+// TemplateDefinition builds a definition with the given translation template and
+// package resource defaults. Its package digest is computed from the content.
+func TemplateDefinition(t *testing.T, name, template string, resources *v1beta1.ResourceRequirements, requires ...v1beta1.CapabilityRequirement) *v1beta1.ApplicationDefinition {
 	t.Helper()
 	definition := &v1beta1.ApplicationDefinition{
 		TypeMeta: metav1.TypeMeta{APIVersion: api.Group + "/v1beta1", Kind: "ApplicationDefinition"},
@@ -117,9 +124,10 @@ func DefinitionWithTemplate(t *testing.T, name, template string, requires []v1be
 			Name: name,
 		},
 		Spec: v1beta1.ApplicationDefinitionSpec{
-			Package:  v1beta1.PackageIdentity{Version: "1.0.0"},
-			Template: template,
-			Requires: requires,
+			Package:   v1beta1.PackageIdentity{Version: "1.0.0"},
+			Template:  template,
+			Requires:  requires,
+			Resources: resources,
 		},
 	}
 	digest, err := app.DefinitionDigest(definition.Spec)

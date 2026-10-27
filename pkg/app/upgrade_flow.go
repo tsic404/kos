@@ -46,7 +46,17 @@ func (c *Controller) steady(ctx context.Context, application *v1beta1.Applicatio
 		return c.recordBaseline(ctx, application, next, comparison, now)
 	}
 
-	drift, err := c.driftEntries(ctx, applied)
+	// Drift is judged against the manifest set the last apply wrote: the kept
+	// render converged with the lifecycle facts that apply recorded (C-35, C-66,
+	// C-67). Comparing the live objects with a set converged from the current
+	// spec would read the difference KOS itself has not written yet as an
+	// external write, and a stop or a scale would then be skipped forever under
+	// the adopt and ignore policies.
+	expected, err := convergeApplied(applied)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	drift, err := c.driftEntries(ctx, expected)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -70,6 +80,7 @@ func (c *Controller) steady(ctx context.Context, application *v1beta1.Applicatio
 // recordBaseline writes the target manifests and records them as the baseline
 // of a completed install (C-34).
 func (c *Controller) recordBaseline(ctx context.Context, application *v1beta1.Application, next *target, comparison CapabilityResult, now time.Time) (reconcile.Result, error) {
+	defaults := resourceDefaults(application, next.definition)
 	observed, rendered, err := c.applyManifests(ctx, application, next.objects, nil)
 	if err != nil {
 		if permanent(err) {
@@ -82,8 +93,14 @@ func (c *Controller) recordBaseline(ctx context.Context, application *v1beta1.Ap
 	status.Rendered = rendered
 	status.Applied = next.applied
 	status.Upgrade = nil
+	status.ResourceDefaults = defaults
 	resetBudget(&status)
-	status.Health = v1beta1.Health{State: applicationHealth(observed, comparison)}
+	status.Health = v1beta1.Health{State: applicationHealth(observed, comparison, application.Spec.Paused)}
+	status.Resources, err = c.resourceStatus(ctx, application, next.resources)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	settlePhase(application, &status)
 	status.Conditions = state.Set(status.Conditions, state.Applied(application.Generation, "desired state applied"))
 	status.Conditions = clearFailures(status.Conditions)
 	if len(comparison.Unsatisfied) > 0 {
@@ -144,7 +161,12 @@ func (c *Controller) upgrade(ctx context.Context, application *v1beta1.Applicati
 	status.Upgrade = nil
 	status.Drift = nil
 	resetBudget(&status)
-	status.Health = v1beta1.Health{State: applicationHealth(observed, comparison)}
+	status.Health = v1beta1.Health{State: applicationHealth(observed, comparison, application.Spec.Paused)}
+	status.Resources, err = c.resourceStatus(ctx, application, next.resources)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	settlePhase(application, &status)
 	status.Conditions = state.Set(status.Conditions, state.Applied(application.Generation, "the upgrade was applied"))
 	status.Conditions = clearFailures(status.Conditions)
 	if len(comparison.Unsatisfied) > 0 {
@@ -181,12 +203,18 @@ func (c *Controller) refuseUpgrade(ctx context.Context, application *v1beta1.App
 			if err != nil {
 				return reconcile.Result{}, err
 			}
+			resources := convergeManifests(application, frozenDefaults(application), previous)
 			observed, rendered, err := c.applyManifests(ctx, application, previous, nil)
 			if err != nil {
 				return c.recordFailure(ctx, application, now, err.Error())
 			}
+			status.Applied = withLifecycle(application.Status.Applied, application, resources)
 			status.Rendered = rendered
-			status.Health = v1beta1.Health{State: applicationHealth(observed, comparison)}
+			status.Health = v1beta1.Health{State: applicationHealth(observed, comparison, application.Spec.Paused)}
+			status.Resources, err = c.resourceStatus(ctx, application, resources)
+			if err != nil {
+				return reconcile.Result{}, err
+			}
 		}
 		if err := c.driftState(application, definition, resolved, drift, false, &status); err != nil {
 			return reconcile.Result{}, err
@@ -242,6 +270,7 @@ func (c *Controller) rollback(ctx context.Context, application *v1beta1.Applicat
 	if err != nil {
 		return c.fail(ctx, application, ConditionUpgradeFailed, cause.Error()+"; the previous manifests cannot be read: "+err.Error())
 	}
+	resources := convergeManifests(application, frozenDefaults(application), previous)
 	observed, rendered, err := c.applyManifests(ctx, application, previous, nil)
 	if err != nil {
 		return c.fail(ctx, application, ConditionUpgradeFailed, cause.Error()+"; the previous manifests cannot be re-applied: "+err.Error())
@@ -249,9 +278,14 @@ func (c *Controller) rollback(ctx context.Context, application *v1beta1.Applicat
 	status := baseStatus(application)
 	status.Phase = PhaseReady
 	status.Rendered = rendered
-	status.Applied = applied
+	status.Applied = withLifecycle(applied, application, resources)
 	status.Upgrade = rolledBackReport(application)
-	status.Health = v1beta1.Health{State: applicationHealth(observed, comparison)}
+	status.Health = v1beta1.Health{State: applicationHealth(observed, comparison, application.Spec.Paused)}
+	status.Resources, err = c.resourceStatus(ctx, application, resources)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	settlePhase(application, &status)
 	status.Conditions = state.Set(status.Conditions, state.Applied(application.Generation, "the previous manifests were re-applied"))
 	status.Conditions = withFailure(status.Conditions, application.Generation, ConditionUpgradeFailed, cause.Error())
 	c.recordEvent(ctx, application, "Warning", EventUpgradeRolledBack, cause.Error(), now)
@@ -303,7 +337,7 @@ func (c *Controller) confirm(ctx context.Context, application *v1beta1.Applicati
 	if failure == nil {
 		observed, failure = c.observedRenderDigest(ctx, next.objects)
 	}
-	agreed := failure == nil && target != "" && target == next.applied.RenderDigest &&
+	agreed := failure == nil && target != "" && target == next.convergedDigest &&
 		target == observed && stored == next.applied.SpecDigest
 	if agreed {
 		if status.Phase != PhaseUpgrading {
@@ -344,7 +378,7 @@ func confirmFailure(failure error, target, stored string, next *target) string {
 		return "the confirmation names no target"
 	case stored != next.applied.SpecDigest:
 		return "the spec changed after the confirmation was written"
-	case target != next.applied.RenderDigest:
+	case target != next.convergedDigest:
 		return "the confirmation names a target the spec does not request"
 	default:
 		return "the downstream objects do not hold the confirmed target"
@@ -405,6 +439,7 @@ func (c *Controller) reconcileApplied(ctx context.Context, application *v1beta1.
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+	resources := convergeManifests(application, frozenDefaults(application), objects)
 	observed, rendered, err := c.applyManifests(ctx, application, objects, skip)
 	if err != nil {
 		if permanent(err) {
@@ -412,13 +447,19 @@ func (c *Controller) reconcileApplied(ctx context.Context, application *v1beta1.
 		}
 		return c.recordFailure(ctx, application, now, err.Error())
 	}
+	status.Applied = withLifecycle(applied, application, resources)
 	status.Rendered = rendered
-	health := applicationHealth(observed, comparison)
+	health := applicationHealth(observed, comparison, application.Spec.Paused)
 	if kept {
 		health = v1beta1.HealthStateDegraded
 	}
 	status.Health = v1beta1.Health{State: health}
+	status.Resources, err = c.resourceStatus(ctx, application, resources)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
 	status.Phase = PhaseReady
+	settlePhase(application, &status)
 	status.Conditions = state.Set(status.Conditions, state.Applied(application.Generation, "desired state applied"))
 	return reconcile.Result{RequeueAfter: readyResync}, c.writeStatus(ctx, application, status)
 }
@@ -551,7 +592,7 @@ func upgradePending(application *v1beta1.Application, next *target) bool {
 	}
 	return report.Target == next.applied.DefinitionDigest &&
 		report.SpecDigest == next.applied.SpecDigest &&
-		report.RenderDigest == next.applied.RenderDigest
+		report.RenderDigest == next.convergedDigest
 }
 
 // rolledBack reports that the current target was already attempted and reverted

@@ -70,7 +70,7 @@ func TestApplicationHealthReadsObservedStatus(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			if got := applicationHealth(test.objects, test.comparison); got != test.want {
+			if got := applicationHealth(test.objects, test.comparison, false); got != test.want {
 				t.Fatalf("health = %q, want %q", got, test.want)
 			}
 		})
@@ -346,7 +346,7 @@ func TestApplicationHealthReadsJobConditions(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			if got := applicationHealth(test.objects, test.comparison); got != test.want {
+			if got := applicationHealth(test.objects, test.comparison, false); got != test.want {
 				t.Fatalf("health = %q, want %q", got, test.want)
 			}
 		})

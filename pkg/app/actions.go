@@ -10,8 +10,8 @@ import (
 	"github.com/tsic404/kos/pkg/write"
 )
 
-// User actions an application accepts (C-33). They are submitted through the
-// control plane and carried as one-shot action records in the KOS namespace;
+// User actions an application accepts (C-33, C-66). They are submitted through
+// the control plane and carried as one-shot action records in the KOS namespace;
 // the application reconciler reads and deletes them.
 const (
 	// ActionRetry leaves Failed and resets the retry budget (C-33).
@@ -21,6 +21,21 @@ const (
 	ActionOrphan = "orphan"
 	// ActionConfirm accepts an external change as the new baseline (C-35).
 	ActionConfirm = "confirm"
+	// ActionRestart rebuilds the rendered workloads once without writing the
+	// user spec (C-66).
+	ActionRestart = "restart"
+)
+
+// Application actions the control plane performs as a spec write (C-66). They
+// are not one-shot records: stop writes the pause marker, start clears it, and
+// scale writes the replica count.
+const (
+	// ActionStop writes the pause marker without touching the replica count.
+	ActionStop = "stop"
+	// ActionStart clears the pause marker.
+	ActionStart = "start"
+	// ActionScale writes the desired replica count.
+	ActionScale = "scale"
 )
 
 // Action record and abandonment manifest carriers and labels.

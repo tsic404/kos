@@ -22,7 +22,7 @@ func TestAcceptActionConfirmationGate(t *testing.T) {
 			},
 		}},
 	}
-	if failure := acceptAction(app.ActionConfirm, paused); failure != nil {
+	if failure := acceptAction(actionRequest{Action: app.ActionConfirm}, paused); failure != nil {
 		t.Fatalf("a paused application refused the confirmation: %+v", failure)
 	}
 
@@ -32,14 +32,14 @@ func TestAcceptActionConfirmationGate(t *testing.T) {
 			Conditions: []metav1.Condition{state.Applied(1, "desired state applied")},
 		}},
 	}
-	if failure := acceptAction(app.ActionConfirm, running); failure == nil || failure.Code != CodeInvalidField {
+	if failure := acceptAction(actionRequest{Action: app.ActionConfirm}, running); failure == nil || failure.Code != CodeInvalidField {
 		t.Fatalf("a running application accepted the confirmation: %+v", failure)
 	}
 
 	failed := &v1beta1.Application{
 		Status: v1beta1.ApplicationStatus{ObjectStatus: v1beta1.ObjectStatus{Phase: app.PhaseFailed}},
 	}
-	if failure := acceptAction(app.ActionConfirm, failed); failure == nil {
+	if failure := acceptAction(actionRequest{Action: app.ActionConfirm}, failed); failure == nil {
 		t.Fatal("a failed application accepted the confirmation")
 	}
 }
@@ -54,14 +54,14 @@ func TestAcceptActionRetriesARolledBackUpgrade(t *testing.T) {
 			Upgrade:      &v1beta1.UpgradeStatus{Target: "sha256:one", RolledBack: true},
 		},
 	}
-	if failure := acceptAction(app.ActionRetry, rolledBack); failure != nil {
+	if failure := acceptAction(actionRequest{Action: app.ActionRetry}, rolledBack); failure != nil {
 		t.Fatalf("a rolled-back upgrade refused the retry: %+v", failure)
 	}
 
 	ready := &v1beta1.Application{
 		Status: v1beta1.ApplicationStatus{ObjectStatus: v1beta1.ObjectStatus{Phase: app.PhaseReady}},
 	}
-	if failure := acceptAction(app.ActionRetry, ready); failure == nil {
+	if failure := acceptAction(actionRequest{Action: app.ActionRetry}, ready); failure == nil {
 		t.Fatal("a ready application with no reverted upgrade accepted the retry")
 	}
 }

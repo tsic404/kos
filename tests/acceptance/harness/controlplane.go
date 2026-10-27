@@ -2,11 +2,13 @@ package harness
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -108,6 +110,42 @@ func Eventually(t *testing.T, timeout time.Duration, description string, check f
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("timed out after %s waiting for %s", timeout, description)
+}
+
+// AuditRecorder keeps the audit records the control plane writes (C-14).
+type AuditRecorder struct {
+	mu      sync.Mutex
+	records []controlplane.AuditRecord
+}
+
+// Record implements controlplane.Auditor.
+func (r *AuditRecorder) Record(_ context.Context, record controlplane.AuditRecord) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.records = append(r.records, record)
+	return nil
+}
+
+// Verbs returns the recorded verbs in order.
+func (r *AuditRecorder) Verbs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	verbs := make([]string, 0, len(r.records))
+	for _, record := range r.records {
+		verbs = append(verbs, record.Verb)
+	}
+	return verbs
+}
+
+// Actors returns the recorded actors in order.
+func (r *AuditRecorder) Actors() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	actors := make([]string, 0, len(r.records))
+	for _, record := range r.records {
+		actors = append(actors, record.Actor)
+	}
+	return actors
 }
 
 // Manifest builds a writable object of a kernel kind: identity, attribution and

@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/tsic404/kos/api"
 	"github.com/tsic404/kos/api/v1beta1"
@@ -124,6 +126,171 @@ func TestTC53ExternalChangeSuspendsUntilConfirmed(t *testing.T) {
 	}
 	if reconciled := state.ReconciledOf(harness.Conditions(t, cluster.Get(t, "v1beta1", "Application", applicationName))); reconciled.Status != metav1.ConditionTrue {
 		t.Fatalf("a later round paused the confirmed application again: %+v", reconciled)
+	}
+}
+
+// workloadTemplate renders one Deployment whose image names the package
+// version, so an upgrade performed outside the product is a write KOS observes
+// on a workload the lifecycle actions drive.
+func workloadTemplate(version string) string {
+	return `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: {{ .Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Name }}
+    spec:
+      containers:
+        - name: app
+          image: web.example/` + version + `:latest
+`
+}
+
+// TestTC53ConfirmAcceptsAStoppedApplication covers the third condition of C-35
+// for an application whose lifecycle facts already moved the live objects: the
+// reported target carries the zero replica count of a stop, so the confirmation
+// of a stopped application is accepted and the stop survives the new baseline.
+func TestTC53ConfirmAcceptsAStoppedApplication(t *testing.T) {
+	cluster := harness.Start(t)
+	cluster.EnsureNamespace(t, targetNamespace)
+	cluster.EnsureNamespace(t, api.SystemNamespace)
+
+	first := harness.DefinitionContent(t, "stopped-one", "1", workloadTemplate("one"), nil, nil)
+	second := harness.DefinitionContent(t, "stopped-two", "2", workloadTemplate("two"), nil, nil)
+	cluster.InstallDefinition(t, first)
+	cluster.InstallDefinition(t, second)
+
+	gateway := cluster.StartControlPlane(t, nil)
+	if status, body := gateway.Call(t, http.MethodPost, "/api/v1/resources/Application",
+		harness.ApplicationManifest(applicationName, harness.Namespace, first.Name, targetNamespace, nil, nil), nil); status != http.StatusAccepted {
+		t.Fatalf("create application: status %d, body %v", status, body)
+	}
+	controller := cluster.ApplicationController(t, app.Options{})
+	reconcileOnce(t, controller)
+	reconcileOnce(t, controller)
+	if replicas := cluster.WorkloadReplicas(t, "Deployment", targetNamespace, applicationName); replicas != 2 {
+		t.Fatalf("installed replicas = %d, want 2", replicas)
+	}
+
+	// The application is stopped before the external change: the workload holds
+	// zero while the spec keeps the count the package renders (C-66).
+	action(t, gateway, map[string]any{"action": app.ActionStop})
+	reconcileOnce(t, controller)
+	if replicas := cluster.WorkloadReplicas(t, "Deployment", targetNamespace, applicationName); replicas != 0 {
+		t.Fatalf("stopped replicas = %d, want 0", replicas)
+	}
+
+	// The package declares a data format change, so KOS refuses the upgrade and
+	// the user writes the new version outside the product (C-34).
+	requestUpgradeKeepingTheStop(t, cluster, gateway, second.Name)
+	reconcileOnce(t, controller)
+	if version := workloadVersion(t, cluster); version != "one" {
+		t.Fatalf("downstream version = %q, want the refused target to be unapplied", version)
+	}
+	writeWorkloadVersion(t, cluster, "two")
+	reconcileOnce(t, controller)
+	assertPaused(t, cluster)
+
+	// The reported target carries the stopped replica count, so the confirmation
+	// of a stopped application meets all three conditions of C-35.
+	target := statusMap(t, cluster, "upgrade")["renderDigest"]
+	if target == nil || target == "" {
+		t.Fatalf("the preflight reports no target render digest: %v", statusMap(t, cluster, "upgrade"))
+	}
+	confirm(t, cluster, gateway, target.(string))
+	reconcileOnce(t, controller)
+	if reconciled := state.ReconciledOf(harness.Conditions(t, cluster.Get(t, "v1beta1", "Application", applicationName))); reconciled.Status != metav1.ConditionTrue {
+		t.Fatalf("Reconciled = %s (%s), want True after the confirmation", reconciled.Status, reconciled.Reason)
+	}
+	recorded := statusMap(t, cluster, "applied")
+	if recorded["definitionDigest"] != second.Spec.Package.Digest {
+		t.Fatalf("the confirmed baseline names %v, want %s", recorded["definitionDigest"], second.Spec.Package.Digest)
+	}
+
+	// The stop survives the confirmed baseline: the later rounds keep the
+	// workload at zero (C-35, C-66).
+	reconcileOnce(t, controller)
+	if replicas := cluster.WorkloadReplicas(t, "Deployment", targetNamespace, applicationName); replicas != 0 {
+		t.Fatalf("replicas after the confirmation = %d, want 0", replicas)
+	}
+}
+
+// action posts one lifecycle action of the application and requires acceptance.
+func action(t *testing.T, gateway *harness.ControlPlane, extra map[string]any) {
+	t.Helper()
+	body := map[string]any{"kind": "Application", "namespace": harness.Namespace, "name": applicationName}
+	for key, value := range extra {
+		body[key] = value
+	}
+	if status, response := gateway.Call(t, http.MethodPost, "/api/v1/action-requests", body, nil); status != http.StatusAccepted {
+		t.Fatalf("action %v: status %d, body %v", extra, status, response)
+	}
+}
+
+// requestUpgradeKeepingTheStop writes the new definition reference into the
+// application while the stop marker the user already wrote stays in the spec.
+func requestUpgradeKeepingTheStop(t *testing.T, cluster *harness.Cluster, gateway *harness.ControlPlane, definition string) {
+	t.Helper()
+	stored := cluster.Get(t, "v1beta1", "Application", applicationName)
+	update := harness.ApplicationManifest(applicationName, harness.Namespace, definition, targetNamespace, nil, nil)
+	if paused, found, _ := unstructured.NestedBool(stored.Object, "spec", "paused"); found {
+		update["spec"].(map[string]any)["paused"] = paused
+	}
+	update["metadata"] = map[string]any{
+		"name":            applicationName,
+		"namespace":       harness.Namespace,
+		"labels":          map[string]any{"managed-by": "kos-shell"},
+		"resourceVersion": stored.GetResourceVersion(),
+	}
+	if status, body := gateway.Call(t, http.MethodPut,
+		"/api/v1/resources/Application/"+applicationName+"?namespace="+harness.Namespace, update, nil); status != http.StatusAccepted {
+		t.Fatalf("request the upgrade: status %d, body %v", status, body)
+	}
+}
+
+// workloadVersion reads the image of the rendered Deployment, which names the
+// package version the cluster holds.
+func workloadVersion(t *testing.T, cluster *harness.Cluster) string {
+	t.Helper()
+	containers, _, _ := unstructured.NestedSlice(cluster.Workload(t, "Deployment", targetNamespace, applicationName).Object,
+		"spec", "template", "spec", "containers")
+	if len(containers) == 0 {
+		t.Fatal("the rendered Deployment has no container")
+	}
+	image, _ := containers[0].(map[string]any)["image"].(string)
+	return strings.TrimSuffix(strings.TrimPrefix(image, "web.example/"), ":latest")
+}
+
+// writeWorkloadVersion writes one version into the rendered Deployment the way
+// a user working outside KOS would (C-35).
+func writeWorkloadVersion(t *testing.T, cluster *harness.Cluster, version string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resource := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
+	stored, err := cluster.Dynamic.Resource(resource).Namespace(targetNamespace).Get(ctx, applicationName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("read the downstream Deployment: %v", err)
+	}
+	containers, found, err := unstructured.NestedSlice(stored.Object, "spec", "template", "spec", "containers")
+	if err != nil || !found || len(containers) == 0 {
+		t.Fatalf("read the downstream containers: %v (%v)", err, found)
+	}
+	container, _ := containers[0].(map[string]any)
+	container["image"] = "web.example/" + version + ":latest"
+	if err := unstructured.SetNestedSlice(stored.Object, containers, "spec", "template", "spec", "containers"); err != nil {
+		t.Fatalf("write the downstream image: %v", err)
+	}
+	if _, err := cluster.Dynamic.Resource(resource).Namespace(targetNamespace).Update(ctx, stored, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("write the downstream Deployment outside KOS: %v", err)
 	}
 }
 

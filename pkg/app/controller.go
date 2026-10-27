@@ -200,6 +200,9 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	if action == ActionConfirm {
 		return c.confirm(ctx, application, record, now)
 	}
+	if action == ActionRestart {
+		return c.restart(ctx, application, record, now)
+	}
 	if record != nil {
 		// An orphan without an uninstall has nothing to abandon; drop it so it
 		// cannot fire later.
@@ -227,6 +230,9 @@ func (c *Controller) install(ctx context.Context, application *v1beta1.Applicati
 	if err := ValidateDefinition(definition.Spec); err != nil {
 		return c.fail(ctx, application, ConditionInvalidPackage, err.Error())
 	}
+	// The package defaults take effect at the first installation and stay frozen
+	// afterwards, even if the definition moves (C-32, C-67).
+	defaults := resourceDefaults(application, definition)
 	registered, err := c.capabilities.Capabilities(ctx)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -262,6 +268,7 @@ func (c *Controller) install(ctx context.Context, application *v1beta1.Applicati
 	if application.Status.Phase != PhaseInstalling && application.Status.Phase != PhaseReady && application.Status.Phase != PhaseUpgrading {
 		status := baseStatus(application)
 		status.Phase = PhaseInstalling
+		status.ResourceDefaults = defaults
 		resetBudget(&status)
 		status.Conditions = state.Set(status.Conditions, state.Blocked(
 			application.Generation, "Installing", "the application is being installed"))
@@ -408,6 +415,109 @@ func (c *Controller) retry(ctx context.Context, application *v1beta1.Application
 		return reconcile.Result{}, err
 	}
 	return reconcile.Result{RequeueAfter: InitialBackoff}, nil
+}
+
+// restart consumes a restart action: the rendered workloads are deleted and
+// rebuilt once from the baseline, while the user spec, volumes and routes stay
+// untouched (C-66). The round deletes them itself, so their absence is not an
+// external write and the drift policies of C-35 do not apply to it: adopt and
+// ignore keep external values, and an object that is gone carries none. Rebuilding
+// here rather than waiting for the next apply keeps a restart working under every
+// policy, including the ones that would otherwise leave the missing objects alone.
+// The action never leaves Failed: only a retry does (C-33).
+func (c *Controller) restart(ctx context.Context, application *v1beta1.Application, record *unstructured.Unstructured, now time.Time) (reconcile.Result, error) {
+	if application.Status.Phase == PhaseFailed {
+		return reconcile.Result{}, c.deleteRecord(ctx, record)
+	}
+	workloads := WorkloadRefs(application.Status.Rendered)
+	for _, rendered := range workloads {
+		namespace := rendered.Namespace
+		if namespace == "" {
+			namespace = application.Spec.Namespace
+		}
+		if err := c.store.Delete(ctx, namespace, referenceOf(rendered)); err != nil && !apierrors.IsNotFound(err) {
+			return reconcile.Result{}, err
+		}
+	}
+	if err := c.rebuildWorkloads(ctx, application, workloads); err != nil {
+		return reconcile.Result{}, err
+	}
+	// The record is consumed in the same round: a second round would delete the
+	// workloads this one just rebuilt (C-66).
+	if err := c.deleteRecord(ctx, record); err != nil {
+		return reconcile.Result{}, err
+	}
+	return c.install(ctx, application, now)
+}
+
+// rebuildWorkloads writes the workload objects of the baseline back after a
+// restart deleted them (C-66). Only the deleted objects are written, so the rest
+// of the set keeps whatever the drift policies of C-35 left in place.
+func (c *Controller) rebuildWorkloads(ctx context.Context, application *v1beta1.Application, workloads []v1beta1.ObjectRef) error {
+	applied := application.Status.Applied
+	if applied == nil || len(workloads) == 0 {
+		return nil
+	}
+	objects, err := convergeApplied(applied)
+	if err != nil {
+		return err
+	}
+	deleted := make(map[string]bool, len(workloads))
+	for _, ref := range workloads {
+		deleted[identityOfRef(ref)] = true
+	}
+	for _, object := range objects {
+		if !deleted[identityOfRef(objectRefOf(object))] {
+			continue
+		}
+		stampOwner(object, string(application.UID))
+		if _, err := c.store.Apply(ctx, application.Spec.Namespace, object); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// resourceDefaults returns the package defaults frozen for this application:
+// the set status already carries, or the definition's current values on the
+// first installation. An empty set is snapshotted too, so a later definition
+// that gains defaults still cannot reach an application that exists (C-32).
+func resourceDefaults(application *v1beta1.Application, definition *v1beta1.ApplicationDefinition) *v1beta1.ResourceRequirements {
+	if application.Status.ResourceDefaults != nil {
+		return application.Status.ResourceDefaults
+	}
+	if definition.Spec.Resources == nil {
+		return &v1beta1.ResourceRequirements{}
+	}
+	return definition.Spec.Resources.DeepCopy()
+}
+
+// frozenDefaults reads the package defaults already frozen for an application;
+// an application installed before any defaults existed carries an empty set.
+func frozenDefaults(application *v1beta1.Application) *v1beta1.ResourceRequirements {
+	if application.Status.ResourceDefaults != nil {
+		return application.Status.ResourceDefaults
+	}
+	return &v1beta1.ResourceRequirements{}
+}
+
+// resourceStatus projects the resource facts the workload converges to: the
+// values KOS sets, or the unlimited marker with the LimitRange that still
+// applies (C-67).
+func (c *Controller) resourceStatus(ctx context.Context, application *v1beta1.Application, resources *v1beta1.ResourceRequirements) (*v1beta1.ResourceStatus, error) {
+	status := &v1beta1.ResourceStatus{}
+	if !ResourcesEmpty(resources) {
+		status.Requests = resources.Requests
+		status.Limits = resources.Limits
+		return status, nil
+	}
+	status.Unlimited = true
+	limitRange, err := c.limitRangeName(ctx, application.Spec.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	status.LimitRange = limitRange
+	return status, nil
 }
 
 // uninstall drives the Uninstalling phase: it deletes the rendered objects,
@@ -667,12 +777,23 @@ func baseStatus(application *v1beta1.Application) v1beta1.ApplicationStatus {
 			// always carries a concrete value, never an empty health object.
 			Health: v1beta1.Health{State: v1beta1.HealthStateUnavailable},
 		},
-		RetryCount:  application.Status.RetryCount,
-		NextRetryAt: application.Status.NextRetryAt,
-		Rendered:    append([]v1beta1.ObjectRef(nil), application.Status.Rendered...),
-		Applied:     application.Status.Applied,
-		Upgrade:     application.Status.Upgrade,
-		Drift:       append([]v1beta1.DriftEntry(nil), application.Status.Drift...),
+		RetryCount:       application.Status.RetryCount,
+		NextRetryAt:      application.Status.NextRetryAt,
+		Rendered:         append([]v1beta1.ObjectRef(nil), application.Status.Rendered...),
+		Applied:          application.Status.Applied,
+		Upgrade:          application.Status.Upgrade,
+		Drift:            append([]v1beta1.DriftEntry(nil), application.Status.Drift...),
+		Resources:        application.Status.Resources,
+		ResourceDefaults: application.Status.ResourceDefaults,
+	}
+}
+
+// settlePhase keeps the phase an application entered a stop with (C-66): a
+// paused application holds its phase while health reports the zero effective
+// replicas. A phase that never reached Ready is not preserved.
+func settlePhase(application *v1beta1.Application, status *v1beta1.ApplicationStatus) {
+	if application.Spec.Paused && (application.Status.Phase == PhaseReady || application.Status.Phase == PhaseUpgrading) {
+		status.Phase = application.Status.Phase
 	}
 }
 
@@ -706,8 +827,10 @@ func withFailure(conditions []metav1.Condition, generation int64, conditionType,
 // applicationHealth derives the availability axis from the stored workloads
 // (C-08). A workload whose status the server has not filled in yet is not an
 // unready workload: health is Unknown until its status exists. An application
-// whose only workloads are Jobs is judged by the Job conditions (C-11).
-func applicationHealth(objects []*unstructured.Unstructured, comparison CapabilityResult) v1beta1.HealthState {
+// whose only workloads are Jobs is judged by the Job conditions (C-11). A paused
+// application has zero effective desired replicas and is Healthy when observed
+// (C-66).
+func applicationHealth(objects []*unstructured.Unstructured, comparison CapabilityResult, paused bool) v1beta1.HealthState {
 	if jobs := jobObjects(objects); len(jobs) > 0 && !hasReplicaWorkload(objects) {
 		jobState := jobHealth(jobs)
 		if jobState == v1beta1.HealthStateHealthy && len(comparison.Unsatisfied) > 0 {
@@ -718,8 +841,9 @@ func applicationHealth(objects []*unstructured.Unstructured, comparison Capabili
 	desired, ready, observed := replicaFacts(objects)
 	return state.EvaluateHealth(state.HealthInput{
 		IsObserved:                observed,
-		EffectiveDesiredReplicas:  desired,
+		EffectiveDesiredReplicas:  state.EffectiveDesiredReplicas(desired, paused, false),
 		ReadyReplicas:             ready,
+		IsStopped:                 paused,
 		HasInsufficientCapability: len(comparison.Unsatisfied) > 0,
 	})
 }

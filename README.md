@@ -5,10 +5,10 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 <https://gitea.tsic.top/tsic/kos-design>，契约以 `docs/02-contracts.md` 为准。
 
 当前阶段交付内核对象模型、归属三态、写入路径、ABI、控制面 API、通用调和内核、
-扩展装载（包摘要、声明、九类贡献、依赖激活与可见性投影）、应用渲染与生命周期、入口形态与
-证书状态、升级回滚与外部改动仲裁、本地账号会话、发现适配器与设备事实，以及设置域、用户
-偏好与目录来源三类贡献的自身语义；不含停用与卸载、其余贡献类的语义、卷迁移与 Provider
-能力验证。
+扩展装载（包摘要、声明、九类贡献、依赖激活与可见性投影）、应用渲染与生命周期动作
+（停止、启动、重启、扩缩容与资源规格）、入口形态与证书状态、升级回滚与外部改动仲裁、
+本地账号会话、发现适配器与设备事实，以及设置域、用户偏好与目录来源三类贡献的自身
+语义；不含停用与卸载、其余贡献类的语义、卷迁移与 Provider 能力验证。
 
 ## 布局
 
@@ -64,6 +64,11 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `tests/acceptance/TC-52/` | 声明数据格式变更的升级被拒绝，阶段与下游不变且无绕过路径 |
 | `tests/acceptance/TC-53/` | 外部改动强制暂停调和，错误摘要无效，三者一致后恢复 |
 | `tests/acceptance/TC-116/` | 修正、回写、仅报告三种漂移策略与无法表达的差异 |
+| `tests/acceptance/TC-123/` | 停止保留卷、入口与数据，启动恢复副本数，入口条件给出已暂停 |
+| `tests/acceptance/TC-124/` | 重启重建一次、扩缩容收敛、并发停止串行或 409、四类操作审计可分 |
+| `tests/acceptance/TC-125/` | 包默认值物化、未声明标为未限制并给出 LimitRange、覆盖只写提交字段 |
+| `tests/acceptance/TC-126/` | 上限小于请求被拒并指出字段，工作负载与投影保持原值 |
+| `tests/acceptance/TC-127/` | 停止期间写副本数被接受，启动按最后写入值收敛 |
 | `tests/acceptance/TC-72/` | 自身数据库的每日导出与离线恢复 |
 | `tests/acceptance/TC-117/` | 登录失败同一结果、按登录名锁定与退出 |
 | `tests/acceptance/TC-118/` | 角色变更、改口令、停用与删除前置转移 |
@@ -95,7 +100,9 @@ ApplicationDefinition 与 NodeDevice 没有 status 写者，因此没有 status 
 C-60 的 `spec.owner`（五类带所有者的对象）、C-59 的 `Application.spec.visibility`、
 C-17 的 `SystemComponent.spec.package`（工件引用与 sha256 摘要）、
 C-32 的 `Application.spec.definitionRef`/`namespace`/`config`/`volumes` 与定义侧
-`spec.package`/`config`/`template`/`hooks`/`chart`/`requires`，C-33 的
+`spec.package`/`config`/`template`/`hooks`/`chart`/`requires`、C-66 的
+`Application.spec.replicas`/`paused`、C-67 的 `Application.spec.resources`、
+`status.resources` 与定义侧 `spec.resources`（包默认值），C-33 的
 `status.retryCount`、`status.nextRetryAt`、`status.uninstall`，C-46 的
 `Endpoint.status.certificate`（签发者、就绪、到期与告警窗口）与 `CertificateReady` 条件，
 以及 C-70 的 `NodeDevice.spec.node`/`collector`/`observedAt`/`devices`。
@@ -142,7 +149,7 @@ KOS 不再写它；放弃写入 `declined`，对象留在 unmanaged，不再被�
 | `DELETE` | `/api/v1/resources/{kind}/{name}` | 删除；需 `If-Match` |
 | `POST` | `/api/v1/plan-requests` | 三类差异、摘要与警告；不写任何对象 |
 | `POST` | `/api/v1/apply-requests` | 接受期望对象集后执行；进度从对象本身读取 |
-| `POST` | `/api/v1/action-requests` | 应用动作 `retry`/`orphan`/`confirm`；202 已接受 + 动作记录引用 |
+| `POST` | `/api/v1/action-requests` | 应用动作 `retry`/`orphan`/`confirm`/`restart`/`stop`/`start`/`scale`；202 已接受 + 动作记录引用 |
 
 - 读投影每项带 `observedAt` 与 `stale`；陈旧阈值是 `controlplane.StaleThreshold`（2 分钟），所有来源共用。确知发现来源时，投影的 `sources` 列出全部上报的适配器标识。
 - 写请求返回 202 与对象引用，不返回已完成；工作在接受后继续，客户端断线不影响推进。
@@ -160,7 +167,15 @@ KOS 不再写它；放弃写入 `declined`，对象留在 unmanaged，不再被�
   主机名与端口由 Volume/Endpoint 对象持有，写进私有配置返回 `invalid_field` 并指出冲突字段（C-32、F3）。
 - 动作请求写成 `kos-system` 的一次性动作记录；应用调和器读取后删除。`retry` 只接受 Failed
   或升级已回滚的应用，`orphan` 只接受阻塞超过十分钟且阻塞清单非空的 Uninstalling 应用，
-  `confirm` 只接受外部改动待确认的应用，并须给出目标摘要。
+  `restart` 只接受已安装（Ready/Upgrading）的应用，`confirm` 只接受外部改动待确认的应用，
+  并须给出目标摘要。
+- `stop` 写暂停标记且不改 `spec.replicas`；`start` 清除暂停标记；`scale` 写 `spec.replicas`
+  （需 `replicas`，非负）。三者以存储对象的 `resourceVersion` 提交，并发写入按 C-05 返回 409
+  与当前对象。`restart` 走一次性记录，只重建工作负载，不改用户 spec、卷与入口。
+- 四类操作在审计流中各自留有 `stop`、`start`、`restart`、`scale` 记录；审计通过
+  `controlplane.Auditor` 注入（C-14）。
+- 应用资源规格在写入前校验：数量必须可解析且非负，上限小于请求返回 `invalid_field` 并指出
+  `spec.resources.limits.*`；包默认值在创建时物化进 `spec.resources`，更新只覆盖提交的字段。
 
 ## 扩展装载
 
@@ -256,6 +271,30 @@ PersistentVolumeClaim 都被判为非法包。
 给出下一次尝试时刻，退避从 10 秒起指数增长、上限 5 分钟；第五次失败进入 `Failed`，不再自动
 重试。用户经控制面提交 `retry` 动作重置预算并回到 `Installing`。
 
+停止、启动、重启与扩缩容按 C-66 收敛。`stop` 只写 `spec.paused`，调和器把可伸缩工作负载
+（Deployment、StatefulSet、ReplicaSet）的副本数收敛到零，卷、PVC、Service 与入口路由保持
+不动；暂停期间 health 按有效期望副本零判定（观察到则 Healthy，无法观察则 Unknown），phase
+保持进入暂停前的 Ready/Upgrading。`start` 清除暂停标记，副本数回到 `spec.replicas`，未被
+写入时回到包渲染的值。`scale` 写 `spec.replicas`，写入值在暂停期间同样被接受，启动后按最后
+写入值收敛。`restart` 经一次性动作记录提交，调和器删除渲染过的工作负载并在同一轮按基线重建
+一次，不写用户 spec，不删除卷与入口。删除是 KOS 自己的写入，因此它的「缺失」不按外部改动处理：
+`reconcile`、`adopt`、`ignore` 三种策略下重启都会重建，且不写 `status.drift`。可伸缩工作负载
+之外的对象不参与副本收敛。
+
+基线保存包渲染的清单，同时记下那一轮实际写下的暂停、副本与资源事实。漂移比较前先把基线
+按这些事实收敛回来，所以停止与扩缩容不会被读成外部写入：`adopt` 与 `ignore` 策略下两者同样
+收敛，漂移记录只针对真正由外部改动的字段。
+
+C-67 的资源规格是 spec 的一部分：`ApplicationDefinition.spec.resources` 声明包默认值，创建
+应用时物化进 `spec.resources`，之后定义更新不再影响已存在对象。调和器把 `spec.resources`
+写到每个容器与 init 容器的 requests/limits；覆盖只写提交的字段，未覆盖字段保持默认值。未声明
+资源的应用不加任何值，`status.resources.unlimited` 为 true，`status.resources.limitRange`
+给出仍然生效的命名空间 LimitRange 名称。上限小于请求在写入前被拒绝并指出字段。经原生接口
+创建、默认值只落在 `status.resourceDefaults` 的应用同样按冻结默认值判定：API 只提交上限时，
+请求取自该快照，上限低于快照请求的写入被拒绝，而写入本身仍只带提交的字段。快照落地之前
+（应用仍 Pending、尚未完成首轮调和）判定改用定义当前的默认值，因此这个窗口里上限低于包请求
+的写入同样被拒。
+
 应用调和器在应用对象上放自己的 finalizer 作为卸载门：删除请求到达后进入 `Uninstalling`，
 逐个删除渲染过的下游对象并保留卷与 PVC；仍有对象存在时把阻塞清单、起始时刻与是否超过
 10 分钟的 `stalled` 写进状态，投影因此能显示卡住与阻塞对象。`orphan` 动作放弃这些下游对象、
@@ -275,7 +314,10 @@ Degraded 健康。能力来源是 `pkg/app.CapabilitySource`；Provider 注册�
 请求：把定义指向新包或改配置都算，目录更新定义本身不算，因此定义更新不改变已安装对象
 （C-32）。预检先跑：配置差异按字段列出，渲染差异按对象给出创建、更新（含字段路径）与删除，
 不可逆项与迁移要求单独成列。基线保存 spec 摘要、包摘要、数据格式、渲染摘要与上一份清单，
-所以回滚与应用外写入的判定都不依赖定义对象还在不在。
+所以回滚与应用外写入的判定都不依赖定义对象还在不在。两个同名字段语义不同、不可互相比较：
+`status.applied.renderDigest` 是基线保留的**包渲染清单**摘要（不含暂停、副本与资源事实，
+这些事实记在旁边），`status.upgrade.renderDigest` 是同一份清单按这些事实收敛之后的**目标**
+摘要，也是应用该目标后集群持有的集合与用户确认时提交的摘要。
 
 不可逆项一律拒绝且没有确认绕过：数据格式变更（包声明的 `spec.package.dataFormat` 与基线
 不同，删掉声明也算变更）、删除卷声明、缩容卷。规则拒绝时阶段不变，`IrreversibleUpgrade`
@@ -299,7 +341,9 @@ Degraded 健康。能力来源是 `pkg/app.CapabilitySource`；Provider 注册�
 `kos-system` 写一条一次性动作记录并带上提交时的 spec 摘要；应用调和器读取后删除。第三项
 一致是对下游的观测而不是再渲染一次 spec：调和器按目标清单逐对象读取集群，只有记录目标摘要
 既等于该观测、又等于当前 spec 请求的渲染摘要，且记录里的 spec 摘要等于当前 spec 摘要时，才把
-它作为新基线恢复调和。因此没有在外部真正升级过的确认不会被接受，旧记录消费后也不再生效。
+它作为新基线恢复调和。目标摘要按当前 spec 的暂停、副本与资源事实收敛后计算，观测侧的清单
+走同一份收敛，所以已停止或已扩缩容的应用也能确认。因此没有在外部真正升级过的确认不会被接受，
+旧记录消费后也不再生效。
 
 ## 账号、会话与自身数据库
 

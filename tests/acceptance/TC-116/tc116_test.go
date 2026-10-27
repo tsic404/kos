@@ -200,6 +200,137 @@ func TestTC116RolledBackApplicationAnswersDrift(t *testing.T) {
 	}
 }
 
+// lifecycleTemplate renders one Deployment and the Service in front of it, so a
+// stop and a scale are observable on a real workload.
+const lifecycleTemplate = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: {{ .Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Name }}
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.27
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+spec:
+  selector:
+    app: {{ .Name }}
+  ports:
+    - port: 80
+      targetPort: 80
+`
+
+// TestTC116LifecycleWritesAreNotExternalDrift covers the drift baseline of C-35
+// against the lifecycle facts of C-66: the values KOS itself writes when an
+// application stops or scales are not writes made outside KOS, so a stop and a
+// scale converge under the adopt and ignore policies too, and the round that
+// carries them reports no drift.
+func TestTC116LifecycleWritesAreNotExternalDrift(t *testing.T) {
+	cluster := harness.Start(t)
+	cluster.EnsureNamespace(t, targetNamespace)
+	cluster.InstallDefinition(t, harness.TemplateDefinition(t, "lifecycle", lifecycleTemplate, nil))
+
+	gateway := cluster.StartControlPlane(t, nil)
+	controller := cluster.ApplicationController(t, app.Options{})
+
+	policies := map[string]v1beta1.DriftPolicy{
+		"adopted": v1beta1.DriftPolicyAdopt,
+		"ignored": v1beta1.DriftPolicyIgnore,
+	}
+	for name, policy := range policies {
+		manifest := harness.ApplicationManifest(name, harness.Namespace, "lifecycle", targetNamespace, nil, nil)
+		manifest["spec"].(map[string]any)["driftPolicy"] = string(policy)
+		if status, body := gateway.Call(t, http.MethodPost, "/api/v1/resources/Application", manifest, nil); status != http.StatusAccepted {
+			t.Fatalf("%s: create application: status %d, body %v", name, status, body)
+		}
+		reconcileOnce(t, controller, name)
+		reconcileOnce(t, controller, name)
+		if replicas := cluster.WorkloadReplicas(t, "Deployment", targetNamespace, name); replicas != 2 {
+			t.Fatalf("%s: installed replicas = %d, want 2", name, replicas)
+		}
+	}
+
+	for name := range policies {
+		// A stop converges on the workload under both policies, and the round
+		// after it does not read the pending zero as an external write.
+		lifecycleAction(t, gateway, name, map[string]any{"action": "stop"})
+		reconcileOnce(t, controller, name)
+		assertReplicas(t, cluster, name, 0)
+		reconcileOnce(t, controller, name)
+		assertReplicas(t, cluster, name, 0)
+		assertNoDrift(t, cluster, name)
+		assertNoUpgrade(t, cluster, name)
+
+		// Starting restores the count the package renders.
+		lifecycleAction(t, gateway, name, map[string]any{"action": "start"})
+		reconcileOnce(t, controller, name)
+		assertReplicas(t, cluster, name, 2)
+		assertNoDrift(t, cluster, name)
+		assertNoUpgrade(t, cluster, name)
+
+		// A scale writes the spec and the workload follows it (C-66).
+		lifecycleAction(t, gateway, name, map[string]any{"action": "scale", "replicas": 5})
+		reconcileOnce(t, controller, name)
+		assertReplicas(t, cluster, name, 5)
+		assertNoDrift(t, cluster, name)
+		assertNoUpgrade(t, cluster, name)
+	}
+}
+
+// assertReplicas requires the replica count of one application's workload.
+func assertReplicas(t *testing.T, cluster *harness.Cluster, name string, want int64) {
+	t.Helper()
+	if got := cluster.WorkloadReplicas(t, "Deployment", targetNamespace, name); got != want {
+		t.Fatalf("%s: replicas = %d, want %d", name, got, want)
+	}
+}
+
+// assertNoDrift requires that the round left no external write reported.
+func assertNoDrift(t *testing.T, cluster *harness.Cluster, name string) {
+	t.Helper()
+	if entries := driftOf(t, cluster, name); len(entries) != 0 {
+		t.Fatalf("%s: status.drift = %v, want no external write", name, entries)
+	}
+	if conditionOf(t, cluster, name, app.ConditionDrifted) != nil {
+		t.Fatalf("%s: the round reported a drift condition for a lifecycle write", name)
+	}
+}
+
+// assertNoUpgrade requires that the round ran no preflight: a lifecycle write
+// is not an upgrade request (C-34, C-66).
+func assertNoUpgrade(t *testing.T, cluster *harness.Cluster, name string) {
+	t.Helper()
+	if upgrade, found, _ := unstructured.NestedMap(cluster.Get(t, "v1beta1", "Application", name).Object, "status", "upgrade"); found {
+		t.Fatalf("%s: a lifecycle write entered the upgrade path: %v", name, upgrade)
+	}
+}
+
+// lifecycleAction posts one lifecycle action and requires acceptance.
+func lifecycleAction(t *testing.T, gateway *harness.ControlPlane, name string, extra map[string]any) {
+	t.Helper()
+	body := map[string]any{"kind": "Application", "namespace": harness.Namespace, "name": name}
+	for key, value := range extra {
+		body[key] = value
+	}
+	if status, response := gateway.Call(t, http.MethodPost, "/api/v1/action-requests", body, nil); status != http.StatusAccepted {
+		t.Fatalf("%s: action %v: status %d, body %v", name, extra, status, response)
+	}
+}
+
 // requestUpgrade writes another definition reference into an application,
 // keeping the drift policy the spec already carries.
 func requestUpgrade(t *testing.T, cluster *harness.Cluster, gateway *harness.ControlPlane, name, definition string) {
