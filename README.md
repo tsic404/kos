@@ -35,6 +35,7 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `pkg/extension/` | C-17 至 C-20/C-28/C-48：包摘要、声明、九类贡献、依赖激活、可见性投影、贡献类控制器与删除受阻门 |
 | `pkg/settings/` | C-23 设置域投影：当前值、来源、修改入口与不可修改原因 |
 | `pkg/catalogue/` | C-24 目录来源：条目结构、摘要校验、定义同步与来源缺失的升级路径 |
+| `pkg/access/` | C-59/C-60 判定：可见性谓词、角色写权限、所有权与跨所有者引用，扩展对象按声明授权 |
 | `tests/acceptance/TC-27/` | 读投影带观测时间，超阈值标记陈旧 |
 | `tests/acceptance/TC-28/` | 同一写请求重复提交只产生一个对象 |
 | `tests/acceptance/TC-29/` | 四类失败的错误包络，断线后操作仍到终态 |
@@ -72,6 +73,13 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `tests/acceptance/TC-72/` | 自身数据库的每日导出与离线恢复 |
 | `tests/acceptance/TC-117/` | 登录失败同一结果、按登录名锁定与退出 |
 | `tests/acceptance/TC-118/` | 角色变更、改口令、停用与删除前置转移 |
+| `tests/acceptance/TC-30/` | 可见性谓词：所有者、列名与未列名成员、访客 |
+| `tests/acceptance/TC-31/` | 角色写权限、所有者写定、跨所有者卷引用与策略选择器 |
+| `tests/acceptance/TC-32/` | 角色与可见性不改变入口可达性 |
+| `tests/acceptance/TC-33/` | 所有者转移：仅全局 Owner，原所有者失去管理权 |
+| `tests/acceptance/TC-34/` | 扩展页面写操作按角色与声明授权 |
+| `tests/acceptance/TC-36/` | 每类写操作一条审计记录，扩展同流，不可改删 |
+| `tests/acceptance/TC-37/` | 敏感值不出投影、日志与自身数据库 |
 | `tests/acceptance/TC-79/` | 删除被入口依赖边引用的组件被阻塞并逐个列出依赖者 |
 | `tests/acceptance/TC-80/` | 入口证书状态一等项与到期前 14 天告警 |
 | `tests/acceptance/TC-1/` | 安装与卸载产品不改变内核 kind 集合；对象类只在其 API 组 |
@@ -98,6 +106,7 @@ ApplicationDefinition 与 NodeDevice 没有 status 写者，因此没有 status 
 
 `spec` 字段由契约逐个加入：尚未固定字段的对象保持空 spec，实现不发明线格式。当前已兑现
 C-60 的 `spec.owner`（五类带所有者的对象）、C-59 的 `Application.spec.visibility`、
+C-41/C-60 的 `BackupPolicy.spec.selector`、
 C-17 的 `SystemComponent.spec.package`（工件引用与 sha256 摘要）、
 C-32 的 `Application.spec.definitionRef`/`namespace`/`config`/`volumes` 与定义侧
 `spec.package`/`config`/`template`/`hooks`/`chart`/`requires`、C-66 的
@@ -360,6 +369,10 @@ Kubernetes 凭据不进入浏览器。
   降级或删除；删除前必须转移其拥有的应用、卷、备份策略、恢复作业与卷迁移，未转移时返回
   `account_has_objects` 与 `ownedObjects`。
 - 口令只保存 argon2id 单向摘要，会话只保存令牌摘要；日志、响应与投影响应都不含口令。
+- 审计是追加流：每个写操作（含被拒绝的尝试）写一条记录，字段为操作者、对象、动词、结果、时间、来源
+  与扩展标识；对象写与账号写（建号、改角色或停用、删除、改口令）同流。集合 apply 按对象取各自的
+  判定结果记账，内核对象与扩展对象不会互相带上对方的扩展标识。表由迁移脚本加触发器拒绝改写与删除，
+  API 不暴露任何审计写入口。
 - 数据库是单文件 SQLite（纯 Go 驱动），存放用户、会话、按扩展分域的偏好、设置值与审计，
   不在调和路径上。schema 由内嵌迁移脚本按版本前滚，`Rollback` 反向执行最新一版。
   数据库不可用时登录、设置与偏好的读写失败（`database_unavailable`），已登录会话的读请求
@@ -379,8 +392,12 @@ Kubernetes 凭据不进入浏览器。
 | `PUT` | `/api/v1/accounts/{name}` | 改角色或停用/启用（Owner） |
 | `DELETE` | `/api/v1/accounts/{name}` | 删除账号；仍有归属时拒绝（Owner） |
 
-除登录外，所有路由都要求 `Authorization: Bearer <token>`。`identity.Authorizer` 把 `pkg/write`
-的角色规则接到控制面 API：Guest 只读，写请求按会话当前角色判定。
+除登录外，所有路由都要求 `Authorization: Bearer <token>`。`identity.Authorizer` 把 `pkg/access`
+的 C-59/C-60 规则接到控制面 API：Guest 只读；Member 只写自己拥有的应用、入口、卷、备份策略、
+恢复作业与卷迁移；Owner 写全部。可见性谓词（`Application.spec.visibility`）只过滤面板读取，
+不改变入口可达性；`spec.owner` 由 API 以会话身份写入且不可变，只有全局 Owner 能转移；跨所有者
+卷引用与备份策略选择器在写入时被拒绝。扩展对象的写角色取声明的 `objectWriters`，未声明时只由
+Owner 写。每类写操作同时向 `identity.Audits` 追加一条审计记录（C-14）。
 
 ## 构建与测试
 

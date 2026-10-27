@@ -67,8 +67,19 @@ func (s *Server) authorizeDiagnostics(r *http.Request, namespace, name string) *
 	if s.diagnostics == nil {
 		return notFound("没有这个接口")
 	}
+	objectType, failure := resolveType("Application", "", s.extensions)
+	if failure != nil {
+		return failure
+	}
 	ref := ObjectRef{Group: api.Group, Kind: "Application", Namespace: namespace, Name: name}
-	return s.authorize(r.Context(), VerbRead, ref)
+	observed, err := s.source.Get(r.Context(), objectType, namespace, name)
+	if err != nil {
+		return s.readFailure(err, ref)
+	}
+	// The stored object is what C-59's visibility predicate reads, so a hidden
+	// application is answered as absent here too.
+	_, failure = s.authorize(r.Context(), VerbRead, ref, observed.Object, nil)
+	return failure
 }
 
 // diagnosticsFailure maps an assembly error to the response envelope (C-12).

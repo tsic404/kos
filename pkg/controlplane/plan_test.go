@@ -102,7 +102,7 @@ func TestBuildPlanReportsTheThreeDeviationClasses(t *testing.T) {
 		object("BackupPolicy", "default", "dropped", map[string]any{markers.OwnerUID: "install-1"}, nil),
 	)
 
-	plan, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+	plan, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 		Scope: &Scope{OwnerUID: "install-1"},
 		Objects: []map[string]any{
 			object("ApplicationDefinition", "", "existing",
@@ -143,7 +143,7 @@ func TestBuildPlanReportsTheThreeDeviationClasses(t *testing.T) {
 // scope never removes objects it cannot prove it owns (C-02).
 func TestBuildPlanWithoutScopeDeletesNothing(t *testing.T) {
 	server := planServer(object("BackupPolicy", "default", "orphan", map[string]any{markers.OwnerUID: "install-1"}, nil))
-	plan, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+	plan, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 		Objects: []map[string]any{object("SystemComponent", "", "fresh", nil, nil)},
 	})
 	if failure != nil {
@@ -164,12 +164,12 @@ func TestBuildPlanWithoutScopeDeletesNothing(t *testing.T) {
 func TestBuildPlanRejectsDuplicatesAndEmptySets(t *testing.T) {
 	server := planServer()
 	duplicate := object("SystemComponent", "", "twice", nil, nil)
-	if _, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+	if _, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 		Objects: []map[string]any{duplicate, duplicate},
 	}); failure == nil || failure.Code != CodeInvalidField {
 		t.Fatalf("duplicate object = %v, want an invalid_field failure", failure)
 	}
-	if _, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{}); failure == nil || failure.Code != CodeInvalidField {
+	if _, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{}); failure == nil || failure.Code != CodeInvalidField {
 		t.Fatalf("empty set = %v, want an invalid_field failure", failure)
 	}
 }
@@ -179,7 +179,7 @@ func TestBuildPlanRejectsDuplicatesAndEmptySets(t *testing.T) {
 // repeats a field the Volume or Endpoint object owns.
 func TestBuildPlanAppliesTheApplicationFieldBoundary(t *testing.T) {
 	server := planServer()
-	_, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+	_, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 		Objects: []map[string]any{{
 			"apiVersion": api.Group + "/v1beta1",
 			"kind":       "Application",
@@ -243,7 +243,7 @@ func TestBuildPlanWarnsBeforeCreatingAVolumeWithDeleteReclaim(t *testing.T) {
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			server := planServer(testCase.classes...)
-			plan, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+			plan, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 				Objects: []map[string]any{volumeObject("default", "data", testCase.spec)},
 			})
 			if failure != nil {
@@ -278,7 +278,7 @@ func TestBuildPlanWarnsBeforeCreatingAVolumeWithDeleteReclaim(t *testing.T) {
 func TestBuildPlanWarnsConservativelyWhenTheDefaultClassIsUnreadable(t *testing.T) {
 	server := planServer()
 	server.source.(*fakeSource).listErr = errors.New("storage classes unavailable")
-	plan, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+	plan, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 		Objects: []map[string]any{volumeObject("default", "data", map[string]any{
 			"mobility": "cluster-movable", "capacity": "1Gi",
 		})},
@@ -305,7 +305,7 @@ func TestBuildPlanLogsAFailedClassReadOnce(t *testing.T) {
 	spec := func() map[string]any {
 		return map[string]any{"mobility": "cluster-movable", "capacity": "1Gi"}
 	}
-	plan, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+	plan, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 		Objects: []map[string]any{
 			volumeObject("default", "data", spec()),
 			volumeObject("default", "logs", spec()),
@@ -340,7 +340,7 @@ func TestBuildPlanReadsTheClassSetOncePerPlan(t *testing.T) {
 	unnamed := func() map[string]any {
 		return map[string]any{"mobility": "cluster-movable", "capacity": "1Gi"}
 	}
-	plan, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+	plan, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 		Objects: []map[string]any{
 			volumeObject("default", "data", unnamed()),
 			volumeObject("default", "logs", unnamed()),
@@ -404,7 +404,7 @@ func TestBuildPlanReportsTheExpansionPreflight(t *testing.T) {
 	server.volumeExpansion = fixedExpansion{plan: volume.ExpansionPlan{
 		BackendOnline: true, FilesystemOnline: false, DowntimeRequired: true,
 	}}
-	plan, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+	plan, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 		Objects: []map[string]any{volumeObject("default", "data", map[string]any{
 			"mobility": "cluster-movable", "capacity": "10Gi",
 		})},
@@ -438,7 +438,7 @@ func TestBuildPlanSkipsThePreflightWhenTheCapacityDoesNotGrow(t *testing.T) {
 	stored := volumeObject("default", "data", map[string]any{"mobility": "cluster-movable", "capacity": "10Gi"})
 	server := planServer(stored)
 	server.volumeExpansion = fixedExpansion{plan: volume.ExpansionPlan{DowntimeRequired: true}}
-	plan, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+	plan, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 		Objects: []map[string]any{volumeObject("default", "data", map[string]any{
 			"mobility": "cluster-movable", "capacity": "10Gi", "storageClass": "standard",
 		})},

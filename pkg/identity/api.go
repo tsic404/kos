@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tsic404/kos/api"
+	"github.com/tsic404/kos/pkg/access"
 	"github.com/tsic404/kos/pkg/controlplane"
 	"github.com/tsic404/kos/pkg/write"
 )
@@ -147,10 +148,13 @@ func (a *API) changePassword(w http.ResponseWriter, r *http.Request) {
 		controlplane.WriteError(w, failure)
 		return
 	}
+	session, _ := FromContext(r.Context())
 	if err := a.service.ChangePassword(r.Context(), token, request.CurrentPassword, request.NewPassword); err != nil {
+		a.service.RecordAudit(r.Context(), session.Username, session.Username, "update", controlplane.ResultRejected)
 		controlplane.WriteError(w, failureFor(err))
 		return
 	}
+	a.service.RecordAudit(r.Context(), session.Username, session.Username, "update", controlplane.ResultAccepted)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -189,15 +193,21 @@ func (a *API) createAccount(w http.ResponseWriter, r *http.Request) {
 		controlplane.WriteError(w, failure)
 		return
 	}
+	if err := validateAccountTarget(request.Username); err != nil {
+		controlplane.WriteError(w, failureFor(err))
+		return
+	}
 	created, err := a.service.CreateAccount(r.Context(), session, NewAccount{
 		Username:        request.Username,
 		Role:            write.Role(request.Role),
 		OneTimePassword: request.OneTimePassword,
 	})
 	if err != nil {
+		a.service.RecordAudit(r.Context(), session.Username, request.Username, "create", controlplane.ResultRejected)
 		controlplane.WriteError(w, failureFor(err))
 		return
 	}
+	a.service.RecordAudit(r.Context(), session.Username, created.Account.Username, "create", controlplane.ResultAccepted)
 	writeJSON(w, http.StatusCreated, accountCreatedResponse{
 		accountResponse: accountResponseOf(created.Account),
 		OneTimePassword: created.OneTimePassword,
@@ -216,11 +226,17 @@ func (a *API) updateAccount(w http.ResponseWriter, r *http.Request) {
 		controlplane.WriteError(w, failure)
 		return
 	}
-	account, err := a.service.UpdateAccount(r.Context(), session, r.PathValue("name"), request)
-	if err != nil {
+	if err := validateAccountTarget(r.PathValue("name")); err != nil {
 		controlplane.WriteError(w, failureFor(err))
 		return
 	}
+	account, err := a.service.UpdateAccount(r.Context(), session, r.PathValue("name"), request)
+	if err != nil {
+		a.service.RecordAudit(r.Context(), session.Username, r.PathValue("name"), "update", controlplane.ResultRejected)
+		controlplane.WriteError(w, failureFor(err))
+		return
+	}
+	a.service.RecordAudit(r.Context(), session.Username, account.Username, "update", controlplane.ResultAccepted)
 	writeJSON(w, http.StatusOK, accountResponseOf(account))
 }
 
@@ -231,10 +247,16 @@ func (a *API) deleteAccount(w http.ResponseWriter, r *http.Request) {
 		controlplane.WriteError(w, failureFor(ErrUnauthenticated))
 		return
 	}
-	if err := a.service.DeleteAccount(r.Context(), session, r.PathValue("name")); err != nil {
+	if err := validateAccountTarget(r.PathValue("name")); err != nil {
 		controlplane.WriteError(w, failureFor(err))
 		return
 	}
+	if err := a.service.DeleteAccount(r.Context(), session, r.PathValue("name")); err != nil {
+		a.service.RecordAudit(r.Context(), session.Username, r.PathValue("name"), "delete", controlplane.ResultRejected)
+		controlplane.WriteError(w, failureFor(err))
+		return
+	}
+	a.service.RecordAudit(r.Context(), session.Username, r.PathValue("name"), "delete", controlplane.ResultAccepted)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -287,23 +309,42 @@ type preferenceResponse struct {
 }
 
 // Authorizer is the C-59 gate over control-plane resources: every request must
-// carry the session the identity middleware resolved, and a Guest reads only.
-type Authorizer struct{}
+// carry the session the identity middleware resolved, and the policy decides
+// what that session may see and write.
+type Authorizer struct {
+	// Policy is the rule set C-59 and C-60 own. A nil policy keeps the role
+	// gate only: a Guest reads, every other role passes.
+	Policy *access.Policy
+}
 
-// Decide implements controlplane.Authorizer.
-func (Authorizer) Decide(ctx context.Context, request controlplane.Request) error {
+// Decide implements controlplane.Authorizer. The actor travels back with the
+// decision so the audit stream records who was refused as well (C-14).
+func (a Authorizer) Decide(ctx context.Context, request controlplane.Request) (controlplane.Grant, error) {
 	session, ok := FromContext(ctx)
 	if !ok {
-		return ErrUnauthenticated
+		return controlplane.Grant{}, ErrUnauthenticated
 	}
-	switch request.Verb {
-	case controlplane.VerbRead, controlplane.VerbPlan:
-		return nil
+	if a.Policy == nil {
+		grant := controlplane.Grant{Actor: session.Username}
+		switch request.Verb {
+		case controlplane.VerbRead, controlplane.VerbPlan:
+			return grant, nil
+		}
+		if session.Role == write.RoleGuest {
+			return grant, fmt.Errorf("%w: Guest is read-only", ErrPermissionDenied)
+		}
+		return grant, nil
 	}
-	if session.Role == write.RoleGuest {
-		return fmt.Errorf("%w: Guest is read-only", ErrPermissionDenied)
+	grant, err := a.Policy.Decide(ctx, access.Session{Username: session.Username, Role: session.Role}, request)
+	switch {
+	case err == nil:
+		return grant, nil
+	case errors.Is(err, controlplane.ErrHidden):
+		// A hidden object is answered as absent, not as a refusal (C-59).
+		return grant, controlplane.ErrHidden
+	default:
+		return grant, fmt.Errorf("%w: %v", ErrPermissionDenied, err)
 	}
-	return nil
 }
 
 // sessionContextKey is private so no other package can forge a session.

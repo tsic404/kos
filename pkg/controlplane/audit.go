@@ -9,16 +9,20 @@ import (
 	"github.com/tsic404/kos/pkg/write"
 )
 
-// Results an audit record carries: a write either took effect or was refused,
-// and both outcomes are recorded (C-14).
+// Results an audit record carries: a write either took effect, was refused, or
+// was permitted and then failed. Every outcome is recorded, so an attempt is
+// never invisible (C-14).
 const (
 	// ResultAccepted marks a write the control plane carried out.
 	ResultAccepted = "accepted"
 	// ResultRejected marks a write the control plane refused.
 	ResultRejected = "rejected"
-	// SourceAPI names the control-plane API as where a write came from.
-	SourceAPI = "api"
+	// ResultFailed marks a permitted write that then failed.
+	ResultFailed = "failed"
 )
+
+// SourceAPI names the control-plane API as where a write came from.
+const SourceAPI = "api"
 
 // Actor names the principal behind one request (C-14). The control plane
 // carries no session itself: the surface that mounts it resolves the session
@@ -57,10 +61,13 @@ type AuditRecord struct {
 	// Verb is the operation the write performed; application lifecycle actions
 	// use stop, start, restart and scale.
 	Verb string `json:"verb"`
-	// Result is the outcome, ResultAccepted or ResultRejected.
+	// Result is the outcome, one of the Result constants.
 	Result string `json:"result"`
 	// Source is where the request came from.
 	Source string `json:"source"`
+	// Extension is the identifier of the extension declaring the object's
+	// class; empty for a kernel object (C-14).
+	Extension string `json:"extension,omitempty"`
 	// OccurredAt is when the attempt happened.
 	OccurredAt time.Time `json:"occurredAt"`
 }
@@ -100,17 +107,38 @@ func RecordAudit(ctx context.Context, auditor Auditor, log *slog.Logger, record 
 	}
 }
 
-// audit records one accepted write.
-func (s *Server) audit(ctx context.Context, actor, verb string, ref ObjectRef) {
-	if s.auditor == nil {
+// actorOfGrant resolves the principal of one granted request while its context
+// is still alive, so the record of a write that outlives the client keeps the
+// account it was made by (C-12, C-14).
+func (s *Server) actorOfGrant(ctx context.Context, grant Grant) string {
+	if grant.Actor != "" {
+		return grant.Actor
+	}
+	return s.actorOf(ctx)
+}
+
+// audit records one write attempt under the session that made it (C-14). The
+// actor is resolved by the caller before its request ends, and ctx is the
+// context the write itself runs on: an accepted write outlives its client
+// (C-12), so the record must not be bound to the request context.
+func (s *Server) audit(ctx context.Context, actor, extension string, ref ObjectRef, verb, result string) {
+	if verb == "" {
 		return
 	}
 	RecordAudit(ctx, s.auditor, s.log, AuditRecord{
 		Actor:      actor,
 		Object:     ref,
 		Verb:       verb,
-		Result:     ResultAccepted,
+		Result:     result,
 		Source:     SourceAPI,
+		Extension:  extension,
 		OccurredAt: s.now().UTC(),
 	})
+}
+
+// auditFailure records a permitted write that failed and returns the failure,
+// so a handler writes the envelope and the record in one step (C-14).
+func (s *Server) auditFailure(ctx context.Context, actor, extension string, ref ObjectRef, verb string, failure *Error) *Error {
+	s.audit(ctx, actor, extension, ref, verb, ResultFailed)
+	return failure
 }

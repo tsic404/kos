@@ -221,22 +221,50 @@ func (s *Store) appliedVersions(ctx context.Context) (map[int]bool, error) {
 // are removed first, so a semicolon inside prose cannot split a statement; the
 // scripts never use a double dash inside a string literal.
 func splitStatements(script string) []string {
-	var cleaned strings.Builder
+	statements := make([]string, 0, 8)
+	var current []string
+	inTrigger := false
+	flush := func() {
+		text := strings.TrimSpace(strings.Join(current, "\n"))
+		current = current[:0]
+		for _, part := range strings.Split(text, ";") {
+			if statement := strings.TrimSpace(part); statement != "" {
+				statements = append(statements, statement)
+			}
+		}
+	}
 	for _, line := range strings.Split(script, "\n") {
 		if index := strings.Index(line, "--"); index >= 0 {
 			line = line[:index]
 		}
-		cleaned.WriteString(line)
-		cleaned.WriteString("\n")
-	}
-	statements := make([]string, 0, 8)
-	for _, part := range strings.Split(cleaned.String(), ";") {
-		statement := strings.TrimSpace(part)
-		if statement != "" {
-			statements = append(statements, statement)
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		current = append(current, line)
+		switch {
+		case !inTrigger && strings.HasPrefix(strings.ToUpper(trimmed), "CREATE TRIGGER"):
+			inTrigger = true
+		case inTrigger && isTriggerEnd(trimmed):
+			// A trigger body is one statement even though it holds semicolons
+			// of its own; only the closing END ends it.
+			inTrigger = false
+			statement := strings.TrimSpace(strings.TrimSuffix(strings.Join(current, "\n"), ";"))
+			current = current[:0]
+			if statement != "" {
+				statements = append(statements, statement)
+			}
+		case !inTrigger && strings.HasSuffix(trimmed, ";"):
+			flush()
 		}
 	}
+	flush()
 	return statements
+}
+
+// isTriggerEnd reports whether a line closes a trigger body.
+func isTriggerEnd(line string) bool {
+	return strings.EqualFold(strings.TrimSpace(strings.TrimSuffix(line, ";")), "END")
 }
 
 // SchemaVersion reports the newest applied migration version.

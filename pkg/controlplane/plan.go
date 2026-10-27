@@ -111,13 +111,15 @@ type SetRequest struct {
 
 // buildPlan computes the three deviation classes without writing anything
 // (C-62). verb is the permission the desired objects are judged under; deletes
-// are judged as deletes.
-func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (*Plan, []desiredObject, *Error) {
+// are judged as deletes. judge carries the session the authorization seam reads
+// (C-59), and ctx carries the reads: a caller that outlives its client — an
+// accepted apply, C-12 — passes a context of its own for those.
+func (s *Server) buildPlan(ctx context.Context, judge context.Context, verb Verb, request SetRequest) (*Plan, []desiredObject, map[string]Grant, *Error) {
 	if len(request.Objects) == 0 {
-		return nil, nil, invalidField("请求必须至少给出一个对象")
+		return nil, nil, nil, invalidField("请求必须至少给出一个对象")
 	}
 	if len(request.Objects) > maxSetObjects {
-		return nil, nil, invalidField("一次请求最多 " + strconv.Itoa(maxSetObjects) + " 个对象")
+		return nil, nil, nil, invalidField("一次请求最多 " + strconv.Itoa(maxSetObjects) + " 个对象")
 	}
 
 	desired := make([]desiredObject, 0, len(request.Objects))
@@ -125,33 +127,30 @@ func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (
 	for _, raw := range request.Objects {
 		kind := text(raw["kind"])
 		if kind == "" {
-			return nil, nil, invalidField("每个对象都必须给出 kind")
+			return nil, nil, nil, invalidField("每个对象都必须给出 kind")
 		}
 		objectType, failure := resolveType(kind, text(raw["apiVersion"]), s.extensions)
 		if failure != nil {
-			return nil, nil, withIdentity(failure,
+			return nil, nil, nil, withIdentity(failure,
 				nestedText(raw, "metadata", "namespace"), nestedText(raw, "metadata", "name"))
 		}
 		object, failure := decodeObject(objectType, "", raw)
 		if failure != nil {
-			return nil, nil, failure
+			return nil, nil, nil, failure
 		}
 		if failure := s.validateDesired(ctx, object); failure != nil {
-			return nil, nil, failure
+			return nil, nil, nil, failure
 		}
 		// Attribution is not stamped here: only an object this request creates
 		// gets the creation marker, and an existing object keeps its own (C-02).
 		if seen[object.Ref.String()] {
-			return nil, nil, invalidField("请求重复给出了对象 " + object.Ref.String()).about(object.Ref)
+			return nil, nil, nil, invalidField("请求重复给出了对象 " + object.Ref.String()).about(object.Ref)
 		}
 		seen[object.Ref.String()] = true
-		if failure := s.authorize(ctx, verb, object.Ref); failure != nil {
-			return nil, nil, failure
-		}
 		// An Application in a desired set meets the same C-32/F3 judgement as a
 		// single-object write; the set path must not be a way around it (C-12).
 		if failure := s.validateApplicationWrite(ctx, object.Object); failure != nil {
-			return nil, nil, failure
+			return nil, nil, nil, failure
 		}
 		desired = append(desired, object)
 	}
@@ -160,38 +159,60 @@ func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (
 	// C-39's reclaim judgement reads the class set once for the whole plan: the
 	// set does not change between two creates in the same request.
 	classes := newStorageClassIndex(s.source, s.log)
+	// Each object carries its own decision: a set may mix kernel and extension
+	// classes, so the audit record of each write names that class's extension
+	// and never the batch's (C-14).
+	grants := make(map[string]Grant, len(desired))
 	for index := range desired {
 		object := desired[index]
 		current, err := s.source.Get(ctx, object.Type, object.Ref.Namespace, object.Ref.Name)
 		if err != nil {
-			if apierrors.IsNotFound(err) {
-				if !hasLabel(object.Object, markers.ManagedBy) {
-					plan.Warnings = append(plan.Warnings, Warning{
-						Code:    WarningUnattributed,
-						Message: "对象 " + object.Ref.String() + " 的请求体没有归属标记，控制面创建时会补创建者标记",
-						Object:  new(object.Ref),
-					})
-				}
-				object = withCreationAttribution(object)
-				desired[index] = object
-				plan.Create = append(plan.Create, PlannedObject{Ref: object.Ref, objectType: object.Type})
-				if warning := reclaimWarning(ctx, classes, object); warning != nil {
-					plan.Warnings = append(plan.Warnings, *warning)
-				}
-				continue
+			if !apierrors.IsNotFound(err) {
+				s.log.Error("plan read failed", "object", object.Ref.String(), "error", err)
+				return nil, nil, nil, internal(StagePlan, "读取对象 "+object.Ref.String()+" 失败").about(object.Ref)
 			}
-			s.log.Error("plan read failed", "object", object.Ref.String(), "error", err)
-			return nil, nil, internal(StagePlan, "读取对象 "+object.Ref.String()+" 失败").about(object.Ref)
+			// A create under the set path is judged like a single-object create
+			// (C-12, C-59); the API writes the owner the seam returns (C-60).
+			item, failure := s.decide(judge, verb, object.Ref, object.Object.Object, nil)
+			if failure != nil {
+				return nil, nil, nil, s.refused(ctx, judge, item, object.Ref, verb, string(verb), failure)
+			}
+			grants[object.Ref.String()] = item
+			if failure := applyOwner(object.Object, item); failure != nil {
+				return nil, nil, nil, s.auditFailure(ctx, s.actorOfGrant(judge, item), item.Extension, object.Ref, setVerb(verb), failure)
+			}
+			if !hasLabel(object.Object, markers.ManagedBy) {
+				plan.Warnings = append(plan.Warnings, Warning{
+					Code:    WarningUnattributed,
+					Message: "对象 " + object.Ref.String() + " 的请求体没有归属标记，控制面创建时会补创建者标记",
+					Object:  new(object.Ref),
+				})
+			}
+			object = withCreationAttribution(object)
+			desired[index] = object
+			plan.Create = append(plan.Create, PlannedObject{Ref: object.Ref, objectType: object.Type})
+			if warning := reclaimWarning(ctx, classes, object); warning != nil {
+				plan.Warnings = append(plan.Warnings, *warning)
+			}
+			continue
+		}
+		item, failure := s.decide(judge, verb, object.Ref, object.Object.Object, current.Object)
+		if failure != nil {
+			return nil, nil, nil, s.refused(ctx, judge, item, object.Ref, verb, string(verb), failure)
+		}
+		grants[object.Ref.String()] = item
+		if failure := applyOwner(object.Object, item); failure != nil {
+			return nil, nil, nil, s.auditFailure(ctx, s.actorOfGrant(judge, item), item.Extension, object.Ref, setVerb(verb), failure)
 		}
 		if failure := validateEndpointUpdate(current.Object, object); failure != nil {
-			return nil, nil, failure
+			return nil, nil, nil, s.auditFailure(ctx, s.actorOfGrant(judge, item), item.Extension, object.Ref, setVerb(verb), failure)
 		}
 		// An update keeps the attribution and decline markers the object already
 		// carries, so a body that omits labels neither drops them nor grants new
 		// ones (C-02).
-		object, failure := withStoredAttribution(object, current.Object)
+		object, failure = withStoredAttribution(object, current.Object)
 		if failure != nil {
-			return nil, nil, failure
+			return nil, nil, nil, s.auditFailure(ctx, s.actorOfGrant(judge, item), item.Extension, object.Ref, setVerb(verb), failure)
 		}
 		desired[index] = object
 		if differences := changes(current.Object, object.Object.Object); len(differences) > 0 {
@@ -199,7 +220,7 @@ func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (
 			// come back through the diff (C-31).
 			differences, failure := s.maskChanges(ctx, object, differences)
 			if failure != nil {
-				return nil, nil, failure
+				return nil, nil, nil, failure
 			}
 			plan.Update = append(plan.Update, PlannedUpdate{Ref: object.Ref, Changes: differences})
 			if warning := s.expansionWarning(ctx, object, current.Object); warning != nil {
@@ -208,19 +229,19 @@ func (s *Server) buildPlan(ctx context.Context, verb Verb, request SetRequest) (
 		}
 	}
 
-	retained, failure := s.planDeletes(ctx, request.Scope, seen, plan)
+	retained, failure := s.planDeletes(ctx, judge, verb, request.Scope, seen, plan, grants)
 	if failure != nil {
-		return nil, nil, failure
+		return nil, nil, nil, failure
 	}
 	plan.sort()
 	plan.render(retained)
-	return plan, desired, nil
+	return plan, desired, grants, nil
 }
 
 // planDeletes adds the objects the scope owns but the desired set dropped. A
 // volume is never deleted this way: releasing data needs its own confirmation
 // (C-39, F5).
-func (s *Server) planDeletes(ctx context.Context, scope *Scope, desired map[string]bool, plan *Plan) (int, *Error) {
+func (s *Server) planDeletes(ctx context.Context, judge context.Context, verb Verb, scope *Scope, desired map[string]bool, plan *Plan, grants map[string]Grant) (int, *Error) {
 	if scope == nil || scope.OwnerUID == "" {
 		return 0, nil
 	}
@@ -252,13 +273,25 @@ func (s *Server) planDeletes(ctx context.Context, scope *Scope, desired map[stri
 				})
 				continue
 			}
-			if failure := s.authorize(ctx, VerbDelete, ref); failure != nil {
-				return 0, failure
+			grant, failure := s.decide(judge, VerbDelete, ref, nil, item.Object)
+			if failure != nil {
+				return 0, s.refused(ctx, judge, grant, ref, verb, string(VerbDelete), failure)
 			}
+			grants[ref.String()] = grant
 			plan.Delete = append(plan.Delete, PlannedObject{Ref: ref, objectType: objectType})
 		}
 	}
 	return retained, nil
+}
+
+// refused answers one planned request the seam rejected. A plan writes nothing,
+// so its refusal records nothing (C-62); an apply is a write request, and its
+// refusal is recorded like any other attempt (C-14).
+func (s *Server) refused(ctx context.Context, judge context.Context, grant Grant, ref ObjectRef, request Verb, verb string, failure *Error) *Error {
+	if request == VerbApply {
+		s.audit(ctx, s.actorOfGrant(judge, grant), grant.Extension, ref, verb, ResultRejected)
+	}
+	return failure
 }
 
 // storageClassIndex answers C-39's reclaim questions from one read of the
@@ -311,6 +344,15 @@ func (i *storageClassIndex) defaultName() string {
 		if defaultStorageClass(i.byName[name]) {
 			return name
 		}
+	}
+	return ""
+}
+
+// setVerb names the write a set request performs for the audit stream: a plan
+// writes nothing, so it records nothing (C-14, C-62).
+func setVerb(verb Verb) string {
+	if verb == VerbApply {
+		return string(VerbApply)
 	}
 	return ""
 }
@@ -481,25 +523,36 @@ func (p *Plan) render(retained int) {
 // execute carries out a plan under the operation context: a client that
 // disconnected cannot stop it (C-12). The first failure ends the run; the
 // objects written before it are the accepted side effects.
-func (s *Server) execute(ctx context.Context, plan *Plan, desired []desiredObject) {
+func (s *Server) execute(ctx context.Context, plan *Plan, desired []desiredObject, grants map[string]Grant) {
 	byRef := make(map[string]desiredObject, len(desired))
 	for _, object := range desired {
 		byRef[object.Ref.String()] = object
 	}
 	for _, planned := range plan.Create {
-		if failure := s.create(ctx, byRef[planned.Ref.String()]); failure != nil {
+		object := byRef[planned.Ref.String()]
+		grant := grants[planned.Ref.String()]
+		if failure := s.create(ctx, object); failure != nil {
+			s.audit(ctx, s.actorOfGrant(ctx, grant), grant.Extension, object.Ref, string(VerbCreate), ResultFailed)
 			return
 		}
+		s.audit(ctx, s.actorOfGrant(ctx, grant), grant.Extension, object.Ref, string(VerbCreate), ResultAccepted)
 	}
 	for _, planned := range plan.Update {
-		if failure := s.update(ctx, byRef[planned.Ref.String()], ""); failure != nil {
+		object := byRef[planned.Ref.String()]
+		grant := grants[planned.Ref.String()]
+		if failure := s.update(ctx, object, ""); failure != nil {
+			s.audit(ctx, s.actorOfGrant(ctx, grant), grant.Extension, object.Ref, string(VerbUpdate), ResultFailed)
 			return
 		}
+		s.audit(ctx, s.actorOfGrant(ctx, grant), grant.Extension, object.Ref, string(VerbUpdate), ResultAccepted)
 	}
 	for _, planned := range plan.Delete {
+		grant := grants[planned.Ref.String()]
 		if failure := s.delete(ctx, planned.objectType, planned.Ref, ""); failure != nil {
+			s.audit(ctx, s.actorOfGrant(ctx, grant), grant.Extension, planned.Ref, string(VerbDelete), ResultFailed)
 			return
 		}
+		s.audit(ctx, s.actorOfGrant(ctx, grant), grant.Extension, planned.Ref, string(VerbDelete), ResultAccepted)
 	}
 }
 

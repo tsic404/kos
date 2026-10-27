@@ -122,6 +122,9 @@ type AuditEntry struct {
 	Result string
 	// Source names the surface the write came from.
 	Source string
+	// Extension is the identifier of the extension declaring the object's
+	// class; empty for a kernel write (C-14).
+	Extension string
 	// OccurredAt is when it happened.
 	OccurredAt time.Time
 }
@@ -767,11 +770,12 @@ func (s *Store) SetSettingValue(ctx context.Context, scope, target, identifier, 
 	return nil
 }
 
-// AppendAudit stores one audit record (C-14).
+// AppendAudit stores one audit record (C-14). The table rejects updates and
+// deletes, so this is the only write it accepts.
 func (s *Store) AppendAudit(ctx context.Context, entry AuditEntry) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO audit (actor, object, verb, result, source, occurred_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		entry.Actor, entry.Object, entry.Verb, entry.Result, entry.Source, toMillis(entry.OccurredAt))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO audit (actor, object, verb, result, source, extension, occurred_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		entry.Actor, entry.Object, entry.Verb, entry.Result, entry.Source, entry.Extension, toMillis(entry.OccurredAt))
 	if err != nil {
 		return fmt.Errorf("identity: append audit: %w", err)
 	}
@@ -780,7 +784,7 @@ func (s *Store) AppendAudit(ctx context.Context, entry AuditEntry) error {
 
 // AuditEntries reads audit records oldest first, at most limit of them.
 func (s *Store) AuditEntries(ctx context.Context, limit int) ([]AuditEntry, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT actor, object, verb, result, source, occurred_at
+	rows, err := s.db.QueryContext(ctx, `SELECT actor, object, verb, result, source, extension, occurred_at
 		FROM audit ORDER BY id LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("identity: read audit: %w", err)
@@ -792,7 +796,7 @@ func (s *Store) AuditEntries(ctx context.Context, limit int) ([]AuditEntry, erro
 			entry      AuditEntry
 			occurredAt int64
 		)
-		if err := rows.Scan(&entry.Actor, &entry.Object, &entry.Verb, &entry.Result, &entry.Source, &occurredAt); err != nil {
+		if err := rows.Scan(&entry.Actor, &entry.Object, &entry.Verb, &entry.Result, &entry.Source, &entry.Extension, &occurredAt); err != nil {
 			return nil, fmt.Errorf("identity: read audit: %w", err)
 		}
 		entry.OccurredAt = fromMillis(occurredAt)

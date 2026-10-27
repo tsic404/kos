@@ -118,8 +118,23 @@ func TestTC72DatabaseRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read audit: %v", err)
 	}
-	if len(audit) != 1 || !audit[0].OccurredAt.Equal(exportedAt) {
-		t.Fatalf("audit after restore = %+v, want the one record from the export instant", audit)
+	// The export holds the probe record and every write the case made before
+	// it — the account writes carry audit records of their own (C-14) — and
+	// none of the writes after the export survive.
+	probe := false
+	for _, entry := range audit {
+		if entry.Object == "Volume default/data" {
+			t.Fatalf("a post-export audit record survived the restore: %+v", audit)
+		}
+		if entry.Object == "Application default/web" && entry.OccurredAt.Equal(exportedAt) {
+			probe = true
+		}
+		if entry.OccurredAt.After(exportedAt) {
+			t.Fatalf("a record written later survived the restore: %+v", entry)
+		}
+	}
+	if !probe {
+		t.Fatalf("the audit record of the export instant is missing: %+v", audit)
 	}
 	if _, err := restored.UserByName(ctx, "late"); !errors.Is(err, identity.ErrNotFound) {
 		t.Fatalf("a post-export account survived the restore: %v", err)

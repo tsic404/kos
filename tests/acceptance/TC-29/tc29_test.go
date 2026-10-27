@@ -39,11 +39,11 @@ type denyWrites struct {
 }
 
 // Decide implements controlplane.Authorizer.
-func (d denyWrites) Decide(_ context.Context, request controlplane.Request) error {
+func (d denyWrites) Decide(_ context.Context, request controlplane.Request) (controlplane.Grant, error) {
 	if request.Verb != controlplane.VerbRead && request.Ref.Name == d.name {
-		return errors.New("not allowed")
+		return controlplane.Grant{}, errors.New("not allowed")
 	}
-	return nil
+	return controlplane.Grant{}, nil
 }
 
 // TestTC29FailureFields checks the envelope of each failure class.

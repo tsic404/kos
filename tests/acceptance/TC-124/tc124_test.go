@@ -340,14 +340,20 @@ func TestTC124AuditNamesTheOperator(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the audit trail: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("audit entries = %d, want the one stop: %+v", len(entries), entries)
+	// Every write of the session is recorded, the create as well as the stop;
+	// what this case fixes is that the stop is one of them and that none of them
+	// falls back to the API process subject (C-14, C-66).
+	stops := 0
+	for _, entry := range entries {
+		if entry.Actor != operatorName {
+			t.Fatalf("audit entry = %+v, want the signed-in account %q", entry, operatorName)
+		}
+		if entry.Verb == app.ActionStop {
+			stops++
+		}
 	}
-	if entries[0].Actor != operatorName {
-		t.Fatalf("audit actor = %q, want the signed-in account %q", entries[0].Actor, operatorName)
-	}
-	if entries[0].Verb != app.ActionStop {
-		t.Fatalf("audit verb = %q, want %q", entries[0].Verb, app.ActionStop)
+	if stops != 1 {
+		t.Fatalf("audit entries = %+v, want exactly one %q", entries, app.ActionStop)
 	}
 }
 

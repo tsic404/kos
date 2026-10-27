@@ -57,7 +57,7 @@ func TestMigrationsApplyAndRollback(t *testing.T) {
 		t.Fatal("the users table still answers after its rollback")
 	}
 	if _, err := store.Rollback(ctx); err == nil {
-		t.Fatal("a second rollback found a migration to reverse")
+		t.Fatal("a rollback with no migration left to reverse succeeded")
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close database: %v", err)
