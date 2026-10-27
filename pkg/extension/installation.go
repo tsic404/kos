@@ -65,8 +65,11 @@ type ComponentResult struct {
 	Generation int64
 	Identifier string
 	Version    string
-	Phase      string
-	Health     v1beta1.HealthState
+	// FrameworkVersion is the framework range the declaration targets; it is
+	// reported, not judged here (C-18).
+	FrameworkVersion string
+	Phase            string
+	Health           v1beta1.HealthState
 	// HasVerifiedPackage reports that the digest and the declaration passed.
 	HasVerifiedPackage bool
 	// HasEvaluatedDependencies reports that the dependency fixpoint ran for
@@ -145,6 +148,7 @@ func Evaluate(requests []Request) Assessment {
 		}
 		result.Identifier = loaded.Identifier
 		result.Version = loaded.Version
+		result.FrameworkVersion = loaded.FrameworkVersion
 		if owner, taken := identifiers[loaded.Identifier]; taken {
 			unavailable(result, ReasonDuplicateIdentifier, "标识 "+loaded.Identifier+" 已由组件 "+owner+" 安装")
 			continue
