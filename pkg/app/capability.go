@@ -14,8 +14,15 @@ type Capability struct {
 	Name string
 	// Version is the registered version.
 	Version string
+	// Scope is where the registration's guarantee holds (C-09). An empty value
+	// is read as node: the weaker promise never satisfies a cluster-level
+	// requirement (C-11).
+	Scope v1beta1.CapabilityScope
 	// Guarantees are the guarantee values the registration carries.
 	Guarantees map[string]Guarantee
+	// Verified reports that KOS ran the capability's conformance and every
+	// case passed; guarantees of an unverified capability do not hold (C-10).
+	Verified bool
 }
 
 // Guarantee is one guarantee value: a boolean or an enum (C-09).
@@ -56,6 +63,14 @@ func Compare(requirements []v1beta1.CapabilityRequirement, available []Capabilit
 			result.Missing = appendUnique(result.Missing, requirement.Name)
 			continue
 		}
+		if !best.Verified {
+			// An unverified capability promises no guarantee (C-10), so no
+			// key of the requirement holds.
+			for _, wanted := range requirement.Guarantees {
+				result.Unsatisfied = appendUnique(result.Unsatisfied, requirement.Name+"."+wanted.Key)
+			}
+			continue
+		}
 		for _, wanted := range requirement.Guarantees {
 			got, present := best.Guarantees[wanted.Key]
 			if present && guaranteeMatches(wanted, got) {
@@ -67,16 +82,47 @@ func Compare(requirements []v1beta1.CapabilityRequirement, available []Capabilit
 	return result, nil
 }
 
+// satisfiesGuarantees reports whether one registration can promise the
+// requirement. An unverified capability promises nothing: only a KOS run makes
+// its guarantee level stand (C-10).
+func satisfiesGuarantees(requirements []v1beta1.GuaranteeRequirement, candidate Capability) bool {
+	if len(requirements) == 0 {
+		return true
+	}
+	if !candidate.Verified {
+		return false
+	}
+	for _, wanted := range requirements {
+		got, present := candidate.Guarantees[wanted.Key]
+		if !present || !guaranteeMatches(wanted, got) {
+			return false
+		}
+	}
+	return true
+}
+
+// MatchesVersion reports whether version falls inside constraint, using the
+// version syntax C-11 compares with.
+func MatchesVersion(version, constraint string) (bool, error) {
+	return satisfies(version, constraint)
+}
+
 // highest picks the highest registered version that satisfies the requirement's
-// range (C-11). A registration whose version does not parse cannot be ordered,
-// so it never becomes the pick; otherwise the result would follow the order the
-// provider registered its versions in.
+// range, then the first registration at that version whose guarantees hold: two
+// providers may offer the same version, and one that cannot promise the
+// guarantees does not shadow one that can (C-10, C-11). A version that does not
+// parse cannot be ordered, so it never becomes the pick.
 func highest(requirement v1beta1.CapabilityRequirement, available []Capability) (Capability, bool) {
-	var best Capability
 	var bestVersion []int
-	found := false
+	candidates := make([]Capability, 0)
 	for _, candidate := range available {
 		if candidate.Name != requirement.Name {
+			continue
+		}
+		// A registration whose scope is narrower than the requirement cannot
+		// serve it (C-11); the version menu is built from what remains, so a
+		// lower version that does hold cluster-wide is still reachable.
+		if !satisfiesScope(requirement.Scope, candidate.Scope) {
 			continue
 		}
 		version, ok := parseVersion(candidate.Version)
@@ -87,13 +133,50 @@ func highest(requirement v1beta1.CapabilityRequirement, available []Capability) 
 		if err != nil || !satisfied {
 			continue
 		}
-		if !found || compare(version, bestVersion) > 0 {
-			best = candidate
+		switch {
+		case len(candidates) == 0 || compare(version, bestVersion) > 0:
 			bestVersion = version
-			found = true
+			candidates = []Capability{candidate}
+		case compare(version, bestVersion) == 0:
+			candidates = append(candidates, candidate)
 		}
 	}
-	return best, found
+	for _, candidate := range candidates {
+		if satisfiesGuarantees(requirement.Guarantees, candidate) {
+			return candidate, true
+		}
+	}
+	// No registration at the picked version promises everything. A verified
+	// one is the better answer: its failure names the guarantee that is short,
+	// while an unverified one voids every key.
+	for _, candidate := range candidates {
+		if candidate.Verified {
+			return candidate, true
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[0], true
+	}
+	return Capability{}, false
+}
+
+// satisfiesScope reports whether a registration covers what a requirement asks
+// for (C-11): a cluster-level requirement needs a cluster-level capability,
+// while a node-level requirement accepts either scope. An omitted scope on
+// either side reads as node, the weaker promise.
+func satisfiesScope(required, provided v1beta1.CapabilityScope) bool {
+	if scopeOf(required) == v1beta1.CapabilityScopeNode {
+		return true
+	}
+	return scopeOf(provided) == v1beta1.CapabilityScopeCluster
+}
+
+// scopeOf reads a scope value, defaulting an omitted one to node (C-11).
+func scopeOf(scope v1beta1.CapabilityScope) v1beta1.CapabilityScope {
+	if scope == "" {
+		return v1beta1.CapabilityScopeNode
+	}
+	return scope
 }
 
 // guaranteeMatches applies the guarantee comparison of C-11.
@@ -124,6 +207,11 @@ func ValidateRequirement(requirement v1beta1.CapabilityRequirement) error {
 	}
 	if _, err := parseConstraint(requirement.Version); err != nil {
 		return fmt.Errorf("capability %q: %w", requirement.Name, err)
+	}
+	switch requirement.Scope {
+	case "", v1beta1.CapabilityScopeCluster, v1beta1.CapabilityScopeNode:
+	default:
+		return fmt.Errorf("capability %q: the scope %q is neither cluster nor node", requirement.Name, requirement.Scope)
 	}
 	for _, guarantee := range requirement.Guarantees {
 		if guarantee.Key == "" {

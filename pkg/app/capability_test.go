@@ -8,9 +8,9 @@ import (
 	"github.com/tsic404/kos/pkg/app"
 )
 
-// capability builds one registered capability.
+// capability builds one registered capability the kernel verified.
 func capability(name, version string, guarantees map[string]app.Guarantee) app.Capability {
-	return app.Capability{Name: name, Version: version, Guarantees: guarantees}
+	return app.Capability{Name: name, Version: version, Guarantees: guarantees, Verified: true}
 }
 
 // boolean reads a boolean guarantee value.
@@ -175,5 +175,107 @@ func TestValidateRequirementRejectsAmbiguousEnum(t *testing.T) {
 		Guarantees: []v1beta1.GuaranteeRequirement{{Key: "mode", OneOf: []string{"fast", "slow"}}},
 	}); err != nil {
 		t.Fatalf("a oneOf-only guarantee was refused: %v", err)
+	}
+}
+
+// TestCompareScopeDecidesWhichRegistrationsServe covers C-11's scope rule: a
+// cluster-level requirement is not satisfied by a node-level registration, a
+// node-level requirement accepts either scope, and an omitted scope on either
+// side reads as node.
+func TestCompareScopeDecidesWhichRegistrationsServe(t *testing.T) {
+	node := app.Capability{Name: "storage.volume", Version: "v1", Scope: v1beta1.CapabilityScopeNode, Verified: true}
+	clusterWide := app.Capability{Name: "storage.volume", Version: "v1", Scope: v1beta1.CapabilityScopeCluster, Verified: true}
+	unstated := app.Capability{Name: "storage.volume", Version: "v1", Verified: true}
+
+	cases := []struct {
+		name        string
+		scope       v1beta1.CapabilityScope
+		available   []app.Capability
+		wantMissing []string
+	}{
+		{
+			name:        "a cluster requirement is not met by a node capability",
+			scope:       v1beta1.CapabilityScopeCluster,
+			available:   []app.Capability{node},
+			wantMissing: []string{"storage.volume"},
+		},
+		{
+			name:      "a cluster requirement is met by a cluster capability",
+			scope:     v1beta1.CapabilityScopeCluster,
+			available: []app.Capability{clusterWide},
+		},
+		{
+			name:      "a node requirement is met by a node capability",
+			scope:     v1beta1.CapabilityScopeNode,
+			available: []app.Capability{node},
+		},
+		{
+			name:      "a node requirement is met by a cluster capability",
+			scope:     v1beta1.CapabilityScopeNode,
+			available: []app.Capability{clusterWide},
+		},
+		{
+			name:      "an omitted requirement scope asks for node",
+			available: []app.Capability{node},
+		},
+		{
+			name:        "a registration without a scope never satisfies cluster",
+			scope:       v1beta1.CapabilityScopeCluster,
+			available:   []app.Capability{unstated},
+			wantMissing: []string{"storage.volume"},
+		},
+		{
+			name:      "a cluster requirement reads the lower version that holds",
+			scope:     v1beta1.CapabilityScopeCluster,
+			available: []app.Capability{{Name: "storage.volume", Version: "v2", Scope: v1beta1.CapabilityScopeNode, Verified: true}, clusterWide},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := app.Compare([]v1beta1.CapabilityRequirement{{Name: "storage.volume", Scope: test.scope}}, test.available)
+			if err != nil {
+				t.Fatalf("compare: %v", err)
+			}
+			if !reflect.DeepEqual(result.Missing, test.wantMissing) {
+				t.Errorf("missing = %v, want %v", result.Missing, test.wantMissing)
+			}
+			if len(result.Unsatisfied) != 0 {
+				t.Errorf("unsatisfied = %v, want none", result.Unsatisfied)
+			}
+		})
+	}
+}
+
+// TestCompareOptionalClusterRequirementOnlyDegrades keeps a scope shortfall on
+// an optional requirement from blocking the install (C-11).
+func TestCompareOptionalClusterRequirementOnlyDegrades(t *testing.T) {
+	result, err := app.Compare([]v1beta1.CapabilityRequirement{{
+		Name:     "compute.gpu",
+		Scope:    v1beta1.CapabilityScopeCluster,
+		Optional: true,
+	}}, []app.Capability{{Name: "compute.gpu", Version: "v1", Scope: v1beta1.CapabilityScopeNode, Verified: true}})
+	if err != nil {
+		t.Fatalf("compare: %v", err)
+	}
+	if len(result.Missing) != 0 {
+		t.Fatalf("missing = %v, want none: an optional requirement never blocks", result.Missing)
+	}
+	if want := []string{"compute.gpu"}; !reflect.DeepEqual(result.Unsatisfied, want) {
+		t.Errorf("unsatisfied = %v, want %v", result.Unsatisfied, want)
+	}
+}
+
+// TestValidateRequirementRejectsAnUnknownScope keeps an undecidable scope from
+// being read as either value (C-11).
+func TestValidateRequirementRejectsAnUnknownScope(t *testing.T) {
+	requirement := v1beta1.CapabilityRequirement{Name: "storage.volume", Scope: "edge"}
+	if err := app.ValidateRequirement(requirement); err == nil {
+		t.Fatal("a requirement with an unknown scope passed validation")
+	}
+	for _, scope := range []v1beta1.CapabilityScope{"", v1beta1.CapabilityScopeNode, v1beta1.CapabilityScopeCluster} {
+		requirement.Scope = scope
+		if err := app.ValidateRequirement(requirement); err != nil {
+			t.Errorf("scope %q was refused: %v", scope, err)
+		}
 	}
 }

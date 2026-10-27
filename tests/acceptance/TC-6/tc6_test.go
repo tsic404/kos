@@ -45,7 +45,7 @@ func brokenDeclaration() extension.Declaration {
 			ObjectClasses: []extension.ObjectClass{{
 				Group: failingGroup, Kind: "Widget", Resource: "widgets", Versions: []string{"v1"},
 			}},
-			Capabilities: []extension.Capability{{Name: "demo.broken/panel", Version: "v1"}},
+			Capabilities: extension.CapabilityContributions{Items: []extension.Capability{{Name: "demo.broken/panel", Version: "v1"}}},
 			Pages:        []extension.Page{{ID: "broken", Title: "Broken"}},
 			Settings:     []extension.Setting{{ID: "broken-endpoint", Scope: extension.SettingScopeCluster, Writer: extension.SettingWriterUser}},
 		},

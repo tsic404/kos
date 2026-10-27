@@ -37,12 +37,190 @@ spec:
           metadata:
             type: object
           spec:
-            description: Spec is the desired state owned by the registering component
-              (C-03).
+            description: |-
+              Spec is the registration declared by the component that owns the
+              provider (C-03, C-47).
+            properties:
+              capabilities:
+                description: |-
+                  Capabilities are the registered capabilities, each with its parameter
+                  structure, guarantees and conformance case set (C-09).
+                items:
+                  description: |-
+                    ProviderCapability is one capability at one version a provider registers
+                    (C-09). Two versions of the same capability may be registered at once.
+                  properties:
+                    caseSet:
+                      description: |-
+                        CaseSet names the conformance case set the capability is verified
+                        against (C-09).
+                      type: string
+                    caseSetDigest:
+                      description: |-
+                        CaseSetDigest pins the case set contents; a case set whose contents
+                        differ from the distribution's is not comparable (C-10).
+                      type: string
+                    guarantees:
+                      description: |-
+                        Guarantees are the boolean and enum values the capability promises
+                        (C-09).
+                      items:
+                        description: 'CapabilityGuarantee is one guarantee value:
+                          a boolean or an enum (C-09).'
+                        properties:
+                          bool:
+                            description: Bool is the boolean value.
+                            type: boolean
+                          enum:
+                            description: Enum is the enum value.
+                            type: string
+                          key:
+                            description: Key is the guarantee key.
+                            type: string
+                        required:
+                        - key
+                        type: object
+                      type: array
+                    name:
+                      description: Name is the capability name.
+                      type: string
+                    parameters:
+                      description: Parameters is the parameter structure the capability
+                        accepts (C-09).
+                      items:
+                        description: |-
+                          CapabilityParameter is one parameter of a capability's parameter structure
+                          (C-09).
+                        properties:
+                          enum:
+                            description: Enum lists the accepted values of an enum
+                              parameter.
+                            items:
+                              type: string
+                            type: array
+                          name:
+                            description: Name is the parameter name.
+                            type: string
+                          required:
+                            description: Required rejects a call that omits the parameter.
+                            type: boolean
+                          type:
+                            description: Type is one of string, integer, number, boolean
+                              or enum.
+                            enum:
+                            - string
+                            - integer
+                            - number
+                            - boolean
+                            - enum
+                            type: string
+                        required:
+                        - name
+                        - type
+                        type: object
+                      type: array
+                    scope:
+                      description: |-
+                        Scope is where the capability's guarantee holds (C-09): the whole
+                        cluster or only the nodes that provide it. A baseline capability that
+                        omits it takes the kernel baseline's value; an extension capability must
+                        declare one.
+                      type: string
+                    version:
+                      description: Version is the registered version.
+                      type: string
+                  required:
+                  - caseSet
+                  - caseSetDigest
+                  - name
+                  - version
+                  type: object
+                type: array
+              componentRef:
+                description: |-
+                  ComponentRef names the system component that registered the provider;
+                  the provider's owner-uid is that component's UID (C-02, C-47).
+                type: string
+              selfReported:
+                description: |-
+                  SelfReported is the conformance result the provider declares about
+                  itself; only a KOS run verifies (C-10).
+                items:
+                  description: |-
+                    ProviderSelfReport is one conformance result a provider declares about
+                    itself (C-10). An empty FailedCases means the provider claims every case
+                    passed.
+                  properties:
+                    capability:
+                      description: Capability is the capability the result speaks
+                        about.
+                      type: string
+                    failedCases:
+                      description: FailedCases are the cases the provider reports
+                        as failed.
+                      items:
+                        type: string
+                      type: array
+                    version:
+                      description: Version is the capability version.
+                      type: string
+                  required:
+                  - capability
+                  - version
+                  type: object
+                type: array
+              storageClasses:
+                description: |-
+                  StorageClasses are the storage classes the provider supplies; a
+                  provider without a storage capability declares an empty set (C-47).
+                items:
+                  type: string
+                type: array
+              version:
+                description: Version is the provider version the component registered
+                  (C-47).
+                type: string
             type: object
           status:
             description: Status is written by the validator (C-03, C-07).
             properties:
+              capabilities:
+                description: |-
+                  Capabilities are the verification results, one per effective
+                  capability (C-10).
+                items:
+                  description: |-
+                    ProviderCapabilityResult is the outcome of one capability's conformance
+                    run (C-10).
+                  properties:
+                    failedCases:
+                      description: FailedCases lists every case that did not pass
+                        (C-10).
+                      items:
+                        type: string
+                      type: array
+                    name:
+                      description: Name is the capability name.
+                      type: string
+                    reason:
+                      description: Reason names why the state is not Verified (C-10).
+                      type: string
+                    source:
+                      description: 'Source is who produced the outcome: KOS or the
+                        provider itself (C-10).'
+                      type: string
+                    state:
+                      description: State is Verified, Degraded or Unverified (C-10).
+                      type: string
+                    version:
+                      description: Version is the capability version.
+                      type: string
+                  required:
+                  - name
+                  - state
+                  - version
+                  type: object
+                type: array
               conditions:
                 description: Conditions carries Reconciled and the object's failure
                   conditions (C-07).
@@ -104,6 +282,129 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              dependents:
+                description: |-
+                  Dependents lists the objects that keep a deleting provider in place
+                  (C-48).
+                items:
+                  description: ObjectRef identifies one object inside a status list.
+                  properties:
+                    group:
+                      description: Group is the API group; empty for the core group.
+                      type: string
+                    kind:
+                      description: Kind is the object kind.
+                      type: string
+                    name:
+                      description: Name is the object name.
+                      type: string
+                    namespace:
+                      description: Namespace is the object namespace; empty for cluster-scoped
+                        objects.
+                      type: string
+                    version:
+                      description: Version is the object version.
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
+              effectiveCapabilities:
+                description: |-
+                  EffectiveCapabilities is the capability set actually in service; a
+                  blocked withdrawal leaves it at the old set (C-48).
+                items:
+                  description: |-
+                    ProviderCapability is one capability at one version a provider registers
+                    (C-09). Two versions of the same capability may be registered at once.
+                  properties:
+                    caseSet:
+                      description: |-
+                        CaseSet names the conformance case set the capability is verified
+                        against (C-09).
+                      type: string
+                    caseSetDigest:
+                      description: |-
+                        CaseSetDigest pins the case set contents; a case set whose contents
+                        differ from the distribution's is not comparable (C-10).
+                      type: string
+                    guarantees:
+                      description: |-
+                        Guarantees are the boolean and enum values the capability promises
+                        (C-09).
+                      items:
+                        description: 'CapabilityGuarantee is one guarantee value:
+                          a boolean or an enum (C-09).'
+                        properties:
+                          bool:
+                            description: Bool is the boolean value.
+                            type: boolean
+                          enum:
+                            description: Enum is the enum value.
+                            type: string
+                          key:
+                            description: Key is the guarantee key.
+                            type: string
+                        required:
+                        - key
+                        type: object
+                      type: array
+                    name:
+                      description: Name is the capability name.
+                      type: string
+                    parameters:
+                      description: Parameters is the parameter structure the capability
+                        accepts (C-09).
+                      items:
+                        description: |-
+                          CapabilityParameter is one parameter of a capability's parameter structure
+                          (C-09).
+                        properties:
+                          enum:
+                            description: Enum lists the accepted values of an enum
+                              parameter.
+                            items:
+                              type: string
+                            type: array
+                          name:
+                            description: Name is the parameter name.
+                            type: string
+                          required:
+                            description: Required rejects a call that omits the parameter.
+                            type: boolean
+                          type:
+                            description: Type is one of string, integer, number, boolean
+                              or enum.
+                            enum:
+                            - string
+                            - integer
+                            - number
+                            - boolean
+                            - enum
+                            type: string
+                        required:
+                        - name
+                        - type
+                        type: object
+                      type: array
+                    scope:
+                      description: |-
+                        Scope is where the capability's guarantee holds (C-09): the whole
+                        cluster or only the nodes that provide it. A baseline capability that
+                        omits it takes the kernel baseline's value; an extension capability must
+                        declare one.
+                      type: string
+                    version:
+                      description: Version is the registered version.
+                      type: string
+                  required:
+                  - caseSet
+                  - caseSetDigest
+                  - name
+                  - version
+                  type: object
+                type: array
               health:
                 description: Health is the availability axis of the object (C-08).
                 properties:
@@ -119,6 +420,34 @@ spec:
               phase:
                 description: Phase is the flow stage; it is orthogonal to health (C-07).
                 type: string
+              references:
+                description: |-
+                  References lists the objects that reference a withdrawn capability
+                  (C-48).
+                items:
+                  description: ObjectRef identifies one object inside a status list.
+                  properties:
+                    group:
+                      description: Group is the API group; empty for the core group.
+                      type: string
+                    kind:
+                      description: Kind is the object kind.
+                      type: string
+                    name:
+                      description: Name is the object name.
+                      type: string
+                    namespace:
+                      description: Namespace is the object namespace; empty for cluster-scoped
+                        objects.
+                      type: string
+                    version:
+                      description: Version is the object version.
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
             type: object
         type: object
     served: true
@@ -148,12 +477,190 @@ spec:
           metadata:
             type: object
           spec:
-            description: Spec is the desired state owned by the registering component
-              (C-03).
+            description: |-
+              Spec is the registration declared by the component that owns the
+              provider (C-03, C-47).
+            properties:
+              capabilities:
+                description: |-
+                  Capabilities are the registered capabilities, each with its parameter
+                  structure, guarantees and conformance case set (C-09).
+                items:
+                  description: |-
+                    ProviderCapability is one capability at one version a provider registers
+                    (C-09). Two versions of the same capability may be registered at once.
+                  properties:
+                    caseSet:
+                      description: |-
+                        CaseSet names the conformance case set the capability is verified
+                        against (C-09).
+                      type: string
+                    caseSetDigest:
+                      description: |-
+                        CaseSetDigest pins the case set contents; a case set whose contents
+                        differ from the distribution's is not comparable (C-10).
+                      type: string
+                    guarantees:
+                      description: |-
+                        Guarantees are the boolean and enum values the capability promises
+                        (C-09).
+                      items:
+                        description: 'CapabilityGuarantee is one guarantee value:
+                          a boolean or an enum (C-09).'
+                        properties:
+                          bool:
+                            description: Bool is the boolean value.
+                            type: boolean
+                          enum:
+                            description: Enum is the enum value.
+                            type: string
+                          key:
+                            description: Key is the guarantee key.
+                            type: string
+                        required:
+                        - key
+                        type: object
+                      type: array
+                    name:
+                      description: Name is the capability name.
+                      type: string
+                    parameters:
+                      description: Parameters is the parameter structure the capability
+                        accepts (C-09).
+                      items:
+                        description: |-
+                          CapabilityParameter is one parameter of a capability's parameter structure
+                          (C-09).
+                        properties:
+                          enum:
+                            description: Enum lists the accepted values of an enum
+                              parameter.
+                            items:
+                              type: string
+                            type: array
+                          name:
+                            description: Name is the parameter name.
+                            type: string
+                          required:
+                            description: Required rejects a call that omits the parameter.
+                            type: boolean
+                          type:
+                            description: Type is one of string, integer, number, boolean
+                              or enum.
+                            enum:
+                            - string
+                            - integer
+                            - number
+                            - boolean
+                            - enum
+                            type: string
+                        required:
+                        - name
+                        - type
+                        type: object
+                      type: array
+                    scope:
+                      description: |-
+                        Scope is where the capability's guarantee holds (C-09): the whole
+                        cluster or only the nodes that provide it. A baseline capability that
+                        omits it takes the kernel baseline's value; an extension capability must
+                        declare one.
+                      type: string
+                    version:
+                      description: Version is the registered version.
+                      type: string
+                  required:
+                  - caseSet
+                  - caseSetDigest
+                  - name
+                  - version
+                  type: object
+                type: array
+              componentRef:
+                description: |-
+                  ComponentRef names the system component that registered the provider;
+                  the provider's owner-uid is that component's UID (C-02, C-47).
+                type: string
+              selfReported:
+                description: |-
+                  SelfReported is the conformance result the provider declares about
+                  itself; only a KOS run verifies (C-10).
+                items:
+                  description: |-
+                    ProviderSelfReport is one conformance result a provider declares about
+                    itself (C-10). An empty FailedCases means the provider claims every case
+                    passed.
+                  properties:
+                    capability:
+                      description: Capability is the capability the result speaks
+                        about.
+                      type: string
+                    failedCases:
+                      description: FailedCases are the cases the provider reports
+                        as failed.
+                      items:
+                        type: string
+                      type: array
+                    version:
+                      description: Version is the capability version.
+                      type: string
+                  required:
+                  - capability
+                  - version
+                  type: object
+                type: array
+              storageClasses:
+                description: |-
+                  StorageClasses are the storage classes the provider supplies; a
+                  provider without a storage capability declares an empty set (C-47).
+                items:
+                  type: string
+                type: array
+              version:
+                description: Version is the provider version the component registered
+                  (C-47).
+                type: string
             type: object
           status:
             description: Status is written by the validator (C-03, C-07).
             properties:
+              capabilities:
+                description: |-
+                  Capabilities are the verification results, one per effective
+                  capability (C-10).
+                items:
+                  description: |-
+                    ProviderCapabilityResult is the outcome of one capability's conformance
+                    run (C-10).
+                  properties:
+                    failedCases:
+                      description: FailedCases lists every case that did not pass
+                        (C-10).
+                      items:
+                        type: string
+                      type: array
+                    name:
+                      description: Name is the capability name.
+                      type: string
+                    reason:
+                      description: Reason names why the state is not Verified (C-10).
+                      type: string
+                    source:
+                      description: 'Source is who produced the outcome: KOS or the
+                        provider itself (C-10).'
+                      type: string
+                    state:
+                      description: State is Verified, Degraded or Unverified (C-10).
+                      type: string
+                    version:
+                      description: Version is the capability version.
+                      type: string
+                  required:
+                  - name
+                  - state
+                  - version
+                  type: object
+                type: array
               conditions:
                 description: Conditions carries Reconciled and the object's failure
                   conditions (C-07).
@@ -215,6 +722,129 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              dependents:
+                description: |-
+                  Dependents lists the objects that keep a deleting provider in place
+                  (C-48).
+                items:
+                  description: ObjectRef identifies one object inside a status list.
+                  properties:
+                    group:
+                      description: Group is the API group; empty for the core group.
+                      type: string
+                    kind:
+                      description: Kind is the object kind.
+                      type: string
+                    name:
+                      description: Name is the object name.
+                      type: string
+                    namespace:
+                      description: Namespace is the object namespace; empty for cluster-scoped
+                        objects.
+                      type: string
+                    version:
+                      description: Version is the object version.
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
+              effectiveCapabilities:
+                description: |-
+                  EffectiveCapabilities is the capability set actually in service; a
+                  blocked withdrawal leaves it at the old set (C-48).
+                items:
+                  description: |-
+                    ProviderCapability is one capability at one version a provider registers
+                    (C-09). Two versions of the same capability may be registered at once.
+                  properties:
+                    caseSet:
+                      description: |-
+                        CaseSet names the conformance case set the capability is verified
+                        against (C-09).
+                      type: string
+                    caseSetDigest:
+                      description: |-
+                        CaseSetDigest pins the case set contents; a case set whose contents
+                        differ from the distribution's is not comparable (C-10).
+                      type: string
+                    guarantees:
+                      description: |-
+                        Guarantees are the boolean and enum values the capability promises
+                        (C-09).
+                      items:
+                        description: 'CapabilityGuarantee is one guarantee value:
+                          a boolean or an enum (C-09).'
+                        properties:
+                          bool:
+                            description: Bool is the boolean value.
+                            type: boolean
+                          enum:
+                            description: Enum is the enum value.
+                            type: string
+                          key:
+                            description: Key is the guarantee key.
+                            type: string
+                        required:
+                        - key
+                        type: object
+                      type: array
+                    name:
+                      description: Name is the capability name.
+                      type: string
+                    parameters:
+                      description: Parameters is the parameter structure the capability
+                        accepts (C-09).
+                      items:
+                        description: |-
+                          CapabilityParameter is one parameter of a capability's parameter structure
+                          (C-09).
+                        properties:
+                          enum:
+                            description: Enum lists the accepted values of an enum
+                              parameter.
+                            items:
+                              type: string
+                            type: array
+                          name:
+                            description: Name is the parameter name.
+                            type: string
+                          required:
+                            description: Required rejects a call that omits the parameter.
+                            type: boolean
+                          type:
+                            description: Type is one of string, integer, number, boolean
+                              or enum.
+                            enum:
+                            - string
+                            - integer
+                            - number
+                            - boolean
+                            - enum
+                            type: string
+                        required:
+                        - name
+                        - type
+                        type: object
+                      type: array
+                    scope:
+                      description: |-
+                        Scope is where the capability's guarantee holds (C-09): the whole
+                        cluster or only the nodes that provide it. A baseline capability that
+                        omits it takes the kernel baseline's value; an extension capability must
+                        declare one.
+                      type: string
+                    version:
+                      description: Version is the registered version.
+                      type: string
+                  required:
+                  - caseSet
+                  - caseSetDigest
+                  - name
+                  - version
+                  type: object
+                type: array
               health:
                 description: Health is the availability axis of the object (C-08).
                 properties:
@@ -230,6 +860,34 @@ spec:
               phase:
                 description: Phase is the flow stage; it is orthogonal to health (C-07).
                 type: string
+              references:
+                description: |-
+                  References lists the objects that reference a withdrawn capability
+                  (C-48).
+                items:
+                  description: ObjectRef identifies one object inside a status list.
+                  properties:
+                    group:
+                      description: Group is the API group; empty for the core group.
+                      type: string
+                    kind:
+                      description: Kind is the object kind.
+                      type: string
+                    name:
+                      description: Name is the object name.
+                      type: string
+                    namespace:
+                      description: Namespace is the object namespace; empty for cluster-scoped
+                        objects.
+                      type: string
+                    version:
+                      description: Version is the object version.
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
             type: object
         type: object
     served: true

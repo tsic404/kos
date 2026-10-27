@@ -57,6 +57,7 @@ func TestTC54PhaseProgressionAndPending(t *testing.T) {
 		Name:       "storage.block",
 		Version:    "1.2.0",
 		Guarantees: map[string]app.Guarantee{"snapshot": {Bool: new(true)}},
+		Verified:   true,
 	}}
 	controller := cluster.ApplicationController(t, app.Options{Capabilities: registered})
 

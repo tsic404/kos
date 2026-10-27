@@ -436,6 +436,10 @@ type CapabilityRequirement struct {
 	// Version is the optional version range; empty matches any version.
 	// +optional
 	Version string `json:"version,omitempty"`
+	// Scope is the availability the requirement needs: cluster demands a
+	// cluster-wide capability; node, the default, accepts both scopes (C-11).
+	// +optional
+	Scope CapabilityScope `json:"scope,omitempty"`
 	// Guarantees are the guarantee values the capability must hold (C-11).
 	// +optional
 	Guarantees []GuaranteeRequirement `json:"guarantees,omitempty"`
@@ -716,16 +720,160 @@ type EndpointList struct {
 type Provider struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	// Spec is the desired state owned by the registering component (C-03).
+	// Spec is the registration declared by the component that owns the
+	// provider (C-03, C-47).
 	// +optional
 	Spec ProviderSpec `json:"spec,omitempty"`
 	// Status is written by the validator (C-03, C-07).
 	// +optional
-	Status ObjectStatus `json:"status,omitempty"`
+	Status ProviderStatus `json:"status,omitempty"`
 }
 
-// ProviderSpec holds the registration declared by a system component.
-type ProviderSpec struct{}
+// ProviderSpec holds the registration a system component declares (C-47).
+type ProviderSpec struct {
+	// ComponentRef names the system component that registered the provider;
+	// the provider's owner-uid is that component's UID (C-02, C-47).
+	// +optional
+	ComponentRef string `json:"componentRef,omitempty"`
+	// Version is the provider version the component registered (C-47).
+	// +optional
+	Version string `json:"version,omitempty"`
+	// StorageClasses are the storage classes the provider supplies; a
+	// provider without a storage capability declares an empty set (C-47).
+	// +optional
+	StorageClasses []string `json:"storageClasses,omitempty"`
+	// Capabilities are the registered capabilities, each with its parameter
+	// structure, guarantees and conformance case set (C-09).
+	// +optional
+	Capabilities []ProviderCapability `json:"capabilities,omitempty"`
+	// SelfReported is the conformance result the provider declares about
+	// itself; only a KOS run verifies (C-10).
+	// +optional
+	SelfReported []ProviderSelfReport `json:"selfReported,omitempty"`
+}
+
+// CapabilityScope says where a capability's guarantee holds (C-09): cluster
+// means the whole cluster, node means only the nodes providing the capability.
+type CapabilityScope string
+
+const (
+	// CapabilityScopeCluster holds across the whole cluster (C-09).
+	CapabilityScopeCluster CapabilityScope = "cluster"
+	// CapabilityScopeNode holds only on the nodes providing the capability
+	// (C-09).
+	CapabilityScopeNode CapabilityScope = "node"
+)
+
+// ProviderCapability is one capability at one version a provider registers
+// (C-09). Two versions of the same capability may be registered at once.
+type ProviderCapability struct {
+	// Name is the capability name.
+	Name string `json:"name"`
+	// Version is the registered version.
+	Version string `json:"version"`
+	// Scope is where the capability's guarantee holds (C-09): the whole
+	// cluster or only the nodes that provide it. A baseline capability that
+	// omits it takes the kernel baseline's value; an extension capability must
+	// declare one.
+	// +optional
+	Scope CapabilityScope `json:"scope,omitempty"`
+	// Parameters is the parameter structure the capability accepts (C-09).
+	// +optional
+	Parameters []CapabilityParameter `json:"parameters,omitempty"`
+	// Guarantees are the boolean and enum values the capability promises
+	// (C-09).
+	// +optional
+	Guarantees []CapabilityGuarantee `json:"guarantees,omitempty"`
+	// CaseSet names the conformance case set the capability is verified
+	// against (C-09).
+	CaseSet string `json:"caseSet"`
+	// CaseSetDigest pins the case set contents; a case set whose contents
+	// differ from the distribution's is not comparable (C-10).
+	CaseSetDigest string `json:"caseSetDigest"`
+}
+
+// CapabilityParameter is one parameter of a capability's parameter structure
+// (C-09).
+type CapabilityParameter struct {
+	// Name is the parameter name.
+	Name string `json:"name"`
+	// Type is one of string, integer, number, boolean or enum.
+	// +kubebuilder:validation:Enum=string;integer;number;boolean;enum
+	Type string `json:"type"`
+	// Required rejects a call that omits the parameter.
+	// +optional
+	Required bool `json:"required,omitempty"`
+	// Enum lists the accepted values of an enum parameter.
+	// +optional
+	Enum []string `json:"enum,omitempty"`
+}
+
+// CapabilityGuarantee is one guarantee value: a boolean or an enum (C-09).
+type CapabilityGuarantee struct {
+	// Key is the guarantee key.
+	Key string `json:"key"`
+	// Bool is the boolean value.
+	// +optional
+	Bool *bool `json:"bool,omitempty"`
+	// Enum is the enum value.
+	// +optional
+	Enum string `json:"enum,omitempty"`
+}
+
+// ProviderSelfReport is one conformance result a provider declares about
+// itself (C-10). An empty FailedCases means the provider claims every case
+// passed.
+type ProviderSelfReport struct {
+	// Capability is the capability the result speaks about.
+	Capability string `json:"capability"`
+	// Version is the capability version.
+	Version string `json:"version"`
+	// FailedCases are the cases the provider reports as failed.
+	// +optional
+	FailedCases []string `json:"failedCases,omitempty"`
+}
+
+// ProviderStatus is what the validator observes (C-47, C-48).
+type ProviderStatus struct {
+	// ObjectStatus carries the shared status axes (C-07).
+	ObjectStatus `json:",inline"`
+	// Capabilities are the verification results, one per effective
+	// capability (C-10).
+	// +optional
+	Capabilities []ProviderCapabilityResult `json:"capabilities,omitempty"`
+	// EffectiveCapabilities is the capability set actually in service; a
+	// blocked withdrawal leaves it at the old set (C-48).
+	// +optional
+	EffectiveCapabilities []ProviderCapability `json:"effectiveCapabilities,omitempty"`
+	// Dependents lists the objects that keep a deleting provider in place
+	// (C-48).
+	// +optional
+	Dependents []ObjectRef `json:"dependents,omitempty"`
+	// References lists the objects that reference a withdrawn capability
+	// (C-48).
+	// +optional
+	References []ObjectRef `json:"references,omitempty"`
+}
+
+// ProviderCapabilityResult is the outcome of one capability's conformance
+// run (C-10).
+type ProviderCapabilityResult struct {
+	// Name is the capability name.
+	Name string `json:"name"`
+	// Version is the capability version.
+	Version string `json:"version"`
+	// Source is who produced the outcome: KOS or the provider itself (C-10).
+	// +optional
+	Source string `json:"source,omitempty"`
+	// State is Verified, Degraded or Unverified (C-10).
+	State string `json:"state"`
+	// Reason names why the state is not Verified (C-10).
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// FailedCases lists every case that did not pass (C-10).
+	// +optional
+	FailedCases []string `json:"failedCases,omitempty"`
+}
 
 // ProviderList is the list form of Provider.
 //

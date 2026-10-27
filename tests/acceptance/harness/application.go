@@ -13,6 +13,7 @@ import (
 	"github.com/tsic404/kos/api/v1beta1"
 	"github.com/tsic404/kos/pkg/app"
 	"github.com/tsic404/kos/pkg/markers"
+	"github.com/tsic404/kos/pkg/reconcile"
 	"github.com/tsic404/kos/pkg/write"
 )
 
@@ -54,12 +55,71 @@ func ApplicationManifest(name, namespace, definitionRef, targetNamespace string,
 	return body
 }
 
+// CreateApplication creates one application the controller installs (C-32).
+func (c *Cluster) CreateApplication(t *testing.T, name, definitionRef, targetNamespace string) *unstructured.Unstructured {
+	t.Helper()
+	body := ApplicationManifest(name, Namespace, definitionRef, targetNamespace, nil, nil)
+	return c.Create(t, &unstructured.Unstructured{Object: body})
+}
+
 // ApplicationController builds the real application controller over the
 // cluster. A case drives it round by round, so a lifecycle step is observed
 // before the next one runs (C-06).
 func (c *Cluster) ApplicationController(t *testing.T, options app.Options) *app.Controller {
 	t.Helper()
 	return app.NewController(app.NewWriterStore(c.Writer()), options)
+}
+
+// ApplicationRound runs one application round (C-06).
+func (c *Cluster) ApplicationRound(t *testing.T, controller *app.Controller, name string) {
+	t.Helper()
+	if _, err := controller.Reconcile(context.Background(), reconcile.Request{
+		Kind: "Application", Namespace: Namespace, Name: name,
+	}); err != nil {
+		t.Fatalf("reconcile application %s: %v", name, err)
+	}
+}
+
+// SettleApplication runs rounds until the application leaves the install
+// sequence or the budget ends, and returns the last phase.
+func (c *Cluster) SettleApplication(t *testing.T, controller *app.Controller, name string, rounds int) string {
+	t.Helper()
+	phase := ""
+	for range rounds {
+		c.ApplicationRound(t, controller, name)
+		phase = c.ApplicationPhase(t, name)
+		if phase == app.PhaseReady || phase == app.PhaseFailed {
+			break
+		}
+	}
+	return phase
+}
+
+// ApplicationPhase reads the stored phase (C-33).
+func (c *Cluster) ApplicationPhase(t *testing.T, name string) string {
+	t.Helper()
+	phase, _, err := unstructured.NestedString(c.Get(t, "v1beta1", "Application", name).Object, "status", "phase")
+	if err != nil {
+		t.Fatalf("read application %s phase: %v", name, err)
+	}
+	return phase
+}
+
+// ApplicationStatusOf decodes the stored application status (C-07, C-33).
+func (c *Cluster) ApplicationStatusOf(t *testing.T, name string) v1beta1.ApplicationStatus {
+	t.Helper()
+	raw, found, err := unstructured.NestedMap(c.Get(t, "v1beta1", "Application", name).Object, "status")
+	if err != nil {
+		t.Fatalf("read application %s status: %v", name, err)
+	}
+	if !found {
+		t.Fatalf("application %s has no status", name)
+	}
+	var status v1beta1.ApplicationStatus
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(raw, &status); err != nil {
+		t.Fatalf("decode application %s status: %v", name, err)
+	}
+	return status
 }
 
 // configTemplate renders one ConfigMap in the declared namespace. Lifecycle

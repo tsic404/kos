@@ -52,7 +52,7 @@ func TestRegistryCapabilitiesKeepTheBaseline(t *testing.T) {
 		t.Fatalf("catalogue = %v", capabilities)
 	}
 	for index, baseline := range BaselineCapabilities() {
-		if capabilities[index] != baseline {
+		if capabilities[index].Name != baseline.Name || capabilities[index].Version != baseline.Version {
 			t.Fatalf("baseline entry %d = %v, want %v", index, capabilities[index], baseline)
 		}
 	}

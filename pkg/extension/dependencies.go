@@ -2,24 +2,45 @@ package extension
 
 import (
 	"strings"
+
+	"github.com/tsic404/kos/api/v1beta1"
 )
 
 // baselineCapabilities is the kernel capability baseline (C-09): eight names,
-// each starting at v1. A product never adds to it or changes it (TC-2).
+// each starting at v1 with the scope the kernel fixes. A product never adds to
+// it or changes it (TC-2).
 var baselineCapabilities = []Capability{
-	{Name: "storage.volume", Version: "v1"},
-	{Name: "storage.snapshot", Version: "v1"},
-	{Name: "storage.shared-rwx", Version: "v1"},
-	{Name: "network.http-endpoint", Version: "v1"},
-	{Name: "network.path-prefix", Version: "v1"},
-	{Name: "network.l4-endpoint", Version: "v1"},
-	{Name: "network.policy", Version: "v1"},
-	{Name: "compute.gpu", Version: "v1"},
+	{Name: "storage.volume", Version: "v1", Scope: v1beta1.CapabilityScopeNode},
+	{Name: "storage.snapshot", Version: "v1", Scope: v1beta1.CapabilityScopeNode},
+	{Name: "storage.shared-rwx", Version: "v1", Scope: v1beta1.CapabilityScopeCluster},
+	{Name: "network.http-endpoint", Version: "v1", Scope: v1beta1.CapabilityScopeCluster},
+	{Name: "network.path-prefix", Version: "v1", Scope: v1beta1.CapabilityScopeCluster},
+	{Name: "network.l4-endpoint", Version: "v1", Scope: v1beta1.CapabilityScopeCluster},
+	{Name: "network.policy", Version: "v1", Scope: v1beta1.CapabilityScopeCluster},
+	{Name: "compute.gpu", Version: "v1", Scope: v1beta1.CapabilityScopeNode},
 }
 
 // BaselineCapabilities returns a copy of the kernel capability baseline.
 func BaselineCapabilities() []Capability {
 	return append([]Capability(nil), baselineCapabilities...)
+}
+
+// baselineCapability resolves one baseline entry by name.
+func baselineCapability(name string) (Capability, bool) {
+	for _, capability := range baselineCapabilities {
+		if capability.Name == name {
+			return capability, true
+		}
+	}
+	return Capability{}, false
+}
+
+// isBaselineCapability reports whether a name is one of the eight kernel
+// capabilities (C-09). A provider contributes a baseline capability under the
+// name the kernel fixed; a new capability carries its extension's prefix.
+func isBaselineCapability(name string) bool {
+	_, found := baselineCapability(name)
+	return found
 }
 
 // catalogue is the capability and component set one activation round can use.
@@ -36,7 +57,7 @@ func catalogueFor(active []activated) catalogue {
 		components:   make(map[string]string, len(active)),
 	}
 	for _, component := range active {
-		available.capabilities = append(available.capabilities, component.loaded.Contributions.Capabilities...)
+		available.capabilities = append(available.capabilities, component.loaded.Contributions.Capabilities.Items...)
 		available.components[component.loaded.Identifier] = component.loaded.Version
 	}
 	return available

@@ -41,7 +41,7 @@ func declaration() extension.Declaration {
 			Controllers: []extension.Controller{{
 				ID: "widget", Manages: []extension.GroupKind{{Group: widgetsGroup, Kind: "Widget"}},
 			}},
-			Capabilities: []extension.Capability{{Name: "demo.widgets/panel", Version: "v1"}},
+			Capabilities: extension.CapabilityContributions{Items: []extension.Capability{{Name: "demo.widgets/panel", Version: "v1"}}},
 			Pages:        []extension.Page{{ID: "widgets", Title: "Widgets"}},
 		},
 	}

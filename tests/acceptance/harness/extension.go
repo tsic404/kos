@@ -65,6 +65,35 @@ func (c *Cluster) InstallPackageWith(t *testing.T, name string, declaration exte
 	return c.ExtensionStateWith(t, artifacts, sink)
 }
 
+// UpgradePackage replaces one installed component's package with a new
+// declaration and runs the install pass again (C-17).
+func (c *Cluster) UpgradePackage(t *testing.T, name string, declaration extension.Declaration, artifacts extension.MemoryArtifacts) *extension.Installation {
+	t.Helper()
+	content, err := extension.Marshal(declaration)
+	if err != nil {
+		t.Fatalf("marshal declaration %s: %v", name, err)
+	}
+	reference := "test://" + name
+	artifacts[reference] = content
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	resource := c.resource(t, v1beta1.GroupVersion.Version, "SystemComponent")
+	component, err := resource.Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("read component %s: %v", name, err)
+	}
+	if err := unstructured.SetNestedField(component.Object, extension.DigestOf(content), "spec", "package", "digest"); err != nil {
+		t.Fatalf("set package digest of %s: %v", name, err)
+	}
+	if err := unstructured.SetNestedField(component.Object, reference, "spec", "package", "reference"); err != nil {
+		t.Fatalf("set package reference of %s: %v", name, err)
+	}
+	if _, err := resource.Update(ctx, component, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update component %s: %v", name, err)
+	}
+	return c.ExtensionState(t, artifacts)
+}
+
 // DeleteComponent removes one system component, which withdraws its
 // contributions on the next install pass.
 func (c *Cluster) DeleteComponent(t *testing.T, name string) {

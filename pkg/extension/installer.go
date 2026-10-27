@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
@@ -154,6 +156,12 @@ func (i *Installer) Install(ctx context.Context) (*Installation, error) {
 		if err := i.writeStatus(ctx, result.Name, status, object); err != nil {
 			return nil, err
 		}
+		if !result.HasVerifiedPackage || !result.HasMetDependencies {
+			continue
+		}
+		if err := i.registerProvider(ctx, result, object); err != nil {
+			return nil, err
+		}
 	}
 	// Preference bookkeeping records what it can and never fails the pass: the
 	// control-plane database is not on the reconciliation path (C-27, C-61).
@@ -214,6 +222,112 @@ func keepsContribution(retention []Retention, class string) bool {
 		}
 	}
 	return false
+}
+
+// registerProvider writes the registration a component declares (C-47). The
+// component path owns Provider.spec and the attribution markers; the validator
+// owns status, so the two writers never touch one field (C-03).
+func (i *Installer) registerProvider(ctx context.Context, result ComponentResult, component *unstructured.Unstructured) error {
+	contribution := result.Contributions.Capabilities
+	capabilities := make([]v1beta1.ProviderCapability, 0, len(contribution.Items))
+	for _, entry := range contribution.Items {
+		// A baseline capability without a declared scope takes the value the
+		// kernel fixes for it; an extension capability must declare one and is
+		// left empty for the validator to refuse (C-09).
+		scope := entry.Scope
+		if scope == "" {
+			if baseline, found := baselineCapability(entry.Name); found {
+				scope = baseline.Scope
+			}
+		}
+		capabilities = append(capabilities, v1beta1.ProviderCapability{
+			Name:          entry.Name,
+			Version:       entry.Version,
+			Scope:         scope,
+			Parameters:    append([]v1beta1.CapabilityParameter(nil), entry.Parameters...),
+			Guarantees:    append([]v1beta1.CapabilityGuarantee(nil), entry.Guarantees...),
+			CaseSet:       entry.CaseSet,
+			CaseSetDigest: entry.CaseSetDigest,
+		})
+	}
+	reports := make([]v1beta1.ProviderSelfReport, 0, len(contribution.SelfReported))
+	for _, report := range contribution.SelfReported {
+		reports = append(reports, v1beta1.ProviderSelfReport{
+			Capability:  report.Capability,
+			Version:     report.Version,
+			FailedCases: append([]string(nil), report.FailedCases...),
+		})
+	}
+	spec := v1beta1.ProviderSpec{
+		ComponentRef:   result.Name,
+		Version:        result.Version,
+		StorageClasses: append([]string(nil), contribution.StorageClasses...),
+		Capabilities:   capabilities,
+		SelfReported:   reports,
+	}
+	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&spec)
+	if err != nil {
+		return fmt.Errorf("provider %s: encode spec: %w", result.Name, err)
+	}
+	metadata := map[string]any{"name": result.Name}
+	labels, err := i.registrationAttribution(ctx, result.Name, component)
+	if err != nil {
+		return err
+	}
+	if len(labels) > 0 {
+		metadata["labels"] = labels
+	}
+	document := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": api.Group + "/" + v1beta1.GroupVersion.Version,
+		"kind":       "Provider",
+		"metadata":   metadata,
+		"spec":       raw,
+	}}
+	if _, err := i.Status.Apply(ctx, write.SubjectComponentRegistry, write.Session{}, write.PartSpec, document); err != nil {
+		return fmt.Errorf("register provider %s: %w", result.Name, err)
+	}
+	return nil
+}
+
+// registrationAttribution returns the attribution labels one Provider write
+// carries (C-02, C-47). A first registration takes this component's identity;
+// an existing registration keeps what was written at creation, because
+// attribution does not change after the object exists.
+func (i *Installer) registrationAttribution(ctx context.Context, name string, component *unstructured.Unstructured) (map[string]any, error) {
+	resource, err := i.providerResource()
+	if err != nil {
+		return nil, err
+	}
+	current, err := resource.Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return map[string]any{
+			markers.ManagedBy: write.ManagedByValue,
+			markers.OwnerUID:  string(component.GetUID()),
+		}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read provider %s: %w", name, err)
+	}
+	labels := map[string]any{}
+	for _, key := range []string{markers.ManagedBy, markers.OwnerUID} {
+		if value := current.GetLabels()[key]; value != "" {
+			labels[key] = value
+		}
+	}
+	return labels, nil
+}
+
+// providerResource resolves the Provider client.
+func (i *Installer) providerResource() (dynamic.ResourceInterface, error) {
+	plural, ok := i.Resources[schema.GroupKind{Group: api.Group, Kind: "Provider"}]
+	if !ok {
+		return nil, errors.New("installer has no resource name for Provider")
+	}
+	return i.Dynamic.Resource(schema.GroupVersionResource{
+		Group:    api.Group,
+		Version:  v1beta1.GroupVersion.Version,
+		Resource: plural,
+	}), nil
 }
 
 // resource resolves the system component client.
