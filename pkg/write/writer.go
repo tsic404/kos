@@ -109,17 +109,20 @@ func (w *Writer) create(ctx context.Context, subject Subject, session Session, c
 // stored. A field set another writer owns comes back as *Conflict carrying the
 // current object (C-05).
 func (w *Writer) Apply(ctx context.Context, subject Subject, session Session, part Part, document *unstructured.Unstructured) (*unstructured.Unstructured, error) {
-	return w.apply(ctx, subject, session, "", part, document)
+	return w.apply(ctx, subject, session, "", part, document, false)
 }
 
 // ApplyClaim writes a claim in the C-04 row the caller declares it to belong
 // to. Claims carry no kernel parts, so the whole object is the written part.
+// The apply is forced: the declared subject is the sole writer of that claim
+// row (C-04), and the claim it created carries the same manager under the
+// create operation, which a plain apply reports as a conflict.
 func (w *Writer) ApplyClaim(ctx context.Context, subject Subject, session Session, claim Claim, document *unstructured.Unstructured) (*unstructured.Unstructured, error) {
-	return w.apply(ctx, subject, session, claim, PartObject, document)
+	return w.apply(ctx, subject, session, claim, PartObject, document, true)
 }
 
 // apply runs one admitted server-side apply.
-func (w *Writer) apply(ctx context.Context, subject Subject, session Session, claim Claim, part Part, document *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+func (w *Writer) apply(ctx context.Context, subject Subject, session Session, claim Claim, part Part, document *unstructured.Unstructured, force bool) (*unstructured.Unstructured, error) {
 	ref := RefOf(document)
 	current, err := w.current(ctx, ref)
 	if err != nil {
@@ -168,7 +171,7 @@ func (w *Writer) apply(ctx context.Context, subject Subject, session Session, cl
 			document = keepsOwner(document, session, current)
 		}
 	}
-	return w.applyDocument(ctx, ref, part, document, false, manager(subject, session))
+	return w.applyDocument(ctx, ref, part, document, force, manager(subject, session))
 }
 
 // applyDocument runs one server-side apply and turns a field-set conflict into
