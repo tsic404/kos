@@ -99,8 +99,39 @@ spec:
             - message: spec.targetApp 创建后不可修改
               rule: self.targetApp == oldSelf.targetApp
           status:
-            description: Status is written by the endpoint reconciler (C-03, C-07).
+            description: Status is written by the endpoint reconciler (C-03, C-07,
+              C-46).
             properties:
+              certificate:
+                description: |-
+                  Certificate is the certificate state of an endpoint that serves TLS
+                  (C-46); it is absent when the endpoint serves no certificate.
+                properties:
+                  expiringSoon:
+                    description: ExpiringSoon reports an expiry inside the warning
+                      window (C-46).
+                    type: boolean
+                  issuer:
+                    description: |-
+                      Issuer is the resolved issuer identity: the spec's issuerRef, or the
+                      distribution's reserved built-in issuer when the spec omits it (C-46).
+                    type: string
+                  notAfter:
+                    description: NotAfter is the expiry of the served certificate
+                      (C-46).
+                    format: date-time
+                    type: string
+                  ready:
+                    description: Ready reports that a certificate covering now serves
+                      the route (C-46).
+                    type: boolean
+                  reason:
+                    description: Reason explains a certificate that is not ready (C-46).
+                    type: string
+                required:
+                - issuer
+                - ready
+                type: object
               conditions:
                 description: Conditions carries Reconciled and the object's failure
                   conditions (C-07).
@@ -268,8 +299,39 @@ spec:
             - message: spec.targetApp 创建后不可修改
               rule: self.targetApp == oldSelf.targetApp
           status:
-            description: Status is written by the endpoint reconciler (C-03, C-07).
+            description: Status is written by the endpoint reconciler (C-03, C-07,
+              C-46).
             properties:
+              certificate:
+                description: |-
+                  Certificate is the certificate state of an endpoint that serves TLS
+                  (C-46); it is absent when the endpoint serves no certificate.
+                properties:
+                  expiringSoon:
+                    description: ExpiringSoon reports an expiry inside the warning
+                      window (C-46).
+                    type: boolean
+                  issuer:
+                    description: |-
+                      Issuer is the resolved issuer identity: the spec's issuerRef, or the
+                      distribution's reserved built-in issuer when the spec omits it (C-46).
+                    type: string
+                  notAfter:
+                    description: NotAfter is the expiry of the served certificate
+                      (C-46).
+                    format: date-time
+                    type: string
+                  ready:
+                    description: Ready reports that a certificate covering now serves
+                      the route (C-46).
+                    type: boolean
+                  reason:
+                    description: Reason explains a certificate that is not ready (C-46).
+                    type: string
+                required:
+                - issuer
+                - ready
+                type: object
               conditions:
                 description: Conditions carries Reconciled and the object's failure
                   conditions (C-07).

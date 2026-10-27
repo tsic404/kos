@@ -117,7 +117,7 @@ func (r *Reconciler) routeDocument(ctx context.Context, endpoint *unstructured.U
 			// http.host carries no path; the whole host is the route.
 			path = "/"
 		}
-		return ingressRoute(endpoint, spec.Host, path, spec.TargetApp), nil
+		return ingressRoute(endpoint, spec, path), nil
 	case v1beta1.EndpointKindTCP, v1beta1.EndpointKindUDP:
 		application, err := r.writer.Get(ctx, ApplicationRef(entry.Ref.Namespace, spec.TargetApp))
 		if err != nil {
@@ -134,22 +134,31 @@ func (r *Reconciler) routeDocument(ctx context.Context, endpoint *unstructured.U
 }
 
 // ingressRoute is the route of both HTTP shapes: the host and the path prefix of
-// the entry, forwarding to the service named after the target application.
-func ingressRoute(endpoint *unstructured.Unstructured, host, path, app string) *unstructured.Unstructured {
+// the entry, forwarding to the service named after the target application. An
+// entry that enables TLS names the secret its issuer writes, so the route and
+// the certificate state C-46 reports observe the same object.
+func ingressRoute(endpoint *unstructured.Unstructured, spec v1beta1.EndpointSpec, path string) *unstructured.Unstructured {
 	document := routeObject(endpoint, RouteIngress)
-	document.Object["spec"] = map[string]any{
+	route := map[string]any{
 		"rules": []any{map[string]any{
-			"host": host,
+			"host": spec.Host,
 			"http": map[string]any{"paths": []any{map[string]any{
 				"path":     path,
 				"pathType": "Prefix",
 				"backend": map[string]any{"service": map[string]any{
-					"name": app,
+					"name": spec.TargetApp,
 					"port": map[string]any{"name": "http"},
 				}},
 			}}},
 		}},
 	}
+	if spec.TLS != nil {
+		route["tls"] = []any{map[string]any{
+			"hosts":      []any{spec.Host},
+			"secretName": CertificateSecretName(endpoint.GetName()),
+		}}
+	}
+	document.Object["spec"] = route
 	return document
 }
 

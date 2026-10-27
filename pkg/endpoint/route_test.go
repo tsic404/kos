@@ -41,8 +41,9 @@ func specMap(spec v1beta1.EndpointSpec) map[string]any {
 }
 
 func TestIngressRouteCarriesTheHostPathAndBackend(t *testing.T) {
-	endpoint := endpointObject("site", "uid-1", v1beta1.EndpointSpec{Kind: v1beta1.EndpointKindHTTPPath, TargetApp: "web", Host: "site.test", Path: "/api"})
-	ingress := ingressRoute(endpoint, "site.test", "/api", "web")
+	spec := v1beta1.EndpointSpec{Kind: v1beta1.EndpointKindHTTPPath, TargetApp: "web", Host: "site.test", Path: "/api"}
+	endpoint := endpointObject("site", "uid-1", spec)
+	ingress := ingressRoute(endpoint, spec, "/api")
 
 	if ingress.GetAPIVersion() != "networking.k8s.io/v1" || ingress.GetKind() != RouteIngress {
 		t.Fatalf("route identity = %s %s", ingress.GetAPIVersion(), ingress.GetKind())
@@ -75,8 +76,9 @@ func TestIngressRouteCarriesTheHostPathAndBackend(t *testing.T) {
 }
 
 func TestIngressRouteOfAHostEntryCoversTheWholeHost(t *testing.T) {
-	endpoint := endpointObject("site", "uid-2", hostSpec())
-	ingress := ingressRoute(endpoint, "site.test", "/", "web")
+	spec := hostSpec()
+	endpoint := endpointObject("site", "uid-2", spec)
+	ingress := ingressRoute(endpoint, spec, "/")
 	path := firstOf(t, firstOf(t, ingress.Object, "spec", "rules"), "http", "paths")
 	if got := textOf(t, path, "path"); got != "/" {
 		t.Fatalf("path = %q, want /", got)
@@ -108,6 +110,30 @@ func TestServiceRouteSelectsTheTargetApplication(t *testing.T) {
 	}
 	if got := textOf(t, service.Object, "metadata", "labels", markers.OwnerUID); got != "uid-3" {
 		t.Fatalf("route owner-uid = %q, want the endpoint UID", got)
+	}
+}
+
+// TestIngressRouteCarriesTheCertificateItServes states the TLS branch of the
+// HTTP shapes: an entry that enables TLS names the secret C-46 observes, and an
+// entry without TLS gets no tls section at all.
+func TestIngressRouteCarriesTheCertificateItServes(t *testing.T) {
+	spec := v1beta1.EndpointSpec{Kind: v1beta1.EndpointKindHTTPHost, TargetApp: "web", Host: "site.test", TLS: &v1beta1.EndpointTLS{}}
+	endpoint := endpointObject("site", "uid-5", spec)
+	ingress := ingressRoute(endpoint, spec, "/")
+
+	tls := firstOf(t, ingress.Object, "spec", "tls")
+	if got := textOf(t, tls, "secretName"); got != CertificateSecretName("site") {
+		t.Fatalf("secretName = %q, want %q", got, CertificateSecretName("site"))
+	}
+	hosts, ok := tls["hosts"].([]any)
+	if !ok || len(hosts) != 1 || hosts[0] != "site.test" {
+		t.Fatalf("hosts = %v, want the entry's host", tls["hosts"])
+	}
+
+	plain := endpointObject("plain", "uid-6", hostSpec())
+	route := ingressRoute(plain, hostSpec(), "/")
+	if _, found := route.Object["spec"].(map[string]any)["tls"]; found {
+		t.Fatalf("an entry without TLS carries a tls section: %v", route.Object["spec"])
 	}
 }
 

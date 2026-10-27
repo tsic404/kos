@@ -345,6 +345,11 @@ func (r *Reconciler) entry(ctx context.Context, object *unstructured.Unstructure
 		return Entry{}, err
 	}
 	entry.TargetMissing = missing
+	certificate, err := r.certificateState(ctx, entry)
+	if err != nil {
+		return Entry{}, err
+	}
+	entry.Certificate = certificate
 	return entry, nil
 }
 
@@ -408,7 +413,9 @@ func (r *Reconciler) writeStatus(ctx context.Context, object *unstructured.Unstr
 	}
 	generation := object.GetGeneration()
 	conditions = without(conditions, ConditionInvalidSpec, ConditionConflict, ConditionRouteBlocked)
-	status := v1beta1.ObjectStatus{Conditions: conditions}
+	status := v1beta1.EndpointStatus{
+		ObjectStatus: v1beta1.ObjectStatus{Conditions: conditions},
+	}
 
 	switch {
 	case entry.Invalid != nil:
@@ -430,6 +437,12 @@ func (r *Reconciler) writeStatus(ctx context.Context, object *unstructured.Unstr
 		status.Conditions = state.Set(conditions, state.Applied(generation, "endpoint admitted"))
 		status.Health.State = v1beta1.HealthStateHealthy
 	}
+	if entry.Certificate == nil {
+		status.Conditions = without(status.Conditions, ConditionCertificateReady)
+	} else {
+		status.Certificate = certificateStatus(*entry.Certificate)
+		status.Conditions = state.Set(status.Conditions, certificateCondition(*entry.Certificate, generation))
+	}
 
 	document, err := statusDocument(entry.Ref, status)
 	if err != nil {
@@ -439,8 +452,23 @@ func (r *Reconciler) writeStatus(ctx context.Context, object *unstructured.Unstr
 	return err
 }
 
+// certificateStatus renders the observed certificate as the status field C-46
+// makes a first-class item.
+func certificateStatus(certificate Certificate) *v1beta1.EndpointCertificate {
+	status := &v1beta1.EndpointCertificate{
+		Issuer:       certificate.Issuer,
+		Ready:        certificate.Ready,
+		ExpiringSoon: certificate.ExpiringSoon,
+		Reason:       certificate.Reason,
+	}
+	if certificate.NotAfter != nil {
+		status.NotAfter = &metav1.Time{Time: *certificate.NotAfter}
+	}
+	return status
+}
+
 // statusDocument renders the status subresource document of one endpoint.
-func statusDocument(ref write.Ref, status v1beta1.ObjectStatus) (*unstructured.Unstructured, error) {
+func statusDocument(ref write.Ref, status v1beta1.EndpointStatus) (*unstructured.Unstructured, error) {
 	raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&status)
 	if err != nil {
 		return nil, fmt.Errorf("encode endpoint status: %w", err)

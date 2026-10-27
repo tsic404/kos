@@ -346,9 +346,39 @@ type Endpoint struct {
 	// Spec is the desired state owned by the user (C-03).
 	// +optional
 	Spec EndpointSpec `json:"spec,omitempty"`
-	// Status is written by the endpoint reconciler (C-03, C-07).
+	// Status is written by the endpoint reconciler (C-03, C-07, C-46).
 	// +optional
-	Status ObjectStatus `json:"status,omitempty"`
+	Status EndpointStatus `json:"status,omitempty"`
+}
+
+// EndpointStatus is the status of an endpoint: the two shared axes plus the
+// certificate state C-46 makes a first-class item.
+type EndpointStatus struct {
+	ObjectStatus `json:",inline"`
+	// Certificate is the certificate state of an endpoint that serves TLS
+	// (C-46); it is absent when the endpoint serves no certificate.
+	// +optional
+	Certificate *EndpointCertificate `json:"certificate,omitempty"`
+}
+
+// EndpointCertificate is the observed certificate state of one endpoint
+// (C-46): the issuer in use, whether a certificate covers the route now, and
+// when it expires.
+type EndpointCertificate struct {
+	// Issuer is the resolved issuer identity: the spec's issuerRef, or the
+	// distribution's reserved built-in issuer when the spec omits it (C-46).
+	Issuer string `json:"issuer"`
+	// Ready reports that a certificate covering now serves the route (C-46).
+	Ready bool `json:"ready"`
+	// NotAfter is the expiry of the served certificate (C-46).
+	// +optional
+	NotAfter *metav1.Time `json:"notAfter,omitempty"`
+	// ExpiringSoon reports an expiry inside the warning window (C-46).
+	// +optional
+	ExpiringSoon bool `json:"expiringSoon,omitempty"`
+	// Reason explains a certificate that is not ready (C-46).
+	// +optional
+	Reason string `json:"reason,omitempty"`
 }
 
 // EndpointKind is the form of an endpoint (C-43).
