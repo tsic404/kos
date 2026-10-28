@@ -51,7 +51,28 @@ func Admit(req Request) error {
 	if err != nil {
 		return err
 	}
+	if req.Force {
+		if err := admitForce(req); err != nil {
+			return err
+		}
+	}
 	return admitOwnerMarker(req, class)
+}
+
+// admitForce refuses a forced apply outside the force allocation. A force is a
+// field-set takeover rather than a verb of its own, so it is granted per subject
+// and only for the apply it applies to (C-05). A claim write is forced by the
+// subject its claim row allocates: the claim it created carries the same
+// manager under the create operation, which a plain apply reports as a
+// conflict (C-04).
+func admitForce(req Request) error {
+	if req.Verb != VerbApply {
+		return denyf(req, "only an apply can be forced")
+	}
+	if req.Claim != "" || forceWriters[req.Subject] {
+		return nil
+	}
+	return denyf(req, "subject %q does not force writes", req.Subject)
 }
 
 // admitKernel checks every part of a kernel object a write touches.

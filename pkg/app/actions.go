@@ -1,6 +1,8 @@
 package app
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
@@ -17,6 +19,8 @@ const (
 	// ActionOrphan gives up the blocked downstream objects and keeps the data
 	// (C-33).
 	ActionOrphan = "orphan"
+	// ActionConfirm accepts an external change as the new baseline (C-35).
+	ActionConfirm = "confirm"
 )
 
 // Action record and abandonment manifest carriers and labels.
@@ -30,6 +34,12 @@ const (
 	ActionOwnerLabel = "kos.tsic.top/action-owner"
 	// ActionDataKey is the record field naming the target application.
 	ActionDataKey = "application"
+	// ActionTargetDigestKey is the confirmation record field naming the target
+	// digest the user accepts (C-35).
+	ActionTargetDigestKey = "targetDigest"
+	// ActionSpecDigestKey is the confirmation record field carrying the digest
+	// of the spec that was stored when the record was written (C-35).
+	ActionSpecDigestKey = "specDigest"
 	// AbandonmentKey holds the abandonment manifest in its record.
 	AbandonmentKey = "abandonment"
 	// actionRecordPrefix and abandonmentPrefix keep both objects inside the KOS
@@ -58,6 +68,14 @@ type Abandonment struct {
 // application.
 func ActionRecordName(applicationUID string, action string) string {
 	return actionRecordPrefix + applicationUID + "-" + action
+}
+
+// ConfirmRecordName is the name of the record carrying one confirmation of one
+// target (C-35). The target is part of the name, so two confirmations of
+// different targets are two records while a repeated one is idempotent (C-12).
+func ConfirmRecordName(applicationUID, targetDigest string) string {
+	sum := sha256.Sum256([]byte(targetDigest))
+	return actionRecordPrefix + applicationUID + "-" + ActionConfirm + "-" + hex.EncodeToString(sum[:6])
 }
 
 // AbandonmentName is the name of the abandonment manifest of one application.

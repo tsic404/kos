@@ -214,4 +214,8 @@ type Request struct {
 	Scope  Scope
 	// Claim is the claim row a claim write belongs to (C-04).
 	Claim Claim
+	// Force takes over the fields another writer holds. It is a field-set
+	// takeover, so the allocation grants it per subject rather than per verb
+	// (C-05): only a subject that is the writer of the object may force it.
+	Force bool
 }

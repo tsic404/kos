@@ -82,6 +82,153 @@ type ApplicationStatus struct {
 	// does not depend on the definition still existing (C-33).
 	// +optional
 	Rendered []ObjectRef `json:"rendered,omitempty"`
+	// Applied is the baseline the last completed install or upgrade established
+	// (C-34).
+	// +optional
+	Applied *AppliedState `json:"applied,omitempty"`
+	// Upgrade is the preflight report of a requested upgrade (C-34, C-35).
+	// +optional
+	Upgrade *UpgradeStatus `json:"upgrade,omitempty"`
+	// Drift carries the downstream values an external write changed and the
+	// adopt policy accepted (C-35).
+	// +optional
+	Drift []DriftEntry `json:"drift,omitempty"`
+}
+
+// AppliedState is the baseline a completed install or upgrade established: the
+// spec that requested it, the package it rendered from and the manifest set it
+// wrote (C-34).
+type AppliedState struct {
+	// SpecDigest is the digest of the user spec the baseline answers (C-34).
+	// +optional
+	SpecDigest string `json:"specDigest,omitempty"`
+	// DefinitionDigest is the package digest the baseline rendered from
+	// (C-32, C-34).
+	// +optional
+	DefinitionDigest string `json:"definitionDigest,omitempty"`
+	// DataFormat is the data format the package declared (C-34).
+	// +optional
+	DataFormat string `json:"dataFormat,omitempty"`
+	// RenderDigest is the digest of the manifest set the baseline wrote
+	// (C-34, C-35).
+	// +optional
+	RenderDigest string `json:"renderDigest,omitempty"`
+	// Config is the resolved config the baseline rendered with (C-34).
+	// +optional
+	Config runtime.RawExtension `json:"config,omitempty"`
+	// Volumes are the volume declarations the baseline was applied with (C-34).
+	// +optional
+	Volumes []string `json:"volumes,omitempty"`
+	// Render is the manifest set the baseline wrote. It is kept so an automatic
+	// rollback re-applies the previous manifests and an external write is told
+	// from the desired shape (C-34, C-35).
+	// +optional
+	Render []runtime.RawExtension `json:"render,omitempty"`
+}
+
+// UpgradeStatus is the preflight report of one requested upgrade (C-34).
+type UpgradeStatus struct {
+	// Target is the package digest the current spec names (C-34).
+	// +optional
+	Target string `json:"target,omitempty"`
+	// SpecDigest is the digest of the spec that requests the target (C-34).
+	// +optional
+	SpecDigest string `json:"specDigest,omitempty"`
+	// RenderDigest is the digest of the manifest set the target renders; a
+	// confirmation of an external change names it (C-34, C-35).
+	// +optional
+	RenderDigest string `json:"renderDigest,omitempty"`
+	// ConfigChanges lists the config fields the upgrade rewrites (C-34).
+	// +optional
+	ConfigChanges []ConfigChange `json:"configChanges,omitempty"`
+	// RenderChanges lists the manifests the upgrade creates, rewrites or drops
+	// (C-34).
+	// +optional
+	RenderChanges []RenderChange `json:"renderChanges,omitempty"`
+	// Irreversible lists the items the preflight refuses (C-34).
+	// +optional
+	Irreversible []IrreversibleItem `json:"irreversible,omitempty"`
+	// Migrations names the migration objects a storage-class change requires
+	// (C-34).
+	// +optional
+	Migrations []ObjectRef `json:"migrations,omitempty"`
+	// RolledBack reports that this target was applied and reverted; KOS does
+	// not attempt the same target again (C-34).
+	// +optional
+	RolledBack bool `json:"rolledBack,omitempty"`
+}
+
+// ConfigChange is one config field an upgrade rewrites (C-34). Values are
+// rendered as JSON so a change keeps its shape.
+type ConfigChange struct {
+	// Field is the config field name.
+	Field string `json:"field"`
+	// From is the value the baseline held, as JSON.
+	// +optional
+	From string `json:"from,omitempty"`
+	// To is the value the upgrade writes, as JSON.
+	// +optional
+	To string `json:"to,omitempty"`
+}
+
+// Operations of one preflight manifest change (C-34).
+const (
+	// RenderCreate marks a manifest the upgrade adds.
+	RenderCreate = "create"
+	// RenderUpdate marks a manifest the upgrade rewrites.
+	RenderUpdate = "update"
+	// RenderDelete marks a manifest the upgrade drops.
+	RenderDelete = "delete"
+)
+
+// RenderChange is one manifest an upgrade creates, rewrites or drops (C-34).
+type RenderChange struct {
+	// Object is the manifest the change is about.
+	Object ObjectRef `json:"object"`
+	// Operation is create, update or delete.
+	Operation string `json:"operation"`
+	// Fields lists the changed field paths of an update, sorted.
+	// +optional
+	Fields []string `json:"fields,omitempty"`
+}
+
+// Categories of the irreversible items a preflight refuses (C-34).
+const (
+	// IrreversibleVolumeShrink marks a volume the upgrade would shrink.
+	IrreversibleVolumeShrink = "volumeShrink"
+	// IrreversibleVolumeDelete marks a volume or a volume declaration the
+	// upgrade would drop.
+	IrreversibleVolumeDelete = "volumeDelete"
+	// IrreversibleDataFormat marks a data format change.
+	IrreversibleDataFormat = "dataFormat"
+)
+
+// IrreversibleItem is one upgrade item the preflight refuses; no confirmation
+// bypasses it (C-34).
+type IrreversibleItem struct {
+	// Kind is volumeShrink, volumeDelete or dataFormat.
+	Kind string `json:"kind"`
+	// Object is the object the item is about.
+	// +optional
+	Object *ObjectRef `json:"object,omitempty"`
+	// Detail explains why KOS cannot perform the upgrade.
+	// +optional
+	Detail string `json:"detail,omitempty"`
+}
+
+// DriftEntry is one downstream value written outside KOS and recorded under the
+// adopt policy (C-35).
+type DriftEntry struct {
+	// Object is the object the value was found on.
+	Object ObjectRef `json:"object"`
+	// Path is the field path of the value.
+	Path string `json:"path"`
+	// External is the value found outside KOS, as JSON (C-35).
+	// +optional
+	External string `json:"external,omitempty"`
+	// Expected is the value KOS renders, as JSON (C-35).
+	// +optional
+	Expected string `json:"expected,omitempty"`
 }
 
 // UninstallStatus is the uninstall blocking state of C-33.
@@ -125,6 +272,23 @@ type Visibility struct {
 	AllowGuests bool `json:"allowGuests,omitempty"`
 }
 
+// DriftPolicy decides what KOS does with a downstream write made outside KOS
+// (C-35).
+//
+// +kubebuilder:validation:Enum=reconcile;adopt;ignore
+type DriftPolicy string
+
+const (
+	// DriftPolicyReconcile wins with the desired value and writes the external
+	// value back (C-35).
+	DriftPolicyReconcile DriftPolicy = "reconcile"
+	// DriftPolicyAdopt records the external value and leaves it in place until
+	// the user writes it back through the API (C-35).
+	DriftPolicyAdopt DriftPolicy = "adopt"
+	// DriftPolicyIgnore keeps the external value and only reports it (C-35).
+	DriftPolicyIgnore DriftPolicy = "ignore"
+)
+
 // ApplicationSpec holds the user-owned desired state of an application.
 type ApplicationSpec struct {
 	// Owner is the local username of the creating session; the API writes it
@@ -149,6 +313,10 @@ type ApplicationSpec struct {
 	// (C-32, C-38).
 	// +optional
 	Volumes []string `json:"volumes,omitempty"`
+	// DriftPolicy decides what happens when a downstream object is written
+	// outside KOS (C-35); empty reads as reconcile.
+	// +optional
+	DriftPolicy DriftPolicy `json:"driftPolicy,omitempty"`
 }
 
 // ApplicationList is the list form of Application.
@@ -210,6 +378,10 @@ type PackageIdentity struct {
 	// (C-32).
 	// +optional
 	Digest string `json:"digest,omitempty"`
+	// DataFormat names the stored data format the package reads and writes. An
+	// upgrade that changes it is irreversible and is refused (C-34).
+	// +optional
+	DataFormat string `json:"dataFormat,omitempty"`
 }
 
 // ConfigField is one entry of a config structure. Type decides the value

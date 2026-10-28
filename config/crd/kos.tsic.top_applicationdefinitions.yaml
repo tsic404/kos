@@ -129,6 +129,11 @@ spec:
                   Package identifies the packaged artifact the definition was installed
                   from (C-32).
                 properties:
+                  dataFormat:
+                    description: |-
+                      DataFormat names the stored data format the package reads and writes. An
+                      upgrade that changes it is irreversible and is refused (C-34).
+                    type: string
                   digest:
                     description: |-
                       Digest is the package digest; the catalogue locks it instead of a tag
@@ -311,6 +316,11 @@ spec:
                   Package identifies the packaged artifact the definition was installed
                   from (C-32).
                 properties:
+                  dataFormat:
+                    description: |-
+                      DataFormat names the stored data format the package reads and writes. An
+                      upgrade that changes it is irreversible and is refused (C-34).
+                    type: string
                   digest:
                     description: |-
                       Digest is the package digest; the catalogue locks it instead of a tag

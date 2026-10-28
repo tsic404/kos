@@ -40,6 +40,7 @@ const (
 // other native kind must come from discovery rather than a guess.
 var nativeResources = map[schema.GroupKind]string{
 	{Group: "", Kind: "ConfigMap"}:                "configmaps",
+	{Group: "", Kind: "PersistentVolume"}:         "persistentvolumes",
 	{Group: "", Kind: "PersistentVolumeClaim"}:    "persistentvolumeclaims",
 	{Group: "", Kind: "Node"}:                     "nodes",
 	{Group: "", Kind: "Service"}:                  "services",
@@ -112,6 +113,15 @@ func (w *Writer) Apply(ctx context.Context, subject Subject, session Session, pa
 	return w.apply(ctx, subject, session, "", part, document, false)
 }
 
+// ApplyForce writes one part and takes over the fields it carries even when
+// another writer holds them. C-04 makes the application reconciler the writer of
+// its downstream objects, so the reconcile policy of C-35 has to win against a
+// write made outside KOS; admission refuses a force from any other subject, and
+// a user write still loses with a 409 (C-05).
+func (w *Writer) ApplyForce(ctx context.Context, subject Subject, session Session, part Part, document *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	return w.apply(ctx, subject, session, "", part, document, true)
+}
+
 // ApplyClaim writes a claim in the C-04 row the caller declares it to belong
 // to. Claims carry no kernel parts, so the whole object is the written part.
 // The apply is forced: the declared subject is the sole writer of that claim
@@ -149,6 +159,7 @@ func (w *Writer) apply(ctx context.Context, subject Subject, session Session, cl
 		Current: current,
 		Scope:   w.Scope,
 		Claim:   claim,
+		Force:   force,
 	}
 	if err := Admit(request); err != nil {
 		return nil, err
