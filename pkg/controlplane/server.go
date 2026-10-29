@@ -112,6 +112,11 @@ type Config struct {
 	Now func() time.Time
 	// OperationTimeout bounds one accepted write; defaults to two minutes.
 	OperationTimeout time.Duration
+	// Auditor records accepted writes (C-14); nil records nothing.
+	Auditor Auditor
+	// Actor names the principal behind one request (C-14); nil or an empty
+	// name records the process subject.
+	Actor Actor
 	// Log records the detail a user-facing message must not carry; defaults to
 	// discarding it.
 	Log *slog.Logger
@@ -126,6 +131,8 @@ type Server struct {
 	controllers     ControllerAvailability
 	discoveries     DiscoverySources
 	authorizer      Authorizer
+	auditor         Auditor
+	actor           Actor
 	endpointFacts   endpoint.Facts
 	volumeExpansion VolumeExpansion
 	diagnostics     Diagnostics
@@ -149,6 +156,8 @@ func New(config Config) (*Server, error) {
 		controllers:     config.Controllers,
 		discoveries:     config.Discoveries,
 		authorizer:      config.Authorizer,
+		auditor:         config.Auditor,
+		actor:           config.Actor,
 		endpointFacts:   config.EndpointFacts,
 		volumeExpansion: config.VolumeExpansion,
 		diagnostics:     config.Diagnostics,
@@ -370,6 +379,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure)
 		return
 	}
+	if failure := s.materializeApplicationResources(ctx, object.Object); failure != nil {
+		writeError(w, failure)
+		return
+	}
 	current, err := s.source.Get(ctx, object.Type, object.Ref.Namespace, object.Ref.Name)
 	switch {
 	case err == nil:
@@ -456,6 +469,10 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	current, err := s.source.Get(ctx, object.Type, namespace, name)
 	if err != nil {
 		writeError(w, s.readFailure(err, object.Ref))
+		return
+	}
+	if failure := s.mergeStoredApplicationResources(ctx, object.Object.Object, current.Object); failure != nil {
+		writeError(w, failure)
 		return
 	}
 	if failure := validateEndpointUpdate(current.Object, object); failure != nil {

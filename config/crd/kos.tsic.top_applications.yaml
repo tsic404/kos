@@ -68,6 +68,44 @@ spec:
                   Owner is the local username of the creating session; the API writes it
                   and only the global Owner may transfer it (C-60).
                 type: string
+              paused:
+                description: |-
+                  Paused is the stop marker: the reconciler drives the workloads to zero
+                  without modifying Replicas (C-66).
+                type: boolean
+              replicas:
+                description: |-
+                  Replicas is the desired replica count (C-66). Absent leaves the count the
+                  package renders; a written value converges the workloads to it.
+                format: int32
+                minimum: 0
+                type: integer
+              resources:
+                description: |-
+                  Resources is the CPU and memory request and limit set (C-67); the
+                  package defaults are materialized into it at installation.
+                properties:
+                  limits:
+                    description: Limits is the CPU and memory a container may use.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                  requests:
+                    description: Requests is the CPU and memory a container requests.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                type: object
               visibility:
                 description: Visibility decides who sees the application in the panel
                   (C-59).
@@ -114,6 +152,56 @@ spec:
                       DefinitionDigest is the package digest the baseline rendered from
                       (C-32, C-34).
                     type: string
+                  lifecycle:
+                    description: |-
+                      Lifecycle is the pause, replica and resource fact set the baseline put on
+                      the workloads. The render does not carry them, so a round that reads the
+                      baseline back has to converge it the same way before comparing it with the
+                      live objects (C-35, C-66, C-67).
+                    properties:
+                      paused:
+                        description: Paused is the pause marker the apply converged
+                          to (C-66).
+                        type: boolean
+                      replicas:
+                        description: |-
+                          Replicas is the replica count the apply wrote; absent means the count the
+                          package renders (C-66).
+                        format: int32
+                        type: integer
+                      resources:
+                        description: |-
+                          Resources is the request and limit set the apply put on every container
+                          (C-67).
+                        properties:
+                          limits:
+                            description: Limits is the CPU and memory a container
+                              may use.
+                            properties:
+                              cpu:
+                                description: CPU is a Kubernetes quantity such as
+                                  100m.
+                                type: string
+                              memory:
+                                description: Memory is a Kubernetes quantity such
+                                  as 128Mi.
+                                type: string
+                            type: object
+                          requests:
+                            description: Requests is the CPU and memory a container
+                              requests.
+                            properties:
+                              cpu:
+                                description: CPU is a Kubernetes quantity such as
+                                  100m.
+                                type: string
+                              memory:
+                                description: Memory is a Kubernetes quantity such
+                                  as 128Mi.
+                                type: string
+                            type: object
+                        type: object
+                    type: object
                   render:
                     description: |-
                       Render is the manifest set the baseline wrote. It is kept so an automatic
@@ -125,8 +213,9 @@ spec:
                     type: array
                   renderDigest:
                     description: |-
-                      RenderDigest is the digest of the manifest set the baseline wrote
-                      (C-34, C-35).
+                      RenderDigest is the digest of the package render the baseline kept. The
+                      pause, replica and resource facts the apply wrote are recorded beside it in
+                      Lifecycle and are not part of this digest (C-34, C-35, C-66, C-67).
                     type: string
                   specDigest:
                     description: SpecDigest is the digest of the user spec the baseline
@@ -297,6 +386,68 @@ spec:
                   - name
                   type: object
                 type: array
+              resourceDefaults:
+                description: |-
+                  ResourceDefaults is the package default request and limit set frozen at
+                  the first installation (C-67); a later definition update does not change
+                  it (C-32).
+                properties:
+                  limits:
+                    description: Limits is the CPU and memory a container may use.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                  requests:
+                    description: Requests is the CPU and memory a container requests.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                type: object
+              resources:
+                description: Resources is the resource view of the last applied round
+                  (C-67).
+                properties:
+                  limitRange:
+                    description: |-
+                      LimitRange names the namespace LimitRange that still supplies container
+                      defaults when KOS declares nothing; empty when the namespace has none.
+                    type: string
+                  limits:
+                    description: Limits are the CPU and memory limits KOS set.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                  requests:
+                    description: Requests are the CPU and memory requests KOS set.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                  unlimited:
+                    description: |-
+                      Unlimited marks an application whose spec declares no requests and no
+                      limits; the namespace LimitRange still applies (C-67).
+                    type: boolean
+                type: object
               retryCount:
                 description: |-
                   RetryCount is the number of failed attempts in the current retry budget
@@ -492,8 +643,10 @@ spec:
                     type: array
                   renderDigest:
                     description: |-
-                      RenderDigest is the digest of the manifest set the target renders; a
-                      confirmation of an external change names it (C-34, C-35).
+                      RenderDigest is the digest of the manifest set the target writes: the
+                      package render converged to the stop, replica and resource facts of the
+                      spec, which is what the cluster holds once the target is applied. A
+                      confirmation of an external change names it (C-34, C-35, C-66, C-67).
                     type: string
                   rolledBack:
                     description: |-
@@ -569,6 +722,44 @@ spec:
                   Owner is the local username of the creating session; the API writes it
                   and only the global Owner may transfer it (C-60).
                 type: string
+              paused:
+                description: |-
+                  Paused is the stop marker: the reconciler drives the workloads to zero
+                  without modifying Replicas (C-66).
+                type: boolean
+              replicas:
+                description: |-
+                  Replicas is the desired replica count (C-66). Absent leaves the count the
+                  package renders; a written value converges the workloads to it.
+                format: int32
+                minimum: 0
+                type: integer
+              resources:
+                description: |-
+                  Resources is the CPU and memory request and limit set (C-67); the
+                  package defaults are materialized into it at installation.
+                properties:
+                  limits:
+                    description: Limits is the CPU and memory a container may use.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                  requests:
+                    description: Requests is the CPU and memory a container requests.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                type: object
               visibility:
                 description: Visibility decides who sees the application in the panel
                   (C-59).
@@ -615,6 +806,56 @@ spec:
                       DefinitionDigest is the package digest the baseline rendered from
                       (C-32, C-34).
                     type: string
+                  lifecycle:
+                    description: |-
+                      Lifecycle is the pause, replica and resource fact set the baseline put on
+                      the workloads. The render does not carry them, so a round that reads the
+                      baseline back has to converge it the same way before comparing it with the
+                      live objects (C-35, C-66, C-67).
+                    properties:
+                      paused:
+                        description: Paused is the pause marker the apply converged
+                          to (C-66).
+                        type: boolean
+                      replicas:
+                        description: |-
+                          Replicas is the replica count the apply wrote; absent means the count the
+                          package renders (C-66).
+                        format: int32
+                        type: integer
+                      resources:
+                        description: |-
+                          Resources is the request and limit set the apply put on every container
+                          (C-67).
+                        properties:
+                          limits:
+                            description: Limits is the CPU and memory a container
+                              may use.
+                            properties:
+                              cpu:
+                                description: CPU is a Kubernetes quantity such as
+                                  100m.
+                                type: string
+                              memory:
+                                description: Memory is a Kubernetes quantity such
+                                  as 128Mi.
+                                type: string
+                            type: object
+                          requests:
+                            description: Requests is the CPU and memory a container
+                              requests.
+                            properties:
+                              cpu:
+                                description: CPU is a Kubernetes quantity such as
+                                  100m.
+                                type: string
+                              memory:
+                                description: Memory is a Kubernetes quantity such
+                                  as 128Mi.
+                                type: string
+                            type: object
+                        type: object
+                    type: object
                   render:
                     description: |-
                       Render is the manifest set the baseline wrote. It is kept so an automatic
@@ -626,8 +867,9 @@ spec:
                     type: array
                   renderDigest:
                     description: |-
-                      RenderDigest is the digest of the manifest set the baseline wrote
-                      (C-34, C-35).
+                      RenderDigest is the digest of the package render the baseline kept. The
+                      pause, replica and resource facts the apply wrote are recorded beside it in
+                      Lifecycle and are not part of this digest (C-34, C-35, C-66, C-67).
                     type: string
                   specDigest:
                     description: SpecDigest is the digest of the user spec the baseline
@@ -798,6 +1040,68 @@ spec:
                   - name
                   type: object
                 type: array
+              resourceDefaults:
+                description: |-
+                  ResourceDefaults is the package default request and limit set frozen at
+                  the first installation (C-67); a later definition update does not change
+                  it (C-32).
+                properties:
+                  limits:
+                    description: Limits is the CPU and memory a container may use.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                  requests:
+                    description: Requests is the CPU and memory a container requests.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                type: object
+              resources:
+                description: Resources is the resource view of the last applied round
+                  (C-67).
+                properties:
+                  limitRange:
+                    description: |-
+                      LimitRange names the namespace LimitRange that still supplies container
+                      defaults when KOS declares nothing; empty when the namespace has none.
+                    type: string
+                  limits:
+                    description: Limits are the CPU and memory limits KOS set.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                  requests:
+                    description: Requests are the CPU and memory requests KOS set.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                  unlimited:
+                    description: |-
+                      Unlimited marks an application whose spec declares no requests and no
+                      limits; the namespace LimitRange still applies (C-67).
+                    type: boolean
+                type: object
               retryCount:
                 description: |-
                   RetryCount is the number of failed attempts in the current retry budget
@@ -993,8 +1297,10 @@ spec:
                     type: array
                   renderDigest:
                     description: |-
-                      RenderDigest is the digest of the manifest set the target renders; a
-                      confirmation of an external change names it (C-34, C-35).
+                      RenderDigest is the digest of the manifest set the target writes: the
+                      package render converged to the stop, replica and resource facts of the
+                      spec, which is what the cluster holds once the target is applied. A
+                      confirmation of an external change names it (C-34, C-35, C-66, C-67).
                     type: string
                   rolledBack:
                     description: |-

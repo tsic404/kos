@@ -53,6 +53,24 @@ func TestSpecDigestCoversTheUpgradeInput(t *testing.T) {
 	if other == digest {
 		t.Fatal("a config change left the spec digest unchanged")
 	}
+
+	// The lifecycle facts are written into the same spec but are not upgrade
+	// input: a stop, a scale or a resource override never asks for an upgrade
+	// (C-34, C-66, C-67).
+	lifecycle := base
+	lifecycle.Replicas = new(int32(7))
+	lifecycle.Paused = true
+	lifecycle.Resources = &v1beta1.ResourceRequirements{
+		Requests: v1beta1.ResourceList{CPU: "250m"},
+		Limits:   v1beta1.ResourceList{CPU: "1"},
+	}
+	moved, err := SpecDigest(lifecycle)
+	if err != nil {
+		t.Fatalf("digest of the lifecycle spec: %v", err)
+	}
+	if moved != digest {
+		t.Fatalf("replicas, paused or resources moved the spec digest: %s != %s", moved, digest)
+	}
 }
 
 // TestRenderDigestIsOrderIndependent covers C-34: the same manifest set digests
@@ -166,7 +184,7 @@ data:
 	if len(report.RenderChanges) != 1 || report.RenderChanges[0].Operation != v1beta1.RenderUpdate {
 		t.Fatalf("render changes = %+v, want one update", report.RenderChanges)
 	}
-	if report.RenderDigest != next.applied.RenderDigest || report.SpecDigest != next.applied.SpecDigest {
+	if report.RenderDigest != next.convergedDigest || report.SpecDigest != next.applied.SpecDigest {
 		t.Fatalf("the report does not name the target: %+v", report)
 	}
 }

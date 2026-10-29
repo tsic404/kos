@@ -92,6 +92,14 @@ type ApplicationStatus struct {
 	// adopt policy accepted (C-35).
 	// +optional
 	Drift []DriftEntry `json:"drift,omitempty"`
+	// Resources is the resource view of the last applied round (C-67).
+	// +optional
+	Resources *ResourceStatus `json:"resources,omitempty"`
+	// ResourceDefaults is the package default request and limit set frozen at
+	// the first installation (C-67); a later definition update does not change
+	// it (C-32).
+	// +optional
+	ResourceDefaults *ResourceRequirements `json:"resourceDefaults,omitempty"`
 }
 
 // AppliedState is the baseline a completed install or upgrade established: the
@@ -108,8 +116,9 @@ type AppliedState struct {
 	// DataFormat is the data format the package declared (C-34).
 	// +optional
 	DataFormat string `json:"dataFormat,omitempty"`
-	// RenderDigest is the digest of the manifest set the baseline wrote
-	// (C-34, C-35).
+	// RenderDigest is the digest of the package render the baseline kept. The
+	// pause, replica and resource facts the apply wrote are recorded beside it in
+	// Lifecycle and are not part of this digest (C-34, C-35, C-66, C-67).
 	// +optional
 	RenderDigest string `json:"renderDigest,omitempty"`
 	// Config is the resolved config the baseline rendered with (C-34).
@@ -123,6 +132,28 @@ type AppliedState struct {
 	// from the desired shape (C-34, C-35).
 	// +optional
 	Render []runtime.RawExtension `json:"render,omitempty"`
+	// Lifecycle is the pause, replica and resource fact set the baseline put on
+	// the workloads. The render does not carry them, so a round that reads the
+	// baseline back has to converge it the same way before comparing it with the
+	// live objects (C-35, C-66, C-67).
+	// +optional
+	Lifecycle *LifecycleState `json:"lifecycle,omitempty"`
+}
+
+// LifecycleState is the operational fact set one apply wrote on the workloads
+// (C-66, C-67).
+type LifecycleState struct {
+	// Paused is the pause marker the apply converged to (C-66).
+	// +optional
+	Paused bool `json:"paused,omitempty"`
+	// Replicas is the replica count the apply wrote; absent means the count the
+	// package renders (C-66).
+	// +optional
+	Replicas *int32 `json:"replicas,omitempty"`
+	// Resources is the request and limit set the apply put on every container
+	// (C-67).
+	// +optional
+	Resources *ResourceRequirements `json:"resources,omitempty"`
 }
 
 // UpgradeStatus is the preflight report of one requested upgrade (C-34).
@@ -133,8 +164,10 @@ type UpgradeStatus struct {
 	// SpecDigest is the digest of the spec that requests the target (C-34).
 	// +optional
 	SpecDigest string `json:"specDigest,omitempty"`
-	// RenderDigest is the digest of the manifest set the target renders; a
-	// confirmation of an external change names it (C-34, C-35).
+	// RenderDigest is the digest of the manifest set the target writes: the
+	// package render converged to the stop, replica and resource facts of the
+	// spec, which is what the cluster holds once the target is applied. A
+	// confirmation of an external change names it (C-34, C-35, C-66, C-67).
 	// +optional
 	RenderDigest string `json:"renderDigest,omitempty"`
 	// ConfigChanges lists the config fields the upgrade rewrites (C-34).
@@ -288,6 +321,46 @@ const (
 	DriftPolicyIgnore DriftPolicy = "ignore"
 )
 
+// ResourceList is the CPU and memory quantity pair of a request or limit set
+// (C-67). An empty value means KOS sets that field to nothing.
+type ResourceList struct {
+	// CPU is a Kubernetes quantity such as 100m.
+	// +optional
+	CPU string `json:"cpu,omitempty"`
+	// Memory is a Kubernetes quantity such as 128Mi.
+	// +optional
+	Memory string `json:"memory,omitempty"`
+}
+
+// ResourceRequirements is the CPU and memory request and limit set of an
+// application or of a package default (C-67).
+type ResourceRequirements struct {
+	// Requests is the CPU and memory a container requests.
+	// +optional
+	Requests ResourceList `json:"requests,omitempty"`
+	// Limits is the CPU and memory a container may use.
+	// +optional
+	Limits ResourceList `json:"limits,omitempty"`
+}
+
+// ResourceStatus is the projected resource view of an application (C-67).
+type ResourceStatus struct {
+	// Requests are the CPU and memory requests KOS set.
+	// +optional
+	Requests ResourceList `json:"requests,omitempty"`
+	// Limits are the CPU and memory limits KOS set.
+	// +optional
+	Limits ResourceList `json:"limits,omitempty"`
+	// Unlimited marks an application whose spec declares no requests and no
+	// limits; the namespace LimitRange still applies (C-67).
+	// +optional
+	Unlimited bool `json:"unlimited,omitempty"`
+	// LimitRange names the namespace LimitRange that still supplies container
+	// defaults when KOS declares nothing; empty when the namespace has none.
+	// +optional
+	LimitRange string `json:"limitRange,omitempty"`
+}
+
 // ApplicationSpec holds the user-owned desired state of an application.
 type ApplicationSpec struct {
 	// Owner is the local username of the creating session; the API writes it
@@ -316,6 +389,19 @@ type ApplicationSpec struct {
 	// outside KOS (C-35); empty reads as reconcile.
 	// +optional
 	DriftPolicy DriftPolicy `json:"driftPolicy,omitempty"`
+	// Replicas is the desired replica count (C-66). Absent leaves the count the
+	// package renders; a written value converges the workloads to it.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Replicas *int32 `json:"replicas,omitempty"`
+	// Paused is the stop marker: the reconciler drives the workloads to zero
+	// without modifying Replicas (C-66).
+	// +optional
+	Paused bool `json:"paused,omitempty"`
+	// Resources is the CPU and memory request and limit set (C-67); the
+	// package defaults are materialized into it at installation.
+	// +optional
+	Resources *ResourceRequirements `json:"resources,omitempty"`
 }
 
 // ApplicationList is the list form of Application.
@@ -365,6 +451,10 @@ type ApplicationDefinitionSpec struct {
 	// Requires lists the capability requirements of the definition (C-11).
 	// +optional
 	Requires []CapabilityRequirement `json:"requires,omitempty"`
+	// Resources is the package's default CPU and memory request and limit set,
+	// materialized into an application at installation (C-67).
+	// +optional
+	Resources *ResourceRequirements `json:"resources,omitempty"`
 }
 
 // PackageIdentity is the identity of a packaged artifact (C-32).

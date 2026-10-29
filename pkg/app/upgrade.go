@@ -26,8 +26,15 @@ const digestAlgorithm = "sha256:"
 type target struct {
 	// definition is the package the target renders from.
 	definition *v1beta1.ApplicationDefinition
-	// objects are the manifests the target writes, owner-stamped.
+	// objects are the manifests the target writes, owner-stamped and converged
+	// to the lifecycle facts of the spec.
 	objects []*unstructured.Unstructured
+	// resources is the resource set the target writes on its workloads (C-67).
+	resources *v1beta1.ResourceRequirements
+	// convergedDigest is the digest of the manifest set the target writes, which
+	// is the package render converged to the lifecycle facts of the spec. It is
+	// not the digest of applied.Render: a confirmation names this one (C-35).
+	convergedDigest string
 	// applied is the baseline the target would establish.
 	applied *v1beta1.AppliedState
 }
@@ -115,6 +122,48 @@ func decodeManifests(kept []runtime.RawExtension) ([]*unstructured.Unstructured,
 	return objects, nil
 }
 
+// lifecycleFacts reads the pause, replica and resource facts the current spec
+// converges its workloads to (C-66, C-67).
+func lifecycleFacts(application *v1beta1.Application, resources *v1beta1.ResourceRequirements) *v1beta1.LifecycleState {
+	if !application.Spec.Paused && application.Spec.Replicas == nil && ResourcesEmpty(resources) {
+		// Nothing was written beyond the package render, so the baseline needs
+		// no fact set: converging it records nothing.
+		return nil
+	}
+	facts := &v1beta1.LifecycleState{Paused: application.Spec.Paused}
+	if application.Spec.Replicas != nil {
+		replicas := *application.Spec.Replicas
+		facts.Replicas = &replicas
+	}
+	if !ResourcesEmpty(resources) {
+		facts.Resources = resources.DeepCopy()
+	}
+	return facts
+}
+
+// withLifecycle returns the baseline with the lifecycle facts the round wrote,
+// so the next round tells an external write from a difference KOS itself has not
+// written yet (C-35, C-66, C-67).
+func withLifecycle(applied *v1beta1.AppliedState, application *v1beta1.Application, resources *v1beta1.ResourceRequirements) *v1beta1.AppliedState {
+	updated := applied.DeepCopy()
+	updated.Lifecycle = lifecycleFacts(application, resources)
+	return updated
+}
+
+// convergeApplied rebuilds the manifest set a baseline wrote: the kept render
+// carries no lifecycle facts, so they are applied the way the round that wrote
+// the baseline applied them (C-35, C-66, C-67).
+func convergeApplied(applied *v1beta1.AppliedState) ([]*unstructured.Unstructured, error) {
+	objects, err := decodeManifests(applied.Render)
+	if err != nil {
+		return nil, err
+	}
+	if facts := applied.Lifecycle; facts != nil {
+		Converge(objects, WorkloadTarget{Paused: facts.Paused, Replicas: facts.Replicas, Resources: facts.Resources})
+	}
+	return objects, nil
+}
+
 // encodeConfig keeps the resolved config in the baseline (C-34).
 func encodeConfig(config map[string]any) (runtime.RawExtension, error) {
 	raw, err := json.Marshal(config)
@@ -160,7 +209,11 @@ type VolumeSource interface {
 	VolumeFacts(ctx context.Context, namespace, name string) (VolumeFacts, error)
 }
 
-// buildTarget renders the desired state the current spec names (C-34).
+// buildTarget renders the desired state the current spec names and converges it
+// to the lifecycle facts of that spec (C-34, C-66, C-67). The package render is
+// what the baseline keeps, so starting an application still falls back to the
+// count the package declares; the pause, replica and resource facts the round
+// writes are recorded beside it.
 func (c *Controller) buildTarget(application *v1beta1.Application, definition *v1beta1.ApplicationDefinition, config map[string]any) (*target, error) {
 	objects, err := Render(definition.Spec, renderInput(application, config))
 	if err != nil {
@@ -182,6 +235,11 @@ func (c *Controller) buildTarget(application *v1beta1.Application, definition *v
 	if err != nil {
 		return nil, err
 	}
+	resources := convergeManifests(application, resourceDefaults(application, definition), objects)
+	convergedDigest, err := RenderDigest(objects)
+	if err != nil {
+		return nil, err
+	}
 	encodedConfig, err := encodeConfig(config)
 	if err != nil {
 		return nil, err
@@ -189,8 +247,10 @@ func (c *Controller) buildTarget(application *v1beta1.Application, definition *v
 	volumes := append([]string(nil), application.Spec.Volumes...)
 	sort.Strings(volumes)
 	return &target{
-		definition: definition,
-		objects:    objects,
+		definition:      definition,
+		objects:         objects,
+		resources:       resources,
+		convergedDigest: convergedDigest,
 		applied: &v1beta1.AppliedState{
 			SpecDigest:       spec,
 			DefinitionDigest: definition.Spec.Package.Digest,
@@ -199,6 +259,7 @@ func (c *Controller) buildTarget(application *v1beta1.Application, definition *v
 			Config:           encodedConfig,
 			Volumes:          volumes,
 			Render:           manifests,
+			Lifecycle:        lifecycleFacts(application, resources),
 		},
 	}, nil
 }
@@ -210,7 +271,7 @@ func (c *Controller) preflight(ctx context.Context, application *v1beta1.Applica
 	report := v1beta1.UpgradeStatus{
 		Target:       next.applied.DefinitionDigest,
 		SpecDigest:   next.applied.SpecDigest,
-		RenderDigest: next.applied.RenderDigest,
+		RenderDigest: next.convergedDigest,
 	}
 	if applied == nil {
 		return report, nil
@@ -222,7 +283,15 @@ func (c *Controller) preflight(ctx context.Context, application *v1beta1.Applica
 	}
 	report.ConfigChanges = configChanges
 
-	renderChanges, err := manifestDiff(applied.Render, next.objects)
+	previous, err := convergeApplied(applied)
+	if err != nil {
+		return report, err
+	}
+	previousManifests, err := encodeManifests(previous)
+	if err != nil {
+		return report, err
+	}
+	renderChanges, err := manifestDiff(previousManifests, next.objects)
 	if err != nil {
 		return report, err
 	}
@@ -569,13 +638,11 @@ func joinPath(path, key string) string {
 	return path + "." + key
 }
 
-// driftEntries compares the live objects with the manifest set a baseline wrote
-// and reports every field KOS owns whose value changed outside KOS (C-35).
-func (c *Controller) driftEntries(ctx context.Context, applied *v1beta1.AppliedState) ([]v1beta1.DriftEntry, error) {
-	expected, err := decodeManifests(applied.Render)
-	if err != nil {
-		return nil, err
-	}
+// driftEntries compares the live objects with the manifest set KOS intends and
+// reports every field KOS owns whose value changed outside KOS (C-35). The
+// caller passes the set already converged to the spec's pause, replica and
+// resource facts, so a lifecycle write is not mistaken for an external one.
+func (c *Controller) driftEntries(ctx context.Context, expected []*unstructured.Unstructured) ([]v1beta1.DriftEntry, error) {
 	sort.Slice(expected, func(left, right int) bool {
 		return identityOfRef(objectRefOf(expected[left])) < identityOfRef(objectRefOf(expected[right]))
 	})

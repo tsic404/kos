@@ -18,7 +18,7 @@ import (
 	"github.com/tsic404/kos/pkg/write"
 )
 
-// actionRequest is one user action on one application (C-33).
+// actionRequest is one user action on one application (C-33, C-66).
 type actionRequest struct {
 	// Kind is the object kind the action applies to; only Application acts.
 	Kind string `json:"kind"`
@@ -26,11 +26,13 @@ type actionRequest struct {
 	Namespace string `json:"namespace"`
 	// Name is the application's name.
 	Name string `json:"name"`
-	// Action is retry, orphan or confirm.
+	// Action is one of the application actions.
 	Action string `json:"action"`
 	// TargetDigest is the digest a confirmation accepts as the new baseline
 	// (C-35); only confirm carries it.
 	TargetDigest string `json:"targetDigest,omitempty"`
+	// Replicas is the target count of a scale action (C-66).
+	Replicas *int32 `json:"replicas,omitempty"`
 }
 
 // actionResponse accepts an action and names the records it wrote (C-12).
@@ -43,9 +45,11 @@ type actionResponse struct {
 	Idempotent bool `json:"idempotent,omitempty"`
 }
 
-// handleAction accepts a user action on an application. The action travels as a
-// one-shot record in the KOS namespace; the application reconciler reads it and
-// deletes it, so the action never enters the user spec (C-04, C-33).
+// handleAction accepts a user action on an application. A lifecycle action
+// travels as a one-shot record in the KOS namespace; the application reconciler
+// reads it and deletes it. Stop, start and scale are spec writes the API
+// performs on the user's behalf. Neither path puts a restart or an action
+// trigger into the user spec (C-04, C-33, C-66).
 func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	var request actionRequest
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
@@ -58,7 +62,7 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		request.Kind = "Application"
 	}
 	if request.Kind != "Application" {
-		writeError(w, invalidField("只有应用接受 retry 与 orphan 动作"))
+		writeError(w, invalidField("只有应用接受生命周期动作"))
 		return
 	}
 	if request.Name == "" || request.Namespace == "" {
@@ -66,7 +70,8 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch request.Action {
-	case app.ActionRetry, app.ActionOrphan:
+	case app.ActionRetry, app.ActionOrphan, app.ActionRestart,
+		app.ActionStop, app.ActionStart, app.ActionScale:
 	case app.ActionConfirm:
 		if request.TargetDigest == "" {
 			writeError(w, invalidField("确认必须给出目标摘要"))
@@ -86,6 +91,9 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure)
 		return
 	}
+	// The write outlives the client (C-12), but the actor belongs to the request:
+	// resolve it before the detached context drops the session values (C-14).
+	actor := s.actorOf(r.Context())
 	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
 	defer cancel()
 
@@ -99,22 +107,105 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, internal(StageRead, "读取应用状态失败").about(ref))
 		return
 	}
-	if failure := acceptAction(request.Action, application); failure != nil {
+	if application.DeletionTimestamp != nil && request.Action != app.ActionOrphan {
+		writeError(w, invalidField("应用正在卸载，不接受动作 "+request.Action).about(ref))
+		return
+	}
+	if failure := acceptAction(request, application); failure != nil {
 		writeError(w, failure)
 		return
 	}
-
-	record, created, failure := s.writeActionRecord(ctx, request.Action, application, request.TargetDigest)
+	if recordAction(request.Action) {
+		record, created, failure := s.writeActionRecord(ctx, request.Action, application, request.TargetDigest)
+		if failure != nil {
+			writeError(w, failure)
+			return
+		}
+		if created {
+			s.audit(ctx, actor, request.Action, ref)
+		}
+		writeJSON(w, http.StatusAccepted, actionResponse{Accepted: true, Ref: new(refOfObject(record)), Idempotent: !created})
+		return
+	}
+	updated, changed, failure := s.writeApplicationAction(ctx, applicationType, request, stored.Object)
 	if failure != nil {
 		writeError(w, failure)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, actionResponse{Accepted: true, Ref: new(refOfObject(record)), Idempotent: !created})
+	if changed {
+		s.audit(ctx, actor, request.Action, ref)
+	}
+	response := actionResponse{Accepted: true, Ref: new(ref), Idempotent: !changed}
+	if updated != nil {
+		response.Ref = new(refOfObject(updated))
+	}
+	writeJSON(w, http.StatusAccepted, response)
 }
 
-// acceptAction checks the phase an action may leave (C-33).
-func acceptAction(action string, application *v1beta1.Application) *Error {
+// recordAction reports whether an action travels as a one-shot record instead of
+// a spec write (C-33, C-66).
+func recordAction(action string) bool {
 	switch action {
+	case app.ActionRetry, app.ActionOrphan, app.ActionRestart, app.ActionConfirm:
+		return true
+	default:
+		return false
+	}
+}
+
+// writeApplicationAction performs the spec write of stop, start or scale. It
+// updates the stored object under its resourceVersion, so a concurrent write
+// loses with a 409 instead of being silently overwritten (C-05, C-66).
+func (s *Server) writeApplicationAction(ctx context.Context, applicationType ObjectType, request actionRequest, live map[string]any) (*unstructured.Unstructured, bool, *Error) {
+	before := &unstructured.Unstructured{Object: live}
+	ref := refOfObject(before)
+	updated := before.DeepCopy()
+	spec, found, err := unstructured.NestedMap(updated.Object, "spec")
+	if err != nil {
+		return nil, false, invalidField("spec 无法读取: " + err.Error()).about(ref)
+	}
+	if !found {
+		spec = map[string]any{}
+	}
+	changed := false
+	switch request.Action {
+	case app.ActionStop:
+		if paused, _, _ := unstructured.NestedBool(spec, "paused"); !paused {
+			spec["paused"] = true
+			changed = true
+		}
+	case app.ActionStart:
+		if _, present := spec["paused"]; present {
+			delete(spec, "paused")
+			changed = true
+		}
+	case app.ActionScale:
+		if request.Replicas == nil {
+			return nil, false, invalidField("scale 必须给出 replicas").about(ref)
+		}
+		storedReplicas, present, _ := unstructured.NestedInt64(spec, "replicas")
+		if !present || storedReplicas != int64(*request.Replicas) {
+			spec["replicas"] = int64(*request.Replicas)
+			changed = true
+		}
+	}
+	if !changed {
+		return before, false, nil
+	}
+	if err := unstructured.SetNestedMap(updated.Object, spec, "spec"); err != nil {
+		return nil, false, internal(StageApply, "动作无法写入应用").about(ref)
+	}
+	resource := s.dynamic.Resource(applicationType.GVR()).Namespace(ref.Namespace)
+	result, err := resource.Update(ctx, updated, metav1.UpdateOptions{FieldManager: "kos-api"})
+	if err != nil {
+		return nil, false, s.writeFailure(ctx, applicationType, err, ref)
+	}
+	return result, true, nil
+}
+
+// acceptAction checks the phase an action may leave (C-33, C-66).
+func acceptAction(request actionRequest, application *v1beta1.Application) *Error {
+	switch request.Action {
 	case app.ActionRetry:
 		if application.Status.Phase != app.PhaseFailed {
 			// A rolled-back upgrade is retried the same way: the application
@@ -137,6 +228,14 @@ func acceptAction(action string, application *v1beta1.Application) *Error {
 		condition, present := state.Find(application.Status.Conditions, api.ConditionReconciled)
 		if !present || condition.Status != metav1.ConditionFalse || condition.Reason != app.ReasonExternalChangePending {
 			return invalidField("confirm 只对外部改动待确认的应用有效")
+		}
+	case app.ActionRestart:
+		if application.Status.Phase != app.PhaseReady && application.Status.Phase != app.PhaseUpgrading {
+			return invalidField("restart 只对已安装的应用有效")
+		}
+	case app.ActionScale:
+		if request.Replicas == nil || *request.Replicas < 0 {
+			return invalidField("scale 必须给出非负的 replicas")
 		}
 	}
 	return nil

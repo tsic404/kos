@@ -39,6 +39,9 @@ type Entry struct {
 	// TargetMissing reports that the application the endpoint names does not
 	// exist in its namespace (C-45).
 	TargetMissing bool `json:"targetMissing,omitempty"`
+	// TargetPaused reports that the application the endpoint names is stopped
+	// (C-66).
+	TargetPaused bool `json:"targetPaused,omitempty"`
 	// Invalid carries a C-43 rejection; an invalid endpoint holds no keys.
 	Invalid *FieldError `json:"invalid,omitempty"`
 	// Certificate is the observed certificate state of an endpoint that

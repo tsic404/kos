@@ -192,6 +192,32 @@ spec:
                   - name
                   type: object
                 type: array
+              resources:
+                description: |-
+                  Resources is the package's default CPU and memory request and limit set,
+                  materialized into an application at installation (C-67).
+                properties:
+                  limits:
+                    description: Limits is the CPU and memory a container may use.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                  requests:
+                    description: Requests is the CPU and memory a container requests.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                type: object
               template:
                 description: |-
                   Template is the one-way translation template; it is a pure function of
@@ -379,6 +405,32 @@ spec:
                   - name
                   type: object
                 type: array
+              resources:
+                description: |-
+                  Resources is the package's default CPU and memory request and limit set,
+                  materialized into an application at installation (C-67).
+                properties:
+                  limits:
+                    description: Limits is the CPU and memory a container may use.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                  requests:
+                    description: Requests is the CPU and memory a container requests.
+                    properties:
+                      cpu:
+                        description: CPU is a Kubernetes quantity such as 100m.
+                        type: string
+                      memory:
+                        description: Memory is a Kubernetes quantity such as 128Mi.
+                        type: string
+                    type: object
+                type: object
               template:
                 description: |-
                   Template is the one-way translation template; it is a pure function of

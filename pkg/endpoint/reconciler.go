@@ -35,6 +35,9 @@ const (
 	// ConditionRouteBlocked marks an endpoint whose route object could not be
 	// written, so its desired state is not fully applied (C-07, C-43).
 	ConditionRouteBlocked = "RouteBlocked"
+	// ConditionApplicationPaused marks an endpoint whose target application is
+	// stopped (C-66).
+	ConditionApplicationPaused = "ApplicationPaused"
 )
 
 // Reasons of the two failure conditions.
@@ -47,6 +50,9 @@ const (
 	// ReasonRouteBlocked is the reason of a route object that could not be
 	// written.
 	ReasonRouteBlocked = "RouteBlocked"
+	// ReasonApplicationPaused is the reason of a target application that is
+	// stopped (C-66).
+	ReasonApplicationPaused = "ApplicationPaused"
 )
 
 // Lister reads the objects the ledger is rebuilt from.
@@ -120,13 +126,14 @@ func (r *Reconciler) rebuild(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list applications: %w", err)
 	}
-	present := make(map[string]bool, len(applications))
+	targets := make(map[string]targetState, len(applications))
 	for _, application := range applications {
-		present[application.GetNamespace()+"/"+application.GetName()] = true
+		paused, _, _ := unstructured.NestedBool(application.Object, "spec", "paused")
+		targets[application.GetNamespace()+"/"+application.GetName()] = targetState{present: true, paused: paused}
 	}
 	entries := make([]Entry, 0, len(endpoints))
 	for _, object := range endpoints {
-		entry, err := r.entry(ctx, object, present)
+		entry, err := r.entry(ctx, object, targets)
 		if err != nil {
 			return fmt.Errorf("read endpoint %s: %w", object.GetName(), err)
 		}
@@ -231,18 +238,20 @@ func (r *Reconciler) reconcileEndpoint(ctx context.Context, namespace, name stri
 }
 
 // reconcileApplication revisits every endpoint whose target is the application,
-// so a deleted application leaves a conflict on the endpoints that point at it.
+// so a deleted application leaves a conflict on the endpoints that point at it
+// and a stopped one marks them paused (C-45, C-66).
 func (r *Reconciler) reconcileApplication(ctx context.Context, namespace, name string) (reconcile.Result, error) {
 	key := namespace + "/" + name
-	present := map[string]bool{}
-	_, err := r.writer.Get(ctx, write.Ref{Group: api.Group, Version: v1beta1.GroupVersion.Version, Kind: "Application", Namespace: namespace, Name: name})
+	targets := map[string]targetState{}
+	object, err := r.writer.Get(ctx, write.Ref{Group: api.Group, Version: v1beta1.GroupVersion.Version, Kind: "Application", Namespace: namespace, Name: name})
 	switch {
 	case apierrors.IsNotFound(err):
-		present[key] = false
+		targets[key] = targetState{}
 	case err != nil:
 		return reconcile.Result{}, err
 	default:
-		present[key] = true
+		paused, _, _ := unstructured.NestedBool(object.Object, "spec", "paused")
+		targets[key] = targetState{present: true, paused: paused}
 	}
 	objects, err := r.lister.List(ctx, "Endpoint", namespace)
 	if err != nil {
@@ -254,7 +263,7 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, namespace, name s
 		if !TargetsApp(object, name) {
 			continue
 		}
-		settled, err := r.observe(ctx, object, present)
+		settled, err := r.observe(ctx, object, targets)
 		result = mergeResult(result, settled)
 		if err != nil && firstErr == nil {
 			firstErr = err
@@ -268,8 +277,8 @@ func (r *Reconciler) reconcileApplication(ctx context.Context, namespace, name s
 // object and its peers, whatever order the events arrive in (C-06). An unmanaged
 // endpoint is read-only: KOS neither writes its status nor deletes it (C-02,
 // F1), so it is skipped while the managed peers it affects are still settled.
-func (r *Reconciler) observe(ctx context.Context, object *unstructured.Unstructured, present map[string]bool) (reconcile.Result, error) {
-	entry, err := r.entry(ctx, object, present)
+func (r *Reconciler) observe(ctx context.Context, object *unstructured.Unstructured, targets map[string]targetState) (reconcile.Result, error) {
+	entry, err := r.entry(ctx, object, targets)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -329,9 +338,18 @@ func (r *Reconciler) settle(ctx context.Context, refs []write.Ref, request write
 	return result, requestErr
 }
 
-// entry describes one stored endpoint: its shape, its attribution and whether
-// its target application exists.
-func (r *Reconciler) entry(ctx context.Context, object *unstructured.Unstructured, present map[string]bool) (Entry, error) {
+// targetState is what a round knows about one target application: whether it
+// exists and whether it is paused (C-45, C-66).
+type targetState struct {
+	// present reports whether the application exists.
+	present bool
+	// paused reports whether the application carries the stop marker.
+	paused bool
+}
+
+// entry describes one stored endpoint: its shape, its attribution, whether its
+// target application exists and whether it is stopped.
+func (r *Reconciler) entry(ctx context.Context, object *unstructured.Unstructured, targets map[string]targetState) (Entry, error) {
 	entry := EntryOf(object)
 	if entry.Invalid != nil {
 		return entry, nil
@@ -340,11 +358,12 @@ func (r *Reconciler) entry(ctx context.Context, object *unstructured.Unstructure
 		entry.Invalid = failure
 		return entry, nil
 	}
-	missing, err := r.targetMissing(ctx, entry.Ref.Namespace, entry.Spec.TargetApp, present)
+	target, err := r.targetState(ctx, entry.Ref.Namespace, entry.Spec.TargetApp, targets)
 	if err != nil {
 		return Entry{}, err
 	}
-	entry.TargetMissing = missing
+	entry.TargetMissing = !target.present
+	entry.TargetPaused = target.paused
 	certificate, err := r.certificateState(ctx, entry)
 	if err != nil {
 		return Entry{}, err
@@ -353,24 +372,25 @@ func (r *Reconciler) entry(ctx context.Context, object *unstructured.Unstructure
 	return entry, nil
 }
 
-// targetMissing reports whether the application an endpoint names exists. A
-// round that already knows the application set answers from it; the objects the
-// set does not name are read once.
-func (r *Reconciler) targetMissing(ctx context.Context, namespace, app string, present map[string]bool) (bool, error) {
+// targetState reports whether the application an endpoint names exists and
+// whether it is paused. A round that already knows the application set answers
+// from it; the objects the set does not name are read once.
+func (r *Reconciler) targetState(ctx context.Context, namespace, app string, targets map[string]targetState) (targetState, error) {
 	if app == "" {
-		return false, nil
+		return targetState{present: true}, nil
 	}
-	if found, known := present[namespace+"/"+app]; known {
-		return !found, nil
+	if found, known := targets[namespace+"/"+app]; known {
+		return found, nil
 	}
-	_, err := r.writer.Get(ctx, write.Ref{Group: api.Group, Version: v1beta1.GroupVersion.Version, Kind: "Application", Namespace: namespace, Name: app})
+	object, err := r.writer.Get(ctx, write.Ref{Group: api.Group, Version: v1beta1.GroupVersion.Version, Kind: "Application", Namespace: namespace, Name: app})
 	if apierrors.IsNotFound(err) {
-		return true, nil
+		return targetState{}, nil
 	}
 	if err != nil {
-		return false, err
+		return targetState{}, err
 	}
-	return false, nil
+	paused, _, _ := unstructured.NestedBool(object.Object, "spec", "paused")
+	return targetState{present: true, paused: paused}, nil
 }
 
 // settleOne applies the route object and then the status of one endpoint, so a
@@ -412,7 +432,7 @@ func (r *Reconciler) writeStatus(ctx context.Context, object *unstructured.Unstr
 		return err
 	}
 	generation := object.GetGeneration()
-	conditions = without(conditions, ConditionInvalidSpec, ConditionConflict, ConditionRouteBlocked)
+	conditions = without(conditions, ConditionInvalidSpec, ConditionConflict, ConditionRouteBlocked, ConditionApplicationPaused)
 	status := v1beta1.EndpointStatus{
 		ObjectStatus: v1beta1.ObjectStatus{Conditions: conditions},
 	}
@@ -442,6 +462,12 @@ func (r *Reconciler) writeStatus(ctx context.Context, object *unstructured.Unstr
 	} else {
 		status.Certificate = certificateStatus(*entry.Certificate)
 		status.Conditions = state.Set(status.Conditions, certificateCondition(*entry.Certificate, generation))
+	}
+	if entry.TargetPaused {
+		// The route stays in place; the condition is what tells a reader the
+		// target application is stopped (C-66).
+		status.Conditions = state.Set(status.Conditions, state.Condition(
+			ConditionApplicationPaused, metav1.ConditionTrue, generation, ReasonApplicationPaused, "应用已暂停"))
 	}
 
 	document, err := statusDocument(entry.Ref, status)

@@ -81,7 +81,7 @@ func TestTC29FailureFields(t *testing.T) {
 			body: func() map[string]any {
 				manifest := harness.Manifest("Application", harness.Namespace, "invalid",
 					map[string]string{"managed-by": "kos-shell"}, nil)
-				manifest["spec"] = map[string]any{"replicas": 3}
+				manifest["spec"] = map[string]any{"replicaCount": 3}
 				return manifest
 			}(),
 			status: http.StatusBadRequest, code: controlplane.CodeInvalidField,

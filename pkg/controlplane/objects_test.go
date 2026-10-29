@@ -74,7 +74,7 @@ func TestDecodeObjectRejectsFieldsOutsideTheModel(t *testing.T) {
 			name: "unknown spec field",
 			kind: "Application",
 			manifest: applicationManifest(func(manifest map[string]any) {
-				manifest["spec"] = map[string]any{"replicas": 3}
+				manifest["spec"] = map[string]any{"replicaCount": 3}
 			}),
 		},
 		{
