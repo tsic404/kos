@@ -58,6 +58,21 @@ type Identity struct {
 // next. next may be nil when the case needs only the identity routes.
 func StartIdentity(t *testing.T, next http.Handler, owned identity.OwnedObjects) *Identity {
 	t.Helper()
+	surface := startIdentity(t, owned, nil)
+	surface.Serve(t, next)
+	return surface
+}
+
+// OpenIdentity opens a private database without serving it, so a composed
+// surface can mount the account middleware in front of its own routes.
+func OpenIdentity(t *testing.T, owned identity.OwnedObjects, configure func(*identity.Config)) *Identity {
+	t.Helper()
+	return startIdentity(t, owned, configure)
+}
+
+// startIdentity opens the private database and builds the account service.
+func startIdentity(t *testing.T, owned identity.OwnedObjects, configure func(*identity.Config)) *Identity {
+	t.Helper()
 	clock := NewClock(time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC))
 	databasePath := filepath.Join(t.TempDir(), "kos.db")
 	store, err := identity.Open(context.Background(), identity.OpenOptions{Path: databasePath, Now: clock.Now})
@@ -65,18 +80,26 @@ func StartIdentity(t *testing.T, next http.Handler, owned identity.OwnedObjects)
 		t.Fatalf("open identity database: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	service := identity.New(store, identity.Config{Now: clock.Now, Owned: owned})
-	api := identity.NewAPI(service)
-	server := httptest.NewServer(api.Handler(next))
-	t.Cleanup(server.Close)
+	config := identity.Config{Now: clock.Now, Owned: owned}
+	if configure != nil {
+		configure(&config)
+	}
+	service := identity.New(store, config)
 	return &Identity{
 		Store:        store,
 		Service:      service,
-		API:          api,
-		HTTP:         &HTTP{URL: server.URL},
+		API:          identity.NewAPI(service),
 		Clock:        clock,
 		DatabasePath: databasePath,
 	}
+}
+
+// Serve mounts the account surface in front of next.
+func (i *Identity) Serve(t *testing.T, next http.Handler) {
+	t.Helper()
+	server := httptest.NewServer(i.API.Handler(next))
+	t.Cleanup(server.Close)
+	i.HTTP = &HTTP{URL: server.URL}
 }
 
 // BootstrapOwner creates the first Owner and returns its one-time password.

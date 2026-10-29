@@ -184,6 +184,58 @@ func TestEvaluateKeepsTheFirstClaimOnAClass(t *testing.T) {
 	}
 }
 
+// TestEvaluateKeepsTheFirstCatalogueEntry checks that two sources cannot offer
+// one entry identity: the entry names a cluster-scoped definition, so a later
+// claim is a contribution conflict rather than a second writer of that
+// definition (C-24).
+func TestEvaluateKeepsTheFirstCatalogueEntry(t *testing.T) {
+	entry := func(name string) CatalogueEntry {
+		return CatalogueEntry{ID: "blog", Display: CatalogueDisplay{Name: name}}
+	}
+	first := fullDeclaration("demo.first")
+	first.Contributions.CatalogueSources = []CatalogueSource{{ID: "first-source", Sync: "pull", Entries: []CatalogueEntry{entry("First Blog")}}}
+	second := fullDeclaration("demo.second")
+	second.Contributions.CatalogueSources = []CatalogueSource{{ID: "second-source", Sync: "pull", Entries: []CatalogueEntry{entry("Second Blog")}}}
+	start := time.Now()
+	assessment := Evaluate([]Request{
+		packageRequest(t, "first", first, start),
+		packageRequest(t, "second", second, start.Add(time.Second)),
+	})
+	byName := indexResults(assessment)
+	if byName["second"].Phase != PhaseDegraded || !hasClassProblem(byName["second"], ClassCatalogueSources) {
+		t.Fatalf("second = %s with %v, want a catalogue conflict", byName["second"].Phase, byName["second"].Problems)
+	}
+	if len(byName["second"].Contributions.CatalogueSources) != 1 ||
+		len(byName["second"].Contributions.CatalogueSources[0].Entries) != 0 {
+		t.Fatal("the contested entry stayed with the later component")
+	}
+	offered := 0
+	for _, source := range assessment.Registry.CatalogueSources() {
+		for range source.Entries {
+			offered++
+		}
+	}
+	if offered != 1 {
+		t.Fatalf("offered entries = %d, want the one the first component declared", offered)
+	}
+	for _, source := range assessment.Registry.CatalogueSources() {
+		if source.ID == "first-source" && (len(source.Entries) != 1 || source.Entries[0].Display.Name != "First Blog") {
+			t.Fatalf("source %s entries = %v, want the first declaration", source.ID, source.Entries)
+		}
+	}
+}
+
+// hasClassProblem reports whether one result failed the named contribution
+// class.
+func hasClassProblem(result ComponentResult, class string) bool {
+	for _, problem := range result.Problems {
+		if problem.Class == class {
+			return true
+		}
+	}
+	return false
+}
+
 // TestEvaluateAdoptedContributesNothing checks C-17: an adopted component
 // installs no package and contributes no object class, page or controller.
 func TestEvaluateAdoptedContributesNothing(t *testing.T) {

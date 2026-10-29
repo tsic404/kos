@@ -33,6 +33,9 @@ var (
 	// ErrOwnershipUnavailable means deletion cannot tell whether the account
 	// still owns objects; deleting anyway would strand them (C-60).
 	ErrOwnershipUnavailable = errors.New("identity: the ownership source is not configured")
+	// ErrPreferenceDomain means no active extension declares the preference
+	// domain a request names (C-27).
+	ErrPreferenceDomain = errors.New("identity: no active extension declares this preference domain")
 )
 
 // ValidationError rejects an input the service cannot accept. The message is

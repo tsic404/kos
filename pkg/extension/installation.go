@@ -83,6 +83,9 @@ type ComponentResult struct {
 	Problems []ClassProblem
 	// Contributions is what this component actually activated.
 	Contributions Contributions
+	// Retention is the declared fate of each withdrawn contribution's data
+	// (C-18, C-29).
+	Retention []Retention
 	// Reason and Message explain a phase other than Ready.
 	Reason  string
 	Message string
@@ -171,6 +174,7 @@ func Evaluate(requests []Request) Assessment {
 		result.HasEvaluatedDependencies = true
 		result.HasMetDependencies = true
 		result.Contributions = effective[component.name]
+		result.Retention = component.loaded.Retention
 		result.Problems = append(append([]ClassProblem(nil), component.loaded.Problems...), conflicts[component.name]...)
 		if len(result.Problems) > 0 {
 			result.Phase = PhaseDegraded

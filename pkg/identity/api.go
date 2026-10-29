@@ -49,6 +49,8 @@ func (a *API) Handler(next http.Handler) http.Handler {
 	mux.HandleFunc("POST "+logoutPath, a.logout)
 	mux.HandleFunc("GET "+sessionPath, a.session)
 	mux.HandleFunc("PUT "+passwordPath, a.changePassword)
+	mux.HandleFunc("GET /api/v1/preferences/{extension}", a.listPreferences)
+	mux.HandleFunc("PUT /api/v1/preferences/{extension}/{key}", a.setPreference)
 	mux.HandleFunc("GET /api/v1/accounts", a.listAccounts)
 	mux.HandleFunc("POST /api/v1/accounts", a.createAccount)
 	mux.HandleFunc("PUT /api/v1/accounts/{name}", a.updateAccount)
@@ -236,6 +238,54 @@ func (a *API) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// listPreferences returns the signed-in account's preferences inside one
+// extension's domain; keys the schema no longer declares are absent (C-27).
+func (a *API) listPreferences(w http.ResponseWriter, r *http.Request) {
+	session, ok := FromContext(r.Context())
+	if !ok {
+		controlplane.WriteError(w, failureFor(ErrUnauthenticated))
+		return
+	}
+	identifier := r.PathValue("extension")
+	values, err := a.service.Preferences(r.Context(), session, identifier)
+	if err != nil {
+		controlplane.WriteError(w, failureFor(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, preferenceResponse{Extension: identifier, Items: values})
+}
+
+// setPreference stores one preference of the signed-in account. The extension
+// must still declare the key, so a withdrawn extension's data cannot be
+// rewritten (C-27).
+func (a *API) setPreference(w http.ResponseWriter, r *http.Request) {
+	session, ok := FromContext(r.Context())
+	if !ok {
+		controlplane.WriteError(w, failureFor(ErrUnauthenticated))
+		return
+	}
+	var request struct {
+		Value string `json:"value"`
+	}
+	if failure := decodeBody(r, &request); failure != nil {
+		controlplane.WriteError(w, failure)
+		return
+	}
+	if err := a.service.SetPreference(r.Context(), session, r.PathValue("extension"), r.PathValue("key"), request.Value); err != nil {
+		controlplane.WriteError(w, failureFor(err))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// preferenceResponse is one account's preferences in one extension's domain.
+type preferenceResponse struct {
+	// Extension is the domain the values belong to.
+	Extension string `json:"extension"`
+	// Items carries the declared keys that hold a value.
+	Items map[string]string `json:"items"`
+}
+
 // Authorizer is the C-59 gate over control-plane resources: every request must
 // carry the session the identity middleware resolved, and a Guest reads only.
 type Authorizer struct{}
@@ -420,6 +470,14 @@ func failureFor(err error) *controlplane.Error {
 		return &controlplane.Error{
 			Code:               controlplane.CodeNotFound,
 			Message:            "账号不存在",
+			Stage:              controlplane.StageValidate,
+			RequiresUserAction: true,
+			SideEffects:        controlplane.SideEffectsNone,
+		}
+	case errors.Is(err, ErrPreferenceDomain):
+		return &controlplane.Error{
+			Code:               controlplane.CodeNotFound,
+			Message:            "没有生效的扩展声明这个偏好域",
 			Stage:              controlplane.StageValidate,
 			RequiresUserAction: true,
 			SideEffects:        controlplane.SideEffectsNone,

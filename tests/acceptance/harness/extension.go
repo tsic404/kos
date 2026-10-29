@@ -16,9 +16,19 @@ import (
 // ExtensionState runs one install pass over the components in the cluster.
 func (c *Cluster) ExtensionState(t *testing.T, artifacts extension.ArtifactSource) *extension.Installation {
 	t.Helper()
+	return c.ExtensionStateWith(t, artifacts, nil)
+}
+
+// ExtensionStateWith runs one install pass and settles the declared fate of
+// preference data through sink (C-27, C-29); a nil sink leaves the store
+// untouched.
+func (c *Cluster) ExtensionStateWith(t *testing.T, artifacts extension.ArtifactSource, sink extension.PreferenceRetention) *extension.Installation {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
-	installation, err := c.ExtensionInstaller(artifacts).Install(ctx)
+	installer := c.ExtensionInstaller(artifacts)
+	installer.Preferences = sink
+	installation, err := installer.Install(ctx)
 	if err != nil {
 		t.Fatalf("install pass: %v", err)
 	}
@@ -38,6 +48,13 @@ func (c *Cluster) ExtensionInstaller(artifacts extension.ArtifactSource) *extens
 // InstallPackage creates a component for declaration and runs one install pass.
 func (c *Cluster) InstallPackage(t *testing.T, name string, declaration extension.Declaration, artifacts extension.MemoryArtifacts) *extension.Installation {
 	t.Helper()
+	return c.InstallPackageWith(t, name, declaration, artifacts, nil)
+}
+
+// InstallPackageWith creates a component for declaration and runs one install
+// pass that settles preference retention through sink (C-27, C-29).
+func (c *Cluster) InstallPackageWith(t *testing.T, name string, declaration extension.Declaration, artifacts extension.MemoryArtifacts, sink extension.PreferenceRetention) *extension.Installation {
+	t.Helper()
 	content, err := extension.Marshal(declaration)
 	if err != nil {
 		t.Fatalf("marshal declaration %s: %v", name, err)
@@ -45,7 +62,7 @@ func (c *Cluster) InstallPackage(t *testing.T, name string, declaration extensio
 	reference := "test://" + name
 	artifacts[reference] = content
 	c.Create(t, &unstructured.Unstructured{Object: Component(name, reference, extension.DigestOf(content))})
-	return c.ExtensionState(t, artifacts)
+	return c.ExtensionStateWith(t, artifacts, sink)
 }
 
 // DeleteComponent removes one system component, which withdraws its
@@ -63,6 +80,28 @@ func (c *Cluster) DeleteComponent(t *testing.T, name string) {
 	})
 	if err := resource.Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
 		t.Fatalf("delete component %s: %v", name, err)
+	}
+}
+
+// RepointComponent points one component at a new package, the way a package
+// upgrade does before the next install pass.
+func (c *Cluster) RepointComponent(t *testing.T, name, reference, digest string) {
+	t.Helper()
+	resource := c.resourceIn(t, v1beta1.GroupVersion.Version, "SystemComponent", "")
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	object, err := resource.Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("read component %s: %v", name, err)
+	}
+	if err := unstructured.SetNestedField(object.Object, reference, "spec", "package", "reference"); err != nil {
+		t.Fatalf("set component %s reference: %v", name, err)
+	}
+	if err := unstructured.SetNestedField(object.Object, digest, "spec", "package", "digest"); err != nil {
+		t.Fatalf("set component %s digest: %v", name, err)
+	}
+	if _, err := resource.Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update component %s: %v", name, err)
 	}
 }
 

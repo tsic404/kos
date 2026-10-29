@@ -39,12 +39,16 @@ func TestMigrationsApplyAndRollback(t *testing.T) {
 	if version, err = store.SchemaVersion(ctx); err != nil || version != latest {
 		t.Fatalf("reopened schema = %d, %v; want %d", version, err, latest)
 	}
-	rolled, err := store.Rollback(ctx)
-	if err != nil {
-		t.Fatalf("roll back: %v", err)
-	}
-	if rolled != latest {
-		t.Fatalf("rolled back version = %d, want %d", rolled, latest)
+	// Every version is reversible: rolling back once per applied script leaves
+	// no schema behind, newest first.
+	for want := latest; want > 0; want-- {
+		rolled, err := store.Rollback(ctx)
+		if err != nil {
+			t.Fatalf("roll back %d: %v", want, err)
+		}
+		if rolled != want {
+			t.Fatalf("rolled back version = %d, want %d", rolled, want)
+		}
 	}
 	if version, err = store.SchemaVersion(ctx); err != nil || version != 0 {
 		t.Fatalf("schema after rollback = %d, %v; want 0", version, err)
