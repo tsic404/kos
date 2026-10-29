@@ -60,17 +60,24 @@ func (p *ControlPlane) Call(t *testing.T, method, path string, body any, headers
 
 // Raw sends one JSON request and returns the status and the body bytes.
 func (p *ControlPlane) Raw(method, path string, body any, headers map[string]string) (int, []byte, error) {
+	status, _, payload, err := p.RawWithHeaders(method, path, body, headers)
+	return status, payload, err
+}
+
+// RawWithHeaders sends one JSON request and returns the status, the response
+// headers and the body bytes, so a case can assert a download header.
+func (p *ControlPlane) RawWithHeaders(method, path string, body any, headers map[string]string) (int, http.Header, []byte, error) {
 	var payload io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 		payload = bytes.NewReader(encoded)
 	}
 	request, err := http.NewRequest(method, p.URL+path, payload)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
@@ -80,14 +87,14 @@ func (p *ControlPlane) Raw(method, path string, body any, headers map[string]str
 	}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	defer response.Body.Close()
 	answer, err := io.ReadAll(response.Body)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
-	return response.StatusCode, answer, nil
+	return response.StatusCode, response.Header, answer, nil
 }
 
 // Eventually waits until check holds, failing the case when the deadline passes.

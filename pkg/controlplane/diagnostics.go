@@ -1,0 +1,82 @@
+package controlplane
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+
+	"github.com/tsic404/kos/api"
+	"github.com/tsic404/kos/pkg/diagnostics"
+)
+
+// Diagnostics answers the evidence chain and the diagnostic bundle of one
+// application (C-26). The control plane only carries the result; assembling
+// belongs to the diagnostics service.
+type Diagnostics interface {
+	// Chain assembles the evidence chain of one application.
+	Chain(ctx context.Context, namespace, name string) (diagnostics.Chain, error)
+	// Bundle assembles the diagnostic bundle of one application.
+	Bundle(ctx context.Context, namespace, name string) (diagnostics.Bundle, error)
+}
+
+// handleDiagnosticsChain returns one application's evidence chain (C-26).
+func (s *Server) handleDiagnosticsChain(w http.ResponseWriter, r *http.Request) {
+	namespace, name := r.PathValue("namespace"), r.PathValue("name")
+	if failure := s.authorizeDiagnostics(r, namespace, name); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	chain, err := s.diagnostics.Chain(r.Context(), namespace, name)
+	if err != nil {
+		writeError(w, s.diagnosticsFailure(err, namespace, name))
+		return
+	}
+	writeJSON(w, http.StatusOK, chain)
+}
+
+// handleDiagnosticsBundle returns one application's diagnostic bundle as a
+// downloadable document (C-26).
+func (s *Server) handleDiagnosticsBundle(w http.ResponseWriter, r *http.Request) {
+	namespace, name := r.PathValue("namespace"), r.PathValue("name")
+	if failure := s.authorizeDiagnostics(r, namespace, name); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	bundle, err := s.diagnostics.Bundle(r.Context(), namespace, name)
+	if err != nil {
+		writeError(w, s.diagnosticsFailure(err, namespace, name))
+		return
+	}
+	encoded, err := bundle.Encode()
+	if err != nil {
+		s.log.Error("encode diagnostic bundle", "application", name, "error", err)
+		writeError(w, internal(StageRead, "导出诊断包失败"))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", "diagnostic-bundle-"+name+".json"))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(encoded)
+}
+
+// authorizeDiagnostics judges the read as the application it is about, so the
+// visible-to rule of C-59 applies to diagnostics like any other read.
+func (s *Server) authorizeDiagnostics(r *http.Request, namespace, name string) *Error {
+	if s.diagnostics == nil {
+		return notFound("没有这个接口")
+	}
+	ref := ObjectRef{Group: api.Group, Kind: "Application", Namespace: namespace, Name: name}
+	return s.authorize(r.Context(), VerbRead, ref)
+}
+
+// diagnosticsFailure maps an assembly error to the response envelope (C-12).
+func (s *Server) diagnosticsFailure(err error, namespace, name string) *Error {
+	ref := ObjectRef{Group: api.Group, Kind: "Application", Namespace: namespace, Name: name}
+	if apierrors.IsNotFound(err) {
+		return notFound("应用不存在").about(ref)
+	}
+	s.log.Error("diagnostics failed", "application", ref.String(), "error", err)
+	return internal(StageRead, "读取诊断失败").about(ref)
+}

@@ -105,6 +105,9 @@ type Config struct {
 	// VolumeExpansion answers C-38's expansion preflight a capacity plan
 	// reports; nil leaves such plans without a preflight warning.
 	VolumeExpansion VolumeExpansion
+	// Diagnostics answers the evidence chain and the diagnostic bundle (C-26);
+	// nil leaves both routes unserved.
+	Diagnostics Diagnostics
 	// Now supplies the read clock; defaults to time.Now.
 	Now func() time.Time
 	// OperationTimeout bounds one accepted write; defaults to two minutes.
@@ -125,6 +128,7 @@ type Server struct {
 	authorizer      Authorizer
 	endpointFacts   endpoint.Facts
 	volumeExpansion VolumeExpansion
+	diagnostics     Diagnostics
 	now             func() time.Time
 	timeout         time.Duration
 	log             *slog.Logger
@@ -147,6 +151,7 @@ func New(config Config) (*Server, error) {
 		authorizer:      config.Authorizer,
 		endpointFacts:   config.EndpointFacts,
 		volumeExpansion: config.VolumeExpansion,
+		diagnostics:     config.Diagnostics,
 		now:             config.Now,
 		timeout:         config.OperationTimeout,
 		log:             config.Log,
@@ -183,6 +188,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/plan-requests", s.handlePlan)
 	s.mux.HandleFunc("POST /api/v1/apply-requests", s.handleApply)
 	s.mux.HandleFunc("POST /api/v1/action-requests", s.handleAction)
+	s.mux.HandleFunc("GET /api/v1/diagnostics/{namespace}/{name}", s.handleDiagnosticsChain)
+	s.mux.HandleFunc("GET /api/v1/diagnostics/{namespace}/{name}/bundle", s.handleDiagnosticsBundle)
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, notFound("没有这个接口"))
 	})

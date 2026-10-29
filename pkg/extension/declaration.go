@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/labels"
@@ -279,10 +280,32 @@ type DiscoveryScope struct {
 	LabelSelector string   `json:"labelSelector,omitempty"`
 }
 
-// DiagnosticAdapter is a diagnostic adapter contribution (C-26).
+// DiagnosticAdapter is a diagnostic adapter contribution (C-26). It names what
+// it observes, where its evidence segment sits and what source its evidence
+// carries.
 type DiagnosticAdapter struct {
 	ID     string      `json:"id"`
 	Covers []GroupKind `json:"covers,omitempty"`
+	// Components lists the extension components the adapter reports on; each
+	// covered component contributes a segment of its own state.
+	Components []string `json:"components,omitempty"`
+	// Segment is the reference-chain link the evidence is inserted at; empty
+	// means the dependency segment.
+	Segment string `json:"segment,omitempty"`
+	// Source is the data source every evidence entry names; empty means the
+	// adapter identifier.
+	Source string `json:"source,omitempty"`
+}
+
+// DiagnosticSegments returns the reference-chain links a diagnostic adapter may
+// target (C-26). The dependency segment is the default.
+func DiagnosticSegments() []string {
+	return append([]string(nil), diagnosticSegments...)
+}
+
+// diagnosticSegments is the closed set of chain links an adapter may name.
+var diagnosticSegments = []string{
+	"application", "endpoint", "route", "backend", "workload", "node", "extension",
 }
 
 // PreferenceSchema is the preference key set an extension declares (C-27).
@@ -771,6 +794,17 @@ func loadDiagnosticAdapters(entries []DiagnosticAdapter) ([]DiagnosticAdapter, [
 			if cover.Kind == "" {
 				entryProblems = append(entryProblems, "covers names a class without a kind")
 			}
+		}
+		for _, component := range entry.Components {
+			if strings.TrimSpace(component) == "" || strings.TrimSpace(component) != component {
+				entryProblems = append(entryProblems, "components entries must be non-empty identifiers")
+			}
+		}
+		if entry.Segment != "" && !slices.Contains(diagnosticSegments, entry.Segment) {
+			entryProblems = append(entryProblems, "segment is not a reference-chain link")
+		}
+		if entry.Source != "" && strings.TrimSpace(entry.Source) != entry.Source {
+			entryProblems = append(entryProblems, "source must be trimmed")
 		}
 		if len(entryProblems) > 0 {
 			problems = append(problems, where(fmt.Sprintf("diagnosticAdapters[%d]", index), entryProblems)...)

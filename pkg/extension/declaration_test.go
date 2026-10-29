@@ -3,6 +3,8 @@ package extension
 import (
 	"strings"
 	"testing"
+
+	"github.com/tsic404/kos/pkg/diagnostics"
 )
 
 // fullDeclaration is a declaration that uses every contribution class.
@@ -249,5 +251,82 @@ func TestControllerScopeBecomesTheWriteAllocation(t *testing.T) {
 	}
 	if scope.Groups["other.example.test"] {
 		t.Fatal("a group outside the declaration is writable")
+	}
+}
+
+// TestDiagnosticAdapterCarriesSegmentSourceAndComponents pins the C-26
+// declaration content: an adapter names the component it covers, the chain link
+// its evidence sits at and the source its evidence carries.
+func TestDiagnosticAdapterCarriesSegmentSourceAndComponents(t *testing.T) {
+	declaration := fullDeclaration("demo.widgets")
+	declaration.Contributions.DiagnosticAdapters = []DiagnosticAdapter{{
+		ID:         "widget-diagnostics",
+		Covers:     []GroupKind{{Group: "widgets.example.test", Kind: "Widget"}},
+		Components: []string{"demo.widgets"},
+		Segment:    "workload",
+		Source:     "widgets.example.test diagnostics",
+	}}
+	loaded, err := declaration.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(loaded.Problems) != 0 {
+		t.Fatalf("valid declaration has problems: %v", loaded.Problems)
+	}
+	adapter := loaded.Contributions.DiagnosticAdapters[0]
+	if adapter.Segment != "workload" || adapter.Source != "widgets.example.test diagnostics" {
+		t.Fatalf("adapter = %+v", adapter)
+	}
+	if len(adapter.Components) != 1 || adapter.Components[0] != "demo.widgets" {
+		t.Fatalf("adapter components = %v", adapter.Components)
+	}
+}
+
+// TestDiagnosticAdapterRejectsUnknownSegment pins that a segment outside the
+// chain links drops the adapter without taking other classes down (C-28).
+func TestDiagnosticAdapterRejectsUnknownSegment(t *testing.T) {
+	declaration := fullDeclaration("demo.widgets")
+	declaration.Contributions.DiagnosticAdapters = []DiagnosticAdapter{{
+		ID: "widget-diagnostics", Segment: "sidecar", Source: " padded ",
+	}}
+	loaded, err := declaration.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(loaded.Contributions.DiagnosticAdapters) != 0 {
+		t.Fatalf("an invalid adapter was kept: %+v", loaded.Contributions.DiagnosticAdapters)
+	}
+	found := false
+	for _, problem := range loaded.Problems {
+		if problem.Class == ClassDiagnosticAdapters {
+			found = true
+			if len(problem.Items) < 2 {
+				t.Fatalf("adapter problems = %v, want both invalid fields", problem.Items)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("problems = %v, want a diagnostic-adapter problem", loaded.Problems)
+	}
+}
+
+// TestDiagnosticSegmentsMatchChainLinks guards the one vocabulary the
+// declaration and the evidence chain share (C-26).
+func TestDiagnosticSegmentsMatchChainLinks(t *testing.T) {
+	links := map[string]bool{}
+	for _, link := range []diagnostics.Link{
+		diagnostics.LinkApplication, diagnostics.LinkEndpoint, diagnostics.LinkRoute,
+		diagnostics.LinkBackend, diagnostics.LinkWorkload, diagnostics.LinkNode, diagnostics.LinkExtension,
+	} {
+		links[string(link)] = true
+	}
+	segments := DiagnosticSegments()
+	if len(segments) != len(links) {
+		t.Fatalf("declared segments = %v, want the chain links %v", segments, links)
+	}
+	for _, segment := range segments {
+		if !links[segment] {
+			t.Fatalf("declared segment %q is not a chain link", segment)
+		}
 	}
 }
