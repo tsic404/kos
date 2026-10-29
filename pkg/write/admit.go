@@ -110,7 +110,8 @@ func admitKernel(req Request) error {
 
 // admitKernelDelete applies the kernel delete paths: a user deletes what it
 // owns, the application reconciler deletes its cascade endpoints (C-45), and
-// nobody else deletes kernel objects.
+// discovery reclaims the device fact of a vanished node (C-37). Nobody else
+// deletes kernel objects.
 func admitKernelDelete(req Request) error {
 	switch req.Subject {
 	case SubjectUser:
@@ -118,6 +119,11 @@ func admitKernelDelete(req Request) error {
 	case SubjectApplicationReconciler:
 		if req.Object.Kind != "Endpoint" {
 			return denyf(req, "the application reconciler deletes only cascade endpoints")
+		}
+		return admitAttributed(req)
+	case SubjectDiscovery:
+		if req.Object.Kind != "NodeDevice" {
+			return denyf(req, "discovery deletes only device facts")
 		}
 		return admitAttributed(req)
 	default:

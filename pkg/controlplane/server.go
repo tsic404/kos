@@ -73,6 +73,13 @@ const (
 	readRetryDelay    = 50 * time.Millisecond
 )
 
+// DiscoverySources answers which discovery adapters reported one object
+// (C-25). An object may have several sources; the projection lists all of
+// them.
+type DiscoverySources interface {
+	Sources(group, kind, namespace, name string) []string
+}
+
 // Config wires the API to its environment.
 type Config struct {
 	// Dynamic writes kernel objects; required.
@@ -85,6 +92,9 @@ type Config struct {
 	// Controllers projects the status of extension objects whose controller is
 	// unavailable (C-20); nil shows every stored status as observed.
 	Controllers ControllerAvailability
+	// Discoveries lists the discovery adapters that reported an object (C-25);
+	// nil leaves every projection without sources.
+	Discoveries DiscoverySources
 	// Authorizer judges requests; defaults to AllowAll.
 	Authorizer Authorizer
 	// EndpointFacts answers the two path-prefix declarations C-43 requires
@@ -111,6 +121,7 @@ type Server struct {
 	source          ObjectSource
 	extensions      ExtensionKinds
 	controllers     ControllerAvailability
+	discoveries     DiscoverySources
 	authorizer      Authorizer
 	endpointFacts   endpoint.Facts
 	volumeExpansion VolumeExpansion
@@ -132,6 +143,7 @@ func New(config Config) (*Server, error) {
 		source:          config.Source,
 		extensions:      config.Extensions,
 		controllers:     config.Controllers,
+		discoveries:     config.Discoveries,
 		authorizer:      config.Authorizer,
 		endpointFacts:   config.EndpointFacts,
 		volumeExpansion: config.VolumeExpansion,
@@ -253,7 +265,9 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 			writeError(w, failure)
 			return
 		}
-		projections = append(projections, newProjection(refOf(masked, objectType), masked, item.ObservedAt, now))
+		projection := newProjection(refOf(masked, objectType), masked, item.ObservedAt, now)
+		projection.Sources = s.discoverySources(projection.Ref)
+		projections = append(projections, projection)
 	}
 	sortProjections(projections)
 
@@ -310,6 +324,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure)
 		return
 	}
+	page[0].Sources = s.discoverySources(page[0].Ref)
 	writeJSON(w, http.StatusOK, page[0])
 }
 

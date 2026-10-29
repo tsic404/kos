@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation"
 
@@ -262,6 +263,20 @@ type CatalogueSource struct {
 type DiscoveryAdapter struct {
 	ID     string      `json:"id"`
 	Covers []GroupKind `json:"covers,omitempty"`
+	// Scope limits the objects the adapter reports.
+	Scope DiscoveryScope `json:"scope,omitempty"`
+	// Collector is the collection identity the adapter writes device facts as.
+	Collector string `json:"collector,omitempty"`
+	// Fields is the reported field set, as dotted paths inside each object.
+	Fields []string `json:"fields,omitempty"`
+}
+
+// DiscoveryScope is the reach of one discovery adapter (C-25): an empty
+// namespace list means every namespace, and an empty selector matches every
+// object of a covered class.
+type DiscoveryScope struct {
+	Namespaces    []string `json:"namespaces,omitempty"`
+	LabelSelector string   `json:"labelSelector,omitempty"`
 }
 
 // DiagnosticAdapter is a diagnostic adapter contribution (C-26).
@@ -716,6 +731,16 @@ func loadDiscoveryAdapters(entries []DiscoveryAdapter) ([]DiscoveryAdapter, []st
 		for _, cover := range entry.Covers {
 			if cover.Kind == "" {
 				entryProblems = append(entryProblems, "covers names a class without a kind")
+			}
+		}
+		for _, namespace := range entry.Scope.Namespaces {
+			if problems := validation.IsDNS1123Label(namespace); len(problems) > 0 {
+				entryProblems = append(entryProblems, fmt.Sprintf("scope.namespaces names an invalid namespace %q", namespace))
+			}
+		}
+		if entry.Scope.LabelSelector != "" {
+			if _, err := labels.Parse(entry.Scope.LabelSelector); err != nil {
+				entryProblems = append(entryProblems, fmt.Sprintf("scope.labelSelector is invalid: %v", err))
 			}
 		}
 		if len(entryProblems) > 0 {
