@@ -390,14 +390,24 @@ func (w *Writer) current(ctx context.Context, ref Ref) (*unstructured.Unstructur
 	return stored, err
 }
 
-// resource resolves the client for a reference.
-func (w *Writer) resource(ref Ref) (dynamic.ResourceInterface, error) {
+// ResourceName resolves the resource name for a kind the way every write does:
+// the name discovery reported first, then the native fallback table.
+func (w *Writer) ResourceName(ref Ref) (string, error) {
 	plural, known := w.Resources[ref.GroupKind()]
 	if !known {
 		plural, known = nativeResources[ref.GroupKind()]
 	}
 	if !known {
-		return nil, &UnknownResource{Ref: ref}
+		return "", &UnknownResource{Ref: ref}
+	}
+	return plural, nil
+}
+
+// resource resolves the client for a reference.
+func (w *Writer) resource(ref Ref) (dynamic.ResourceInterface, error) {
+	plural, err := w.ResourceName(ref)
+	if err != nil {
+		return nil, err
 	}
 	resource := w.Dynamic.Resource(schema.GroupVersionResource{
 		Group:    ref.Group,

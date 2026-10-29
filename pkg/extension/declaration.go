@@ -73,15 +73,15 @@ type Declaration struct {
 // Contributions is the contribution list C-18 fixes: nine classes, each
 // loaded on its own.
 type Contributions struct {
-	ObjectClasses      []ObjectClass       `json:"objectClasses,omitempty"`
-	Controllers        []Controller        `json:"controllers,omitempty"`
-	Capabilities       []Capability        `json:"capabilities,omitempty"`
-	Pages              []Page              `json:"pages,omitempty"`
-	Settings           []Setting           `json:"settings,omitempty"`
-	CatalogueSources   []CatalogueSource   `json:"catalogueSources,omitempty"`
-	DiscoveryAdapters  []DiscoveryAdapter  `json:"discoveryAdapters,omitempty"`
-	DiagnosticAdapters []DiagnosticAdapter `json:"diagnosticAdapters,omitempty"`
-	Preferences        []PreferenceSchema  `json:"preferences,omitempty"`
+	ObjectClasses      []ObjectClass           `json:"objectClasses,omitempty"`
+	Controllers        []Controller            `json:"controllers,omitempty"`
+	Capabilities       CapabilityContributions `json:"capabilities,omitempty"`
+	Pages              []Page                  `json:"pages,omitempty"`
+	Settings           []Setting               `json:"settings,omitempty"`
+	CatalogueSources   []CatalogueSource       `json:"catalogueSources,omitempty"`
+	DiscoveryAdapters  []DiscoveryAdapter      `json:"discoveryAdapters,omitempty"`
+	DiagnosticAdapters []DiagnosticAdapter     `json:"diagnosticAdapters,omitempty"`
+	Preferences        []PreferenceSchema      `json:"preferences,omitempty"`
 }
 
 // GroupKind names one object class; an empty group is the run kernel's core
@@ -201,11 +201,47 @@ type Retention struct {
 	ExternalReference string `json:"externalReference,omitempty"`
 }
 
-// Capability is a capability an extension contributes; its name carries the
-// extension identifier as a prefix (C-09, C-21).
+// CapabilityContributions is the capability contribution class: the capability
+// entries a component contributes together with the provider registration C-47
+// derives from them (C-18).
+type CapabilityContributions struct {
+	// Items are the contributed capability entries.
+	Items []Capability `json:"items,omitempty"`
+	// StorageClasses are the storage classes the provider supplies (C-47).
+	StorageClasses []string `json:"storageClasses,omitempty"`
+	// SelfReported is the provider's own conformance result; it is a
+	// declaration and never verification (C-10).
+	SelfReported []SelfReport `json:"selfReported,omitempty"`
+}
+
+// Capability is a capability an extension contributes. A new capability carries
+// the extension identifier as a prefix; a kernel baseline name is contributed as
+// it is (C-09, C-21).
 type Capability struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
+	// Scope is where the capability's guarantee holds (C-09). A baseline
+	// capability may omit it and take the kernel baseline's value; an
+	// extension capability must declare one.
+	// +optional
+	Scope v1beta1.CapabilityScope `json:"scope,omitempty"`
+	// Parameters is the parameter structure the capability accepts (C-09).
+	Parameters []v1beta1.CapabilityParameter `json:"parameters,omitempty"`
+	// Guarantees are the boolean and enum values the capability promises
+	// (C-09).
+	Guarantees []v1beta1.CapabilityGuarantee `json:"guarantees,omitempty"`
+	// CaseSet names the conformance case set (C-09).
+	CaseSet string `json:"caseSet,omitempty"`
+	// CaseSetDigest pins the case set contents (C-10).
+	CaseSetDigest string `json:"caseSetDigest,omitempty"`
+}
+
+// SelfReport is one conformance result a component declares about itself
+// (C-10).
+type SelfReport struct {
+	Capability  string   `json:"capability"`
+	Version     string   `json:"version"`
+	FailedCases []string `json:"failedCases,omitempty"`
 }
 
 // Page is a page and its actions (C-22).
@@ -454,7 +490,11 @@ func (c Contributions) load(identifier, apiGroup string) (Contributions, []Class
 	problems = appendProblem(problems, ClassControllers, controllerProblems)
 
 	capabilities, capabilityProblems := c.loadCapabilities(identifier)
-	loaded.Capabilities = capabilities
+	loaded.Capabilities = CapabilityContributions{
+		Items:          capabilities,
+		StorageClasses: append([]string(nil), c.Capabilities.StorageClasses...),
+		SelfReported:   append([]SelfReport(nil), c.Capabilities.SelfReported...),
+	}
 	problems = appendProblem(problems, ClassCapabilities, capabilityProblems)
 
 	pages, pageProblems := loadPages(c.Pages)
@@ -626,20 +666,21 @@ func checkController(entry Controller, declared, served map[GroupKind]bool) []st
 	return problems
 }
 
-// loadCapabilities validates capability declarations; a name carries the
-// extension identifier as a prefix (C-21).
+// loadCapabilities validates capability declarations. A new capability carries
+// the extension identifier as a prefix; a kernel baseline name is contributed
+// as it is, because the baseline belongs to no extension (C-09, C-21).
 func (c Contributions) loadCapabilities(identifier string) ([]Capability, []string) {
 	prefix := identifier + "/"
 	seen := map[string]bool{}
-	kept := make([]Capability, 0, len(c.Capabilities))
+	kept := make([]Capability, 0, len(c.Capabilities.Items))
 	problems := []string{}
-	for index, entry := range c.Capabilities {
+	for index, entry := range c.Capabilities.Items {
 		var entryProblems []string
 		switch {
 		case strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Name) != entry.Name:
 			entryProblems = append(entryProblems, "name is required")
-		case !strings.HasPrefix(entry.Name, prefix) || entry.Name == prefix:
-			entryProblems = append(entryProblems, "name must be prefixed with "+prefix)
+		case !strings.HasPrefix(entry.Name, prefix) && !isBaselineCapability(entry.Name):
+			entryProblems = append(entryProblems, "name must be prefixed with "+prefix+" or be a kernel baseline capability")
 		}
 		if entry.Version == "" {
 			entryProblems = append(entryProblems, "version is required")

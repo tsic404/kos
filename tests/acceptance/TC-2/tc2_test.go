@@ -18,7 +18,7 @@ func declaration() extension.Declaration {
 		Identifier: "demo.widgets",
 		Version:    "1.0.0",
 		Contributions: extension.Contributions{
-			Capabilities: []extension.Capability{{Name: "demo.widgets/panel", Version: "v1"}},
+			Capabilities: extension.CapabilityContributions{Items: []extension.Capability{{Name: "demo.widgets/panel", Version: "v1"}}},
 		},
 	}
 }
@@ -32,7 +32,7 @@ func TestTC2CapabilityBaselineDoesNotChange(t *testing.T) {
 
 	before := cluster.ExtensionState(t, artifacts)
 	if got := before.Registry().Capabilities(); !reflect.DeepEqual(got, baseline) {
-		t.Fatalf("catalogue before the install = %v, want the baseline", got)
+		t.Fatalf("catalogue before the install = %+v, want the baseline %+v", got, baseline)
 	}
 
 	installed := cluster.InstallPackage(t, "widgets", declaration(), artifacts)
@@ -40,11 +40,11 @@ func TestTC2CapabilityBaselineDoesNotChange(t *testing.T) {
 	if len(capabilities) != len(baseline)+1 {
 		t.Fatalf("catalogue = %v, want the baseline plus one contribution", capabilities)
 	}
+	// The whole entry is compared, not just its identity: the projection may
+	// not add or rewrite guarantees, parameters or case sets either.
 	for index, want := range baseline {
-		if capabilities[index] != want {
-			t.Errorf("baseline entry %d = %s@%s, want %s@%s", index,
-				capabilities[index].Name, capabilities[index].Version, want.Name, want.Version)
-			continue
+		if !reflect.DeepEqual(capabilities[index], want) {
+			t.Errorf("baseline entry %d = %+v, want %+v", index, capabilities[index], want)
 		}
 		if capabilities[index].Version != "v1" {
 			t.Errorf("baseline %s moved to %s", want.Name, capabilities[index].Version)
@@ -61,7 +61,7 @@ func TestTC2CapabilityBaselineDoesNotChange(t *testing.T) {
 	cluster.DeleteComponent(t, "widgets")
 	removed := cluster.ExtensionState(t, artifacts)
 	if got := removed.Registry().Capabilities(); !reflect.DeepEqual(got, baseline) {
-		t.Fatalf("catalogue after the uninstall = %v, want the baseline", got)
+		t.Fatalf("catalogue after the uninstall = %+v, want the baseline %+v", got, baseline)
 	}
 	if _, found := removed.Registry().Capability(contributed.Name, contributed.Version); found {
 		t.Fatalf("the extension capability %s@%s is still registered", contributed.Name, contributed.Version)

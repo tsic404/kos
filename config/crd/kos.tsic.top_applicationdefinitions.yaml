@@ -184,6 +184,11 @@ spec:
                         Optional makes a failed requirement degrade the application instead of
                         keeping it Pending (C-11).
                       type: boolean
+                    scope:
+                      description: |-
+                        Scope is the availability the requirement needs: cluster demands a
+                        cluster-wide capability; node, the default, accepts both scopes (C-11).
+                      type: string
                     version:
                       description: Version is the optional version range; empty matches
                         any version.
@@ -397,6 +402,11 @@ spec:
                         Optional makes a failed requirement degrade the application instead of
                         keeping it Pending (C-11).
                       type: boolean
+                    scope:
+                      description: |-
+                        Scope is the availability the requirement needs: cluster demands a
+                        cluster-wide capability; node, the default, accepts both scopes (C-11).
+                      type: string
                     version:
                       description: Version is the optional version range; empty matches
                         any version.

@@ -3,6 +3,8 @@ package extension
 import (
 	"strings"
 	"testing"
+
+	"github.com/tsic404/kos/api/v1beta1"
 )
 
 // TestConstraintComparesVersions checks the range grammar dependency edges use
@@ -47,21 +49,32 @@ func TestParseConstraintRejectsGarbage(t *testing.T) {
 	}
 }
 
-// TestBaselineCapabilitiesAreTheEightKernelNames pins C-09's baseline and its
-// starting version; a product never changes them (TC-2).
+// TestBaselineCapabilitiesAreTheEightKernelNames pins C-09's baseline, its
+// starting version and the scope the kernel fixes for each name; a product
+// never changes them (TC-2).
 func TestBaselineCapabilitiesAreTheEightKernelNames(t *testing.T) {
 	capabilities := BaselineCapabilities()
-	want := []string{
-		"storage.volume", "storage.snapshot", "storage.shared-rwx",
-		"network.http-endpoint", "network.path-prefix", "network.l4-endpoint",
-		"network.policy", "compute.gpu",
+	want := []struct {
+		name  string
+		scope v1beta1.CapabilityScope
+	}{
+		{"storage.volume", v1beta1.CapabilityScopeNode},
+		{"storage.snapshot", v1beta1.CapabilityScopeNode},
+		{"storage.shared-rwx", v1beta1.CapabilityScopeCluster},
+		{"network.http-endpoint", v1beta1.CapabilityScopeCluster},
+		{"network.path-prefix", v1beta1.CapabilityScopeCluster},
+		{"network.l4-endpoint", v1beta1.CapabilityScopeCluster},
+		{"network.policy", v1beta1.CapabilityScopeCluster},
+		{"compute.gpu", v1beta1.CapabilityScopeNode},
 	}
 	if len(capabilities) != len(want) {
 		t.Fatalf("baseline has %d capabilities, want %d", len(capabilities), len(want))
 	}
-	for index, name := range want {
-		if capabilities[index].Name != name || capabilities[index].Version != "v1" {
-			t.Errorf("baseline[%d] = %s@%s, want %s@v1", index, capabilities[index].Name, capabilities[index].Version, name)
+	for index, entry := range want {
+		got := capabilities[index]
+		if got.Name != entry.name || got.Version != "v1" || got.Scope != entry.scope {
+			t.Errorf("baseline[%d] = %s@%s scope %q, want %s@v1 scope %q",
+				index, got.Name, got.Version, got.Scope, entry.name, entry.scope)
 		}
 	}
 }

@@ -109,7 +109,7 @@ func TestEvaluateDependencyOrderDoesNotMatter(t *testing.T) {
 		Identifier: "demo.base",
 		Version:    "1.0.0",
 		Contributions: Contributions{
-			Capabilities: []Capability{{Name: "demo.base/api", Version: "v2"}},
+			Capabilities: CapabilityContributions{Items: []Capability{{Name: "demo.base/api", Version: "v2"}}},
 		},
 	}
 	consumer := fullDeclaration("demo.widgets")

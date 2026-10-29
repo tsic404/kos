@@ -27,7 +27,7 @@ func declaration() extension.Declaration {
 			Controllers: []extension.Controller{{
 				ID: "widget", Manages: []extension.GroupKind{{Group: "widgets.example.test", Kind: "Widget"}},
 			}},
-			Capabilities:       []extension.Capability{{Name: "demo.widgets/panel", Version: "v1"}},
+			Capabilities:       extension.CapabilityContributions{Items: []extension.Capability{{Name: "demo.widgets/panel", Version: "v1"}}},
 			Pages:              []extension.Page{{ID: "widgets", Title: "Widgets", Actions: []extension.Action{{ID: "install"}}}},
 			Settings:           []extension.Setting{{ID: "widgets-endpoint", Scope: extension.SettingScopeCluster, Writer: extension.SettingWriterUser}},
 			CatalogueSources:   []extension.CatalogueSource{{ID: "widgets", Sync: "pull"}},
@@ -58,8 +58,8 @@ func TestTC4EveryDeclaredContributionIsVisible(t *testing.T) {
 	if len(contributions.Controllers) != 1 || contributions.Controllers[0].ID != "widget" {
 		t.Fatalf("controllers = %v", contributions.Controllers)
 	}
-	if len(contributions.Capabilities) != 1 || contributions.Capabilities[0].Name != "demo.widgets/panel" {
-		t.Fatalf("capabilities = %v", contributions.Capabilities)
+	if len(contributions.Capabilities.Items) != 1 || contributions.Capabilities.Items[0].Name != "demo.widgets/panel" {
+		t.Fatalf("capabilities = %v", contributions.Capabilities.Items)
 	}
 	if len(contributions.Pages) != 1 || contributions.Pages[0].ID != "widgets" ||
 		len(contributions.Pages[0].Actions) != 1 || contributions.Pages[0].Actions[0].ID != "install" {

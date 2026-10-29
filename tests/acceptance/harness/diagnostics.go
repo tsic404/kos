@@ -82,7 +82,7 @@ func StartDiagnosticWorld(t *testing.T, cluster *Cluster) *DiagnosticWorld {
 				Segment:    string(diagnostics.LinkWorkload),
 				Source:     "widgets.example.test diagnostics",
 			}},
-			Capabilities: []extension.Capability{{Name: "demo.widgets/diagnostics", Version: "v1"}},
+			Capabilities: extension.CapabilityContributions{Items: []extension.Capability{{Name: "demo.widgets/diagnostics", Version: "v1"}}},
 		},
 		FrameworkVersion: ">=1.0 <2.0",
 	}

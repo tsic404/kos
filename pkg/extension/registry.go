@@ -281,7 +281,7 @@ func buildRegistry(components []activated) (*Registry, map[string]Contributions,
 		}
 		entry.CatalogueSources = keptSources
 		effective[component.name] = entry
-		registry.capabilities = append(registry.capabilities, entry.Capabilities...)
+		registry.capabilities = append(registry.capabilities, entry.Capabilities.Items...)
 		registry.pages = append(registry.pages, entry.Pages...)
 		registry.settings = append(registry.settings, entry.Settings...)
 		registry.sources = append(registry.sources, keptSources...)

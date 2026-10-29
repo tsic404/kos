@@ -27,7 +27,7 @@ func fullDeclaration(identifier string) Declaration {
 					Namespaces: []string{"default"},
 				},
 			}},
-			Capabilities:       []Capability{{Name: identifier + "/widgets", Version: "v1"}},
+			Capabilities:       CapabilityContributions{Items: []Capability{{Name: identifier + "/widgets", Version: "v1"}}},
 			Pages:              []Page{{ID: "widgets", Title: "Widgets", Actions: []Action{{ID: "create"}}}},
 			Settings:           []Setting{{ID: "widget-endpoint", Scope: SettingScopeCluster, Writer: SettingWriterUser, Editable: true}},
 			CatalogueSources:   []CatalogueSource{{ID: "widgets", Sync: "pull"}},
@@ -52,7 +52,7 @@ func TestLoadKeepsEveryContributionClass(t *testing.T) {
 	counts := map[string]int{
 		ClassObjectClasses:      len(contributions.ObjectClasses),
 		ClassControllers:        len(contributions.Controllers),
-		ClassCapabilities:       len(contributions.Capabilities),
+		ClassCapabilities:       len(contributions.Capabilities.Items),
 		ClassPages:              len(contributions.Pages),
 		ClassSettings:           len(contributions.Settings),
 		ClassCatalogueSources:   len(contributions.CatalogueSources),
@@ -77,7 +77,7 @@ func TestLoadFailsOneClassWithoutTakingOthersDown(t *testing.T) {
 	declaration.Contributions.ObjectClasses = append(declaration.Contributions.ObjectClasses, ObjectClass{
 		Group: "kos.tsic.top", Kind: "Secret", Resource: "secrets", Versions: []string{"v1"},
 	})
-	declaration.Contributions.Capabilities = append(declaration.Contributions.Capabilities,
+	declaration.Contributions.Capabilities.Items = append(declaration.Contributions.Capabilities.Items,
 		Capability{Name: "unprefixed", Version: "v1"})
 	declaration.Contributions.Pages = append(declaration.Contributions.Pages,
 		Page{ID: "bad-role", Title: "Bad", RequiredRole: "admin"})
@@ -98,7 +98,7 @@ func TestLoadFailsOneClassWithoutTakingOthersDown(t *testing.T) {
 		}
 	}
 	if len(loaded.Contributions.ObjectClasses) != 1 || len(loaded.Contributions.Pages) != 1 ||
-		len(loaded.Contributions.Settings) != 1 || len(loaded.Contributions.Capabilities) != 1 {
+		len(loaded.Contributions.Settings) != 1 || len(loaded.Contributions.Capabilities.Items) != 1 {
 		t.Fatalf("valid entries were dropped with the invalid ones: %+v", loaded.Contributions)
 	}
 }
