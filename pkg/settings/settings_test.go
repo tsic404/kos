@@ -2,6 +2,7 @@ package settings
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tsic404/kos/pkg/controlplane"
@@ -52,12 +53,23 @@ func (d declarations) Setting(id string) (extension.Setting, bool) {
 // session is the owner the cases act as.
 var session = identity.Session{Username: "owner", Role: write.RoleOwner}
 
+// auditLog keeps the records the service writes.
+type auditLog struct {
+	records []controlplane.AuditRecord
+}
+
+// Record implements controlplane.Auditor.
+func (a *auditLog) Record(_ context.Context, record controlplane.AuditRecord) error {
+	a.records = append(a.records, record)
+	return nil
+}
+
 // TestItemReportsWriterEntryAndReason checks the projection fields C-23 fixes.
 func TestItemReportsWriterEntryAndReason(t *testing.T) {
 	service := New(declarations{
 		{ID: "writable", Scope: extension.SettingScopeCluster, Writer: extension.SettingWriterUser, Editable: true},
 		{ID: "fixed", Scope: extension.SettingScopeCluster, Writer: extension.SettingWriterKernel},
-	}, &memoryValues{stored: map[string]string{}})
+	}, &memoryValues{stored: map[string]string{}}, Config{})
 
 	items, failure := service.Items(context.Background(), session, "")
 	if failure != nil {
@@ -81,7 +93,7 @@ func TestWriteFollowsTheDeclaredWriter(t *testing.T) {
 		{ID: "writable", Scope: extension.SettingScopeCluster, Writer: extension.SettingWriterUser, Editable: true},
 		{ID: "controller", Scope: extension.SettingScopeCluster, Writer: extension.SettingWriterController},
 		{ID: "fixed", Scope: extension.SettingScopeCluster, Writer: extension.SettingWriterUser},
-	}, &memoryValues{stored: map[string]string{}})
+	}, &memoryValues{stored: map[string]string{}}, Config{})
 
 	item, failure := service.Set(context.Background(), session, "writable", "", "42")
 	if failure != nil {
@@ -108,7 +120,7 @@ func TestWriteFollowsTheDeclaredWriter(t *testing.T) {
 func TestNodeScopeNeedsTheNode(t *testing.T) {
 	service := New(declarations{
 		{ID: "reserve", Scope: extension.SettingScopeNode, Writer: extension.SettingWriterUser, Editable: true},
-	}, &memoryValues{stored: map[string]string{}})
+	}, &memoryValues{stored: map[string]string{}}, Config{})
 
 	items, failure := service.Items(context.Background(), session, "")
 	if failure != nil || len(items) != 0 {
@@ -133,7 +145,7 @@ func TestNodeScopeNeedsTheNode(t *testing.T) {
 func TestNodeScopeRejectsAMalformedNode(t *testing.T) {
 	service := New(declarations{
 		{ID: "reserve", Scope: extension.SettingScopeNode, Writer: extension.SettingWriterUser, Editable: true},
-	}, &memoryValues{stored: map[string]string{}})
+	}, &memoryValues{stored: map[string]string{}}, Config{})
 
 	if _, failure := service.Set(context.Background(), session, "reserve", "Not_A_Node", "2"); failure == nil ||
 		failure.Code != controlplane.CodeInvalidField {
@@ -149,6 +161,51 @@ func TestNodeScopeRejectsAMalformedNode(t *testing.T) {
 	}
 	if _, failure := service.Set(context.Background(), session, "reserve", "node-a.example", "2"); failure != nil {
 		t.Fatalf("write on a valid node: %v", failure)
+	}
+}
+
+// TestSetRefusesATargetTheTrailCannotHold checks that a write naming an item or
+// node the audit record cannot hold is refused as invalid input before anything
+// is stored or recorded (C-14).
+func TestSetRefusesATargetTheTrailCannotHold(t *testing.T) {
+	trail := &auditLog{}
+	service := New(declarations{
+		{ID: "writable", Scope: extension.SettingScopeCluster, Writer: extension.SettingWriterUser, Editable: true},
+		{ID: "reserve", Scope: extension.SettingScopeNode, Writer: extension.SettingWriterUser, Editable: true},
+	}, &memoryValues{stored: map[string]string{}}, Config{Auditor: trail})
+
+	overLong := strings.Repeat("a", controlplane.MaxRecordNameLength+1)
+	cases := []struct{ name, id, node string }{
+		{"an item id over the bound", overLong, ""},
+		{"an item id with a path separator", "re/serve", ""},
+		{"an item id with a control character", "res\t", ""},
+		{"a node over the bound", "reserve", overLong},
+		{"a node that is not a DNS subdomain", "reserve", "Node_A"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, failure := service.Set(context.Background(), session, testCase.id, testCase.node, "1"); failure == nil ||
+				failure.Code != controlplane.CodeInvalidField {
+				t.Fatalf("write = %v, want %q", failure, controlplane.CodeInvalidField)
+			}
+		})
+	}
+	if len(trail.records) != 0 {
+		t.Fatalf("audit = %+v, want an unrecordable target to leave no record", trail.records)
+	}
+	values := service.values.(*memoryValues)
+	if len(values.stored) != 0 {
+		t.Fatalf("stored values = %v, want nothing stored", values.stored)
+	}
+
+	// A well-formed refusal still reaches the trail: the bound narrows what is
+	// recorded, not whether a refused attempt is.
+	if _, failure := service.Set(context.Background(), session, "absent", "", "1"); failure == nil ||
+		failure.Code != controlplane.CodeNotFound {
+		t.Fatalf("write an undeclared item = %v, want not found", failure)
+	}
+	if len(trail.records) != 1 || trail.records[0].Result != controlplane.ResultRejected {
+		t.Fatalf("audit = %+v, want one refused record", trail.records)
 	}
 }
 

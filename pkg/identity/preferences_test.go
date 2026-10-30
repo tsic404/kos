@@ -3,8 +3,10 @@ package identity
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/tsic404/kos/pkg/controlplane"
 	"github.com/tsic404/kos/pkg/write"
 )
 
@@ -26,7 +28,7 @@ func preferenceService(t *testing.T, schemas schemaSet) *Service {
 		t.Fatalf("open database: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	service := New(store, Config{Preferences: schemas})
+	service := New(store, Config{Preferences: schemas, Auditor: AuditTrail{Store: store}})
 	if _, err := service.BootstrapOwner(context.Background(), "owner"); err != nil {
 		t.Fatalf("bootstrap owner: %v", err)
 	}
@@ -72,6 +74,54 @@ func TestGuestCannotWriteAPreference(t *testing.T) {
 	guest := Session{Username: "owner", Role: write.RoleGuest}
 	if err := service.SetPreference(context.Background(), guest, "demo.dock", "view", "grid"); !errors.Is(err, ErrPermissionDenied) {
 		t.Fatalf("guest write = %v, want ErrPermissionDenied", err)
+	}
+}
+
+// TestPreferenceWriteRefusesATargetTheTrailCannotHold checks that a domain or key
+// the audit record cannot hold is refused before anything is stored or recorded
+// (C-14).
+func TestPreferenceWriteRefusesATargetTheTrailCannotHold(t *testing.T) {
+	ctx := context.Background()
+	service := preferenceService(t, schemaSet{"demo.dock": {"view"}})
+	session := Session{Username: "owner", Role: write.RoleOwner}
+
+	overLong := strings.Repeat("a", controlplane.MaxRecordNameLength+1)
+	cases := []struct{ name, identifier, key string }{
+		{"a domain over the bound", overLong, "view"},
+		{"a domain with a path separator", "demo/dock", "view"},
+		{"a key over the bound", "demo.dock", overLong},
+		{"a key with a control character", "demo.dock", "vi\nnew"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			var validation *ValidationError
+			if err := service.SetPreference(ctx, session, testCase.identifier, testCase.key, "x"); !errors.As(err, &validation) {
+				t.Fatalf("write = %v, want a validation error", err)
+			}
+		})
+	}
+	entries, err := service.store.AuditEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("read the audit trail: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("audit = %+v, want an unrecordable target to leave no record", entries)
+	}
+	if values, err := service.store.PreferencesOf(ctx, "owner", "demo.dock"); err != nil || len(values) != 0 {
+		t.Fatalf("values = %v / %v, want nothing stored", values, err)
+	}
+
+	// A well-formed refusal still reaches the trail: the bound narrows what is
+	// recorded, not whether a refused attempt is.
+	if err := service.SetPreference(ctx, session, "demo.other", "view", "x"); !errors.Is(err, ErrPreferenceDomain) {
+		t.Fatalf("unknown domain = %v, want ErrPreferenceDomain", err)
+	}
+	entries, err = service.store.AuditEntries(ctx, 10)
+	if err != nil {
+		t.Fatalf("read the audit trail: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Result != controlplane.ResultRejected {
+		t.Fatalf("audit = %+v, want one refused record", entries)
 	}
 }
 

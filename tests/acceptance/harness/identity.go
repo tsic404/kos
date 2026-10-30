@@ -50,6 +50,9 @@ type Identity struct {
 	HTTP *HTTP
 	// Clock is the service clock.
 	Clock *Clock
+	// Trail is the audit stream every write of the composed shell appends to
+	// (C-14); it keeps the records in the account database.
+	Trail identity.AuditTrail
 	// DatabasePath is the database file the case may export and restore.
 	DatabasePath string
 }
@@ -80,7 +83,8 @@ func startIdentity(t *testing.T, owned identity.OwnedObjects, configure func(*id
 		t.Fatalf("open identity database: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	config := identity.Config{Now: clock.Now, Owned: owned}
+	trail := identity.AuditTrail{Store: store}
+	config := identity.Config{Now: clock.Now, Owned: owned, Auditor: trail}
 	if configure != nil {
 		configure(&config)
 	}
@@ -90,6 +94,7 @@ func startIdentity(t *testing.T, owned identity.OwnedObjects, configure func(*id
 		Service:      service,
 		API:          identity.NewAPI(service),
 		Clock:        clock,
+		Trail:        trail,
 		DatabasePath: databasePath,
 	}
 }
