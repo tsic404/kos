@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -17,13 +18,18 @@ import (
 	"github.com/tsic404/kos/pkg/write"
 )
 
+// storageClassResource is the cluster's storage class kind: a provider declares
+// classes by name, and the class object reports the backend that supplies them
+// (C-47).
+var storageClassResource = schema.GroupVersionResource{Group: "storage.k8s.io", Version: "v1", Resource: "storageclasses"}
+
 // dependents lists every object C-48 makes a deletion edge from: an endpoint
 // that names the provider as its certificate issuer or authentication
 // provider, a claim carrying a storage class the provider declares (C-46,
-// C-38), and an application definition that requires a capability the provider
-// still serves together with the applications installed from it (C-48). An
-// endpoint whose issuer is resolved into its status rather than declared adds
-// an edge this list cannot see yet; it belongs here once the resolution exists.
+// C-38), a volume whose resolved backend is one the provider supplies through
+// its declared storage classes, and an application definition that requires a
+// capability the provider still serves together with the applications installed
+// from it (C-48).
 func (r *Reconciler) dependents(ctx context.Context, provider string, spec v1beta1.ProviderSpec, previous v1beta1.ProviderStatus) ([]v1beta1.ObjectRef, error) {
 	endpoints, err := listObjects(ctx, r.writer, api.Group, "Endpoint")
 	if err != nil {
@@ -31,9 +37,21 @@ func (r *Reconciler) dependents(ctx context.Context, provider string, spec v1bet
 	}
 	var dependents []v1beta1.ObjectRef
 	for _, endpoint := range endpoints {
+		_, tlsDeclared, err := unstructured.NestedMap(endpoint.Object, "spec", "tls")
+		if err != nil {
+			return nil, fmt.Errorf("read endpoint %s/%s: %w", endpoint.GetNamespace(), endpoint.GetName(), err)
+		}
 		issuer, _, err := unstructured.NestedString(endpoint.Object, "spec", "tls", "issuerRef")
 		if err != nil {
 			return nil, fmt.Errorf("read endpoint %s/%s: %w", endpoint.GetNamespace(), endpoint.GetName(), err)
+		}
+		// The spec reference wins; an endpoint that omits it serves the issuer
+		// its status resolved (C-46). A status left behind by a certificate the
+		// endpoint no longer declares is not an edge.
+		if issuer == "" && tlsDeclared {
+			if issuer, _, err = unstructured.NestedString(endpoint.Object, "status", "certificate", "issuer"); err != nil {
+				return nil, fmt.Errorf("read endpoint %s/%s: %w", endpoint.GetNamespace(), endpoint.GetName(), err)
+			}
 		}
 		auth, _, err := unstructured.NestedString(endpoint.Object, "spec", "auth", "providerRef")
 		if err != nil {
@@ -41,6 +59,31 @@ func (r *Reconciler) dependents(ctx context.Context, provider string, spec v1bet
 		}
 		if issuer == provider || auth == provider {
 			dependents = append(dependents, refOf("Endpoint", endpoint.GetNamespace(), endpoint.GetName()))
+		}
+	}
+	// The volume edge reads what C-38 resolved into the volume's status: the
+	// backend its binding landed on. A provider supplies a backend through the
+	// storage classes it declares, and each class object reports that backend;
+	// a volume bound through another class on the same backend is a dependent
+	// too. The class-name edge below stays separate, and a volume both edges
+	// match is still listed once (C-38, C-47, C-48).
+	backends, err := r.backends(ctx, spec.StorageClasses)
+	if err != nil {
+		return nil, err
+	}
+	if len(backends) > 0 {
+		volumes, err := listObjects(ctx, r.writer, api.Group, "Volume")
+		if err != nil {
+			return nil, err
+		}
+		for _, volume := range volumes {
+			backend, _, err := unstructured.NestedString(volume.Object, "status", "provider", "name")
+			if err != nil {
+				return nil, fmt.Errorf("read volume %s/%s: %w", volume.GetNamespace(), volume.GetName(), err)
+			}
+			if backends[backend] {
+				dependents = append(dependents, refOf("Volume", volume.GetNamespace(), volume.GetName()))
+			}
 		}
 	}
 	if len(spec.StorageClasses) > 0 {
@@ -75,6 +118,32 @@ func (r *Reconciler) dependents(ctx context.Context, provider string, spec v1bet
 	return sortRefs(dependents), nil
 }
 
+// backends returns the storage backends the provider's declared storage classes
+// supply: each class object reports the provisioner a bound volume records as
+// its resolved provider (C-38, C-47). A declared class the cluster does not
+// serve contributes nothing; claims naming it are still dependents through the
+// class-name edge.
+func (r *Reconciler) backends(ctx context.Context, classes []string) (map[string]bool, error) {
+	backends := make(map[string]bool, len(classes))
+	for _, class := range classes {
+		object, err := r.writer.Dynamic.Resource(storageClassResource).Get(ctx, class, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read storage class %s: %w", class, err)
+		}
+		provisioner, _, err := unstructured.NestedString(object.Object, "provisioner")
+		if err != nil {
+			return nil, fmt.Errorf("read storage class %s: %w", class, err)
+		}
+		if provisioner != "" {
+			backends[provisioner] = true
+		}
+	}
+	return backends, nil
+}
+
 // inService returns the capabilities a provider actually serves: the effective
 // set its status records. A provider whose status was never written has no
 // record, so its declaration is the only set a deletion edge can read. The test
@@ -89,9 +158,7 @@ func inService(spec v1beta1.ProviderSpec, previous v1beta1.ProviderStatus) []v1b
 
 // claimDependent renders a claim one of the provider's classes backs as the
 // volume C-38 binds it to; a claim without a volume object is itself the
-// dependent. A volume whose status names the provider that resolved it adds an
-// edge this name match cannot express; it belongs here once the status carries
-// it.
+// dependent.
 func (r *Reconciler) claimDependent(ctx context.Context, claim *unstructured.Unstructured) v1beta1.ObjectRef {
 	volume, err := r.writer.Get(ctx, write.Ref{
 		Group:     api.Group,
