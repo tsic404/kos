@@ -362,9 +362,9 @@ type recordingAuthorizer struct {
 }
 
 // Decide implements Authorizer.
-func (r *recordingAuthorizer) Decide(_ context.Context, request Request) error {
+func (r *recordingAuthorizer) Decide(_ context.Context, request Request) (Grant, error) {
 	r.refs = append(r.refs, request.Ref)
-	return nil
+	return Grant{}, nil
 }
 
 // allowed reports whether the authorizer saw a read of exactly ref.

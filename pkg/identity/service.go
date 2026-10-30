@@ -154,7 +154,8 @@ type Config struct {
 	// Preferences resolves the preference keys active extensions declare
 	// (C-27); nil serves no preference domain.
 	Preferences PreferenceSchemas
-	// Auditor records every preference write (C-14); nil records nothing.
+	// Auditor records every account and preference write (C-14); nil records
+	// nothing.
 	Auditor controlplane.Auditor
 }
 

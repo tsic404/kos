@@ -24,6 +24,32 @@ type Registry struct {
 	// preferenceKeys maps an extension identifier to the keys it declared
 	// (C-27).
 	preferenceKeys map[string][]string
+	declaredBy     map[GroupKind]string
+	writers        map[GroupKind][]write.Role
+}
+
+// DeclaredBy names the extension that declares one served class (C-14). It is
+// the identifier an audit record carries when the class is written.
+func (r *Registry) DeclaredBy(group, kind string) (string, bool) {
+	if r == nil {
+		return "", false
+	}
+	identifier, ok := r.declaredBy[GroupKind{Group: group, Kind: kind}]
+	return identifier, ok
+}
+
+// ObjectWriters returns the session roles an extension declared for writing its
+// object class (C-18, C-59). ok is false when no permission entry names the
+// class, and the class is then the global Owner's alone.
+func (r *Registry) ObjectWriters(group, kind string) ([]write.Role, bool) {
+	if r == nil {
+		return nil, false
+	}
+	writers, ok := r.writers[GroupKind{Group: group, Kind: kind}]
+	if !ok {
+		return nil, false
+	}
+	return append([]write.Role(nil), writers...), true
 }
 
 // ObjectClass resolves one served extension class (C-19).
@@ -203,6 +229,8 @@ func buildRegistry(components []activated) (*Registry, map[string]Contributions,
 	registry := &Registry{
 		classes:        map[GroupKind]ObjectClass{},
 		preferenceKeys: map[string][]string{},
+		declaredBy:     map[GroupKind]string{},
+		writers:        map[GroupKind][]write.Role{},
 	}
 	conflicts := map[string][]ClassProblem{}
 	effective := make(map[string]Contributions, len(components))
@@ -220,8 +248,24 @@ func buildRegistry(components []activated) (*Registry, map[string]Contributions,
 			}
 			serving[key] = component.name
 			registry.classes[key] = class
+			registry.declaredBy[key] = component.loaded.Identifier
 			registry.objectOrder = append(registry.objectOrder, key)
 			kept = append(kept, class)
+		}
+		// A permission entry names the contribution it governs: the class kind,
+		// or the group-qualified form. Only classes this component actually
+		// serves take its writer list (C-18, C-59).
+		for _, permission := range component.loaded.Permissions {
+			if len(permission.ObjectWriters) == 0 {
+				continue
+			}
+			for _, class := range kept {
+				key := class.GroupKind()
+				if class.Kind != permission.Contribution && key.String() != permission.Contribution {
+					continue
+				}
+				registry.writers[key] = append([]write.Role(nil), permission.ObjectWriters...)
+			}
 		}
 		entry.ObjectClasses = kept
 		effective[component.name] = entry

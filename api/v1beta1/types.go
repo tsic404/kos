@@ -1047,6 +1047,12 @@ type BackupPolicySpec struct {
 	// and only the global Owner may transfer it (C-60).
 	// +optional
 	Owner string `json:"owner,omitempty"`
+	// Selector decides which applications and volumes the policy covers; it is
+	// a label selector in the syntax kubectl accepts (C-41). The selector only
+	// decides the backup range: the policy's owner stays its creator, and a
+	// member may not reach another account's objects with it (C-60).
+	// +optional
+	Selector string `json:"selector,omitempty"`
 }
 
 // BackupPolicyList is the list form of BackupPolicy.

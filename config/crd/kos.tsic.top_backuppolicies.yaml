@@ -44,6 +44,13 @@ spec:
                   Owner is the local username of the creating session; the API writes it
                   and only the global Owner may transfer it (C-60).
                 type: string
+              selector:
+                description: |-
+                  Selector decides which applications and volumes the policy covers; it is
+                  a label selector in the syntax kubectl accepts (C-41). The selector only
+                  decides the backup range: the policy's owner stays its creator, and a
+                  member may not reach another account's objects with it (C-60).
+                type: string
             type: object
           status:
             description: Status is written by the backup reconciler (C-03, C-07).
@@ -159,6 +166,13 @@ spec:
                 description: |-
                   Owner is the local username of the creating session; the API writes it
                   and only the global Owner may transfer it (C-60).
+                type: string
+              selector:
+                description: |-
+                  Selector decides which applications and volumes the policy covers; it is
+                  a label selector in the syntax kubectl accepts (C-41). The selector only
+                  decides the backup range: the policy's owner stays its creator, and a
+                  member may not reach another account's objects with it (C-60).
                 type: string
             type: object
           status:

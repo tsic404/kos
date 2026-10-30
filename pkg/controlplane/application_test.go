@@ -122,7 +122,7 @@ func sensitiveServer() *Server {
 // sensitive value never comes back through Plan.Update[].Changes.
 func TestPlanMasksSensitiveConfigDiff(t *testing.T) {
 	server := sensitiveServer()
-	plan, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+	plan, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 		Objects: []map[string]any{{
 			"apiVersion": api.Group + "/v1beta1",
 			"kind":       "Application",
@@ -299,7 +299,7 @@ func TestGetMasksTheWholeConfigWhenTheDefinitionIsGone(t *testing.T) {
 func TestPlanMasksEveryConfigDiffWhenTheDefinitionIsGone(t *testing.T) {
 	server := planServer(storedApplication())
 	server.dynamic = &writeRecorder{}
-	plan, _, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+	plan, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 		Objects: []map[string]any{{
 			"apiVersion": api.Group + "/v1beta1",
 			"kind":       "Application",
@@ -535,7 +535,7 @@ func TestPlanStampsAttributionOnlyForCreatedObjects(t *testing.T) {
 		object("SystemComponent", "", "managed", map[string]any{markers.ManagedBy: write.ManagedByValue}, nil),
 		object("SystemComponent", "", "plain", nil, nil),
 	)
-	plan, desired, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+	plan, desired, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 		Objects: []map[string]any{
 			object("SystemComponent", "", "managed", nil, nil),
 			object("SystemComponent", "", "plain", map[string]any{"example.test/tier": "web"}, nil),
@@ -588,7 +588,7 @@ func TestPlanKeepsStoredAttribution(t *testing.T) {
 			map[string]any{markers.AdoptedBy: "alice", markers.AdoptionReason: "confirmed"},
 			map[string]any{markers.AdoptedAt: adoptedAt}),
 	)
-	plan, desired, failure := server.buildPlan(context.Background(), VerbPlan, SetRequest{
+	plan, desired, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 		Objects: []map[string]any{
 			object("SystemComponent", "", "adopted", map[string]any{"example.test/tier": "web"}, nil),
 			object("SystemComponent", "", "declined", map[string]any{"example.test/tier": "web"}, nil),
@@ -630,7 +630,7 @@ func TestPlanKeepsStoredAttribution(t *testing.T) {
 		}
 	}
 
-	_, _, failure = server.buildPlan(context.Background(), VerbPlan, SetRequest{
+	_, _, _, failure = server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
 		Objects: []map[string]any{
 			object("SystemComponent", "", "adopted", map[string]any{markers.AdoptedBy: "bob"}, nil),
 		},

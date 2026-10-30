@@ -174,13 +174,13 @@ func TestLoginSessionAndFirstPassword(t *testing.T) {
 		t.Fatalf("alice role on the next request = %q, want Guest", session.Role)
 	}
 	ctx := withSession(context.Background(), session)
-	if err := (Authorizer{}).Decide(ctx, controlplane.Request{Verb: controlplane.VerbRead}); err != nil {
+	if _, err := (Authorizer{}).Decide(ctx, controlplane.Request{Verb: controlplane.VerbRead}); err != nil {
 		t.Fatalf("a Guest read = %v", err)
 	}
-	if err := (Authorizer{}).Decide(ctx, controlplane.Request{Verb: controlplane.VerbCreate}); !errors.Is(err, ErrPermissionDenied) {
+	if _, err := (Authorizer{}).Decide(ctx, controlplane.Request{Verb: controlplane.VerbCreate}); !errors.Is(err, ErrPermissionDenied) {
 		t.Fatalf("a Guest write = %v, want a refusal", err)
 	}
-	if err := (Authorizer{}).Decide(context.Background(), controlplane.Request{Verb: controlplane.VerbRead}); !errors.Is(err, ErrUnauthenticated) {
+	if _, err := (Authorizer{}).Decide(context.Background(), controlplane.Request{Verb: controlplane.VerbRead}); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("a read without a session = %v, want unauthenticated", err)
 	}
 }

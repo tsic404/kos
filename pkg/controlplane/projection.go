@@ -149,7 +149,7 @@ func (s *Server) attachVolumeBindings(ctx context.Context, page []Projection) *E
 	indexes := make(map[string]map[string]map[string]any, len(namespaces))
 	for namespace := range namespaces {
 		ref := ObjectRef{Group: volumeType.Group, Kind: volumeType.Kind, Namespace: namespace}
-		if failure := s.authorize(ctx, VerbRead, ref); failure != nil {
+		if _, failure := s.authorize(ctx, VerbRead, ref, nil, nil); failure != nil {
 			return failure
 		}
 		observed, err := s.source.List(ctx, volumeType, namespace)

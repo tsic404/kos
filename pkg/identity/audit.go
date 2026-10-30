@@ -28,7 +28,8 @@ type AuditTrail struct {
 	Store *Store
 }
 
-// Record implements controlplane.Auditor.
+// Record implements controlplane.Auditor. Kernel and extension writes share one
+// stream; a record names the extension when one wrote the object.
 func (t AuditTrail) Record(ctx context.Context, record controlplane.AuditRecord) error {
 	if t.Store == nil {
 		return errors.New("identity: an audit trail needs a store")
@@ -39,9 +40,16 @@ func (t AuditTrail) Record(ctx context.Context, record controlplane.AuditRecord)
 		Verb:       record.Verb,
 		Result:     record.Result,
 		Source:     record.Source,
+		Extension:  record.Extension,
 		OccurredAt: record.OccurredAt,
 	})
 }
+
+// Audit vocabulary of an account write (C-14).
+const (
+	// accountKind names an account in the audit trail.
+	accountKind = "Account"
+)
 
 // Audit vocabulary of a preference write (C-14).
 const (
@@ -63,6 +71,29 @@ func validatePreferenceTarget(identifier, key string) error {
 		return invalid("偏好键无效或超过 " + strconv.Itoa(controlplane.MaxRecordNameLength) + " 字节")
 	}
 	return nil
+}
+
+// validateAccountTarget refuses a name the audit record cannot carry before the
+// write is attempted, so a record's object always reads as exactly one account.
+func validateAccountTarget(name string) error {
+	if !controlplane.RecordableName(name) {
+		return invalid("账号名无效或超过 " + strconv.Itoa(controlplane.MaxRecordNameLength) + " 字节")
+	}
+	return nil
+}
+
+// RecordAudit appends one account write to the audit trail (C-14). The record
+// names the account the write touched; the write has already happened, so a
+// record that cannot be stored is logged instead of failing the request.
+func (s *Service) RecordAudit(ctx context.Context, actor, username, verb, result string) {
+	controlplane.RecordAudit(ctx, s.auditor, s.log, controlplane.AuditRecord{
+		Actor:      actor,
+		Object:     controlplane.ObjectRef{Group: api.Group, Kind: accountKind, Name: username},
+		Verb:       verb,
+		Result:     result,
+		Source:     controlplane.SourceAPI,
+		OccurredAt: s.now().UTC(),
+	})
 }
 
 // recordPreference appends the audit record of one preference write attempt

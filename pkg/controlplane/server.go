@@ -40,23 +40,49 @@ const (
 
 // Request is what the authorization seam judges.
 type Request struct {
+	// Verb is what the request does.
 	Verb Verb
-	Ref  ObjectRef
+	// Ref identifies the object, or the class for a collection read.
+	Ref ObjectRef
+	// Object is the desired state a write or a plan submits; nil for a read and
+	// for a delete.
+	Object map[string]any
+	// Current is the stored object when the caller holds it; nil when it does
+	// not exist or was not read.
+	Current map[string]any
 }
+
+// Grant is what a permitted request may do beyond running (C-59, C-60).
+type Grant struct {
+	// Actor is the local username behind the request; empty when the surface
+	// carries no account identity.
+	Actor string
+	// Owner is the value spec.owner must carry after the write (C-60). Empty
+	// leaves the submitted value alone.
+	Owner string
+	// Extension names the extension declaring the object's class; empty for a
+	// kernel object (C-14).
+	Extension string
+}
+
+// ErrHidden tells the read path that a session may not see an object (C-59):
+// a list drops it and a single read answers as if it were absent.
+var ErrHidden = errors.New("controlplane: object is hidden from this session")
 
 // Authorizer decides whether a request may run. C-59 owns the rule and this API
 // only carries its outcome, so a kernel write and an extension page action get
-// the same answer.
+// the same answer. A refusal still carries the actor when the seam resolved one,
+// so the audit stream records who was refused (C-14).
 type Authorizer interface {
-	Decide(ctx context.Context, request Request) error
+	Decide(ctx context.Context, request Request) (Grant, error)
 }
 
-// AllowAll authorizes every request; it is the default until role evaluation
-// arrives (C-59).
+// AllowAll authorizes every request and names no actor; it is the default for a
+// surface without accounts.
 type AllowAll struct{}
 
 // Decide implements Authorizer.
-func (AllowAll) Decide(context.Context, Request) error { return nil }
+func (AllowAll) Decide(context.Context, Request) (Grant, error) { return Grant{}, nil }
 
 // maxBodyBytes bounds one request body so a large manifest cannot exhaust the
 // control plane.
@@ -254,7 +280,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure)
 		return
 	}
-	if failure := s.authorize(r.Context(), VerbRead, ref); failure != nil {
+	if _, failure := s.authorize(r.Context(), VerbRead, ref, nil, nil); failure != nil {
 		writeError(w, failure)
 		return
 	}
@@ -280,6 +306,14 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		if failure != nil {
 			writeError(w, failure)
 			return
+		}
+		visible, failure := s.visible(r.Context(), refOf(masked, objectType), masked)
+		if failure != nil {
+			writeError(w, failure)
+			return
+		}
+		if !visible {
+			continue
 		}
 		projection := newProjection(refOf(masked, objectType), masked, item.ObservedAt, now)
 		projection.Sources = s.discoverySources(projection.Ref)
@@ -320,10 +354,6 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ref := ObjectRef{Group: objectType.Group, Kind: objectType.Kind, Namespace: namespace, Name: name}
-	if failure := s.authorize(r.Context(), VerbRead, ref); failure != nil {
-		writeError(w, failure)
-		return
-	}
 	observed, err := s.source.Get(r.Context(), objectType, namespace, name)
 	if err != nil {
 		writeError(w, s.readFailure(err, ref))
@@ -332,6 +362,12 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	object := s.projectedObject(objectType, observed.Object)
 	masked, failure := s.maskSensitive(r.Context(), objectType.Kind, object)
 	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	// The stored object is what C-59's visibility predicate reads, so the
+	// decision follows the read.
+	if _, failure := s.authorize(r.Context(), VerbRead, ref, masked, nil); failure != nil {
 		writeError(w, failure)
 		return
 	}
@@ -368,7 +404,15 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure)
 		return
 	}
-	if failure := s.authorize(r.Context(), VerbCreate, object.Ref); failure != nil {
+	grant, failure := s.authorize(r.Context(), VerbCreate, object.Ref, object.Object.Object, nil)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	actor := s.actorOfGrant(r.Context(), grant)
+	// The API is the writer of spec.owner: the seam returns the value the
+	// session may create under (C-60), and a submitted value never stands.
+	if failure := applyOwner(object.Object, grant); failure != nil {
 		writeError(w, failure)
 		return
 	}
@@ -376,11 +420,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if failure := s.validateApplicationWrite(ctx, object.Object); failure != nil {
-		writeError(w, failure)
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "create", failure))
 		return
 	}
 	if failure := s.materializeApplicationResources(ctx, object.Object); failure != nil {
-		writeError(w, failure)
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "create", failure))
 		return
 	}
 	current, err := s.source.Get(ctx, object.Type, object.Ref.Namespace, object.Ref.Name)
@@ -391,19 +435,20 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		// object already carries (C-02, C-12).
 		existing, failure := withStoredAttribution(object, current.Object)
 		if failure != nil {
-			writeError(w, failure)
+			writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "create", failure))
 			return
 		}
 		if len(changes(current.Object, existing.Object.Object)) > 0 {
-			writeError(w, (&Error{
+			writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "create", (&Error{
 				Code:               CodeObjectExists,
 				Message:            "对象 " + object.Ref.String() + " 已存在且期望状态不同",
 				Stage:              StageValidate,
 				RequiresUserAction: true,
 				SideEffects:        SideEffectsNone,
-			}).about(object.Ref))
+			}).about(object.Ref)))
 			return
 		}
+		s.audit(ctx, actor, grant.Extension, object.Ref, "create", ResultAccepted)
 		writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Ref: new(object.Ref), Idempotent: true})
 		return
 	case !apierrors.IsNotFound(err):
@@ -415,9 +460,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// attribution marker is written; an existing object keeps its own (C-02).
 	object = withCreationAttribution(object)
 	if failure := s.create(ctx, object); failure != nil {
-		writeError(w, failure)
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "create", failure))
 		return
 	}
+	s.audit(ctx, actor, grant.Extension, object.Ref, "create", ResultAccepted)
 	writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Ref: new(object.Ref)})
 }
 
@@ -455,17 +501,9 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure)
 		return
 	}
-	if failure := s.authorize(r.Context(), VerbUpdate, object.Ref); failure != nil {
-		writeError(w, failure)
-		return
-	}
 	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
 	defer cancel()
 
-	if failure := s.validateApplicationWrite(ctx, object.Object); failure != nil {
-		writeError(w, failure)
-		return
-	}
 	current, err := s.source.Get(ctx, object.Type, namespace, name)
 	if err != nil {
 		writeError(w, s.readFailure(err, object.Ref))
@@ -475,18 +513,35 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure)
 		return
 	}
-	if failure := validateEndpointUpdate(current.Object, object); failure != nil {
+	// Ownership is a fact of the stored object, so the decision follows the
+	// read (C-59, C-60).
+	grant, failure := s.authorize(r.Context(), VerbUpdate, object.Ref, object.Object.Object, current.Object)
+	if failure != nil {
 		writeError(w, failure)
+		return
+	}
+	actor := s.actorOfGrant(r.Context(), grant)
+	if failure := applyOwner(object.Object, grant); failure != nil {
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "update", failure))
+		return
+	}
+	if failure := s.validateApplicationWrite(ctx, object.Object); failure != nil {
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "update", failure))
+		return
+	}
+	if failure := validateEndpointUpdate(current.Object, object); failure != nil {
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "update", failure))
 		return
 	}
 	// An update never changes attribution: the markers the creator or the user
 	// wrote stay, and an unmanaged object does not gain one (C-02).
 	object, failure = withStoredAttribution(object, current.Object)
 	if failure != nil {
-		writeError(w, failure)
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "update", failure))
 		return
 	}
 	if len(changes(current.Object, object.Object.Object)) == 0 {
+		s.audit(ctx, actor, grant.Extension, object.Ref, "update", ResultAccepted)
 		writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Ref: new(object.Ref), Idempotent: true})
 		return
 	}
@@ -495,19 +550,22 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		precondition = nestedText(raw, "metadata", "resourceVersion")
 	}
 	if precondition == "" {
-		writeError(w, invalidField("更新必须带 metadata.resourceVersion 或 If-Match").about(object.Ref))
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "update",
+			invalidField("更新必须带 metadata.resourceVersion 或 If-Match").about(object.Ref)))
 		return
 	}
 	if precondition != nestedText(current.Object, "metadata", "resourceVersion") {
-		writeError(w, s.conflictWith(ctx, object.Type, object.Ref,
-			"对象 "+object.Ref.String()+" 已被其他写入修改，请重新读取后再提交", current.Object))
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "update",
+			s.conflictWith(ctx, object.Type, object.Ref,
+				"对象 "+object.Ref.String()+" 已被其他写入修改，请重新读取后再提交", current.Object)))
 		return
 	}
 
 	if failure := s.update(ctx, object, precondition); failure != nil {
-		writeError(w, failure)
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "update", failure))
 		return
 	}
+	s.audit(ctx, actor, grant.Extension, object.Ref, "update", ResultAccepted)
 	writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Ref: new(object.Ref)})
 }
 
@@ -526,35 +584,46 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ref := ObjectRef{Group: objectType.Group, Kind: objectType.Kind, Namespace: namespace, Name: name}
-	if failure := s.authorize(r.Context(), VerbDelete, ref); failure != nil {
-		writeError(w, failure)
-		return
-	}
 	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
 	defer cancel()
 	current, err := s.source.Get(ctx, objectType, namespace, name)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Ref: new(ref), Idempotent: true})
-			return
-		}
+	var stored map[string]any
+	if err == nil {
+		stored = current.Object
+	} else if !apierrors.IsNotFound(err) {
 		writeError(w, s.readFailure(err, ref))
+		return
+	}
+	// What may be deleted is a fact of the stored object; a name that is
+	// already gone is still judged by role so a Guest is refused (C-59, C-60).
+	grant, failure := s.authorize(r.Context(), VerbDelete, ref, nil, stored)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	actor := s.actorOfGrant(r.Context(), grant)
+	if err != nil {
+		s.audit(ctx, actor, grant.Extension, ref, "delete", ResultAccepted)
+		writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Ref: new(ref), Idempotent: true})
 		return
 	}
 	precondition := r.Header.Get("If-Match")
 	if precondition == "" {
-		writeError(w, invalidField("删除必须带 If-Match 的 resourceVersion").about(ref))
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, ref, "delete",
+			invalidField("删除必须带 If-Match 的 resourceVersion").about(ref)))
 		return
 	}
 	if precondition != nestedText(current.Object, "metadata", "resourceVersion") {
-		writeError(w, s.conflictWith(ctx, objectType, ref,
-			"对象 "+ref.String()+" 已被其他写入修改，请重新读取后再删除", current.Object))
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, ref, "delete",
+			s.conflictWith(ctx, objectType, ref,
+				"对象 "+ref.String()+" 已被其他写入修改，请重新读取后再删除", current.Object)))
 		return
 	}
 	if failure := s.delete(ctx, objectType, ref, precondition); failure != nil {
-		writeError(w, failure)
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, ref, "delete", failure))
 		return
 	}
+	s.audit(ctx, actor, grant.Extension, ref, "delete", ResultAccepted)
 	writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Ref: new(ref)})
 }
 
@@ -566,7 +635,7 @@ func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure)
 		return
 	}
-	plan, _, failure := s.buildPlan(r.Context(), VerbPlan, request)
+	plan, _, _, failure := s.buildPlan(r.Context(), r.Context(), VerbPlan, request)
 	if failure != nil {
 		writeError(w, failure)
 		return
@@ -583,8 +652,11 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure)
 		return
 	}
+	// The seam reads the session from the request's own context, while the plan's
+	// reads run on the operation context so a client that disconnects before the
+	// answer is accepted cannot stop the work (C-12, C-59).
 	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
-	plan, desired, failure := s.buildPlan(ctx, VerbApply, request)
+	plan, desired, grants, failure := s.buildPlan(ctx, r.Context(), VerbApply, request)
 	if failure != nil {
 		cancel()
 		writeError(w, failure)
@@ -592,7 +664,7 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	}
 	go func() {
 		defer cancel()
-		s.execute(ctx, plan, desired)
+		s.execute(ctx, plan, desired, grants)
 	}()
 	writeJSON(w, http.StatusAccepted, writeResponse{Accepted: true, Plan: plan})
 }
@@ -691,19 +763,59 @@ func (s *Server) awaitObject(ctx context.Context, object ObjectType, ref ObjectR
 	return ObservedObject{}, last
 }
 
-// authorize asks the seam and renders a refusal as the contract's stable code.
-func (s *Server) authorize(ctx context.Context, verb Verb, ref ObjectRef) *Error {
-	if err := s.authorizer.Decide(ctx, Request{Verb: verb, Ref: ref}); err != nil {
-		s.log.Info("request refused", "verb", string(verb), "object", ref.String(), "reason", err)
-		return (&Error{
+// decide asks the seam for one request and renders a refusal as the contract's
+// stable code (C-12). It records nothing, so a plan can judge the deletions it
+// proposes without writing a row (C-62); an object a session may not see is
+// answered as absent (C-59).
+func (s *Server) decide(ctx context.Context, verb Verb, ref ObjectRef, object, current map[string]any) (Grant, *Error) {
+	grant, err := s.authorizer.Decide(ctx, Request{Verb: verb, Ref: ref, Object: object, Current: current})
+	if err == nil {
+		return grant, nil
+	}
+	if errors.Is(err, ErrHidden) {
+		return grant, notFound("对象 " + ref.String() + " 不存在").about(ref)
+	}
+	s.log.Info("request refused", "verb", string(verb), "object", ref.String(), "reason", err)
+	return grant, (&Error{
+		Code:               CodePermissionDenied,
+		Message:            "当前身份不能对 " + ref.String() + " 执行 " + string(verb),
+		Stage:              StageAuthorize,
+		RequiresUserAction: true,
+		SideEffects:        SideEffectsNone,
+	}).about(ref)
+}
+
+// authorize judges one request of a write surface: a refused write leaves a
+// record so the attempt is visible (C-14). A read records nothing, and a plan
+// records nothing because it changes no row (C-62).
+func (s *Server) authorize(ctx context.Context, verb Verb, ref ObjectRef, object, current map[string]any) (Grant, *Error) {
+	grant, failure := s.decide(ctx, verb, ref, object, current)
+	if failure != nil && verb != VerbRead && verb != VerbPlan {
+		s.audit(ctx, s.actorOfGrant(ctx, grant), grant.Extension, ref, string(verb), ResultRejected)
+	}
+	return grant, failure
+}
+
+// visible reports whether a session may see one object of a read (C-59). Only
+// the hidden answer filters an object out; every other refusal fails the
+// request, because it names a session that may not read the class at all.
+func (s *Server) visible(ctx context.Context, ref ObjectRef, object map[string]any) (bool, *Error) {
+	_, err := s.authorizer.Decide(ctx, Request{Verb: VerbRead, Ref: ref, Object: object})
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrHidden):
+		return false, nil
+	default:
+		s.log.Info("read refused", "object", ref.String(), "reason", err)
+		return false, (&Error{
 			Code:               CodePermissionDenied,
-			Message:            "当前身份不能对 " + ref.String() + " 执行 " + string(verb),
+			Message:            "当前身份不能读取 " + ref.String(),
 			Stage:              StageAuthorize,
 			RequiresUserAction: true,
 			SideEffects:        SideEffectsNone,
 		}).about(ref)
 	}
-	return nil
 }
 
 // readFailure turns a source error into the failure envelope. The cluster's own

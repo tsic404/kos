@@ -87,13 +87,6 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ref := kernelRef("Application", request.Namespace, request.Name)
-	if failure := s.authorize(r.Context(), VerbUpdate, ref); failure != nil {
-		writeError(w, failure)
-		return
-	}
-	// The write outlives the client (C-12), but the actor belongs to the request:
-	// resolve it before the detached context drops the session values (C-14).
-	actor := s.actorOf(r.Context())
 	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
 	defer cancel()
 
@@ -102,39 +95,45 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, s.readFailure(err, ref))
 		return
 	}
+	// An action is a write to the application's lifecycle, so the ownership
+	// rules of C-59 judge it against the stored object (retry and orphan are
+	// its owner's, or the global Owner's).
+	grant, failure := s.authorize(r.Context(), VerbUpdate, ref, nil, stored.Object)
+	if failure != nil {
+		writeError(w, failure)
+		return
+	}
+	actor := s.actorOfGrant(r.Context(), grant)
 	application := &v1beta1.Application{}
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(stored.Object, application); err != nil {
-		writeError(w, internal(StageRead, "读取应用状态失败").about(ref))
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, ref, request.Action, internal(StageRead, "读取应用状态失败").about(ref)))
 		return
 	}
 	if application.DeletionTimestamp != nil && request.Action != app.ActionOrphan {
-		writeError(w, invalidField("应用正在卸载，不接受动作 "+request.Action).about(ref))
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, ref, request.Action,
+			invalidField("应用正在卸载，不接受动作 "+request.Action).about(ref)))
 		return
 	}
 	if failure := acceptAction(request, application); failure != nil {
-		writeError(w, failure)
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, ref, request.Action, failure))
 		return
 	}
 	if recordAction(request.Action) {
 		record, created, failure := s.writeActionRecord(ctx, request.Action, application, request.TargetDigest)
 		if failure != nil {
-			writeError(w, failure)
+			writeError(w, s.auditFailure(ctx, actor, grant.Extension, ref, request.Action, failure))
 			return
 		}
-		if created {
-			s.audit(ctx, actor, request.Action, ref)
-		}
+		s.audit(ctx, actor, grant.Extension, ref, request.Action, ResultAccepted)
 		writeJSON(w, http.StatusAccepted, actionResponse{Accepted: true, Ref: new(refOfObject(record)), Idempotent: !created})
 		return
 	}
 	updated, changed, failure := s.writeApplicationAction(ctx, applicationType, request, stored.Object)
 	if failure != nil {
-		writeError(w, failure)
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, ref, request.Action, failure))
 		return
 	}
-	if changed {
-		s.audit(ctx, actor, request.Action, ref)
-	}
+	s.audit(ctx, actor, grant.Extension, ref, request.Action, ResultAccepted)
 	response := actionResponse{Accepted: true, Ref: new(ref), Idempotent: !changed}
 	if updated != nil {
 		response.Ref = new(refOfObject(updated))
