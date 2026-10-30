@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/tsic404/kos/pkg/controlplane"
 	"github.com/tsic404/kos/pkg/write"
 )
 
@@ -153,6 +154,8 @@ type Config struct {
 	// Preferences resolves the preference keys active extensions declare
 	// (C-27); nil serves no preference domain.
 	Preferences PreferenceSchemas
+	// Auditor records every preference write (C-14); nil records nothing.
+	Auditor controlplane.Auditor
 }
 
 // Service is the account and session layer of the control plane (C-63).
@@ -162,6 +165,7 @@ type Service struct {
 	log         *slog.Logger
 	owned       OwnedObjects
 	preferences PreferenceSchemas
+	auditor     controlplane.Auditor
 	cache       *sessionCache
 }
 
@@ -173,6 +177,7 @@ func New(store *Store, config Config) *Service {
 		log:         config.Log,
 		owned:       config.Owned,
 		preferences: config.Preferences,
+		auditor:     config.Auditor,
 		cache:       newSessionCache(),
 	}
 	if service.now == nil {
@@ -588,8 +593,21 @@ func (s *Service) Preferences(ctx context.Context, session Session, identifier s
 
 // SetPreference stores one preference of the signed-in account. A key the
 // extension did not declare is refused, and only a session that may write can
-// change one (C-27, C-59).
+// change one (C-27, C-59). Every attempt leaves one audit record, whether it
+// took effect or was refused (C-14); an attempt naming a domain or key the
+// record cannot hold is refused before anything is recorded.
 func (s *Service) SetPreference(ctx context.Context, session Session, identifier, key, value string) error {
+	if err := validatePreferenceTarget(identifier, key); err != nil {
+		return err
+	}
+	err := s.setPreference(ctx, session, identifier, key, value)
+	s.recordPreference(ctx, session, identifier, key, err)
+	return err
+}
+
+// setPreference carries out one preference write and reports why it was
+// refused.
+func (s *Service) setPreference(ctx context.Context, session Session, identifier, key, value string) error {
 	if session.Role == write.RoleGuest {
 		return ErrPermissionDenied
 	}

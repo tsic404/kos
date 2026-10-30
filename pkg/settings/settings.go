@@ -10,12 +10,15 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 
+	"github.com/tsic404/kos/api"
 	"github.com/tsic404/kos/pkg/controlplane"
 	"github.com/tsic404/kos/pkg/extension"
 	"github.com/tsic404/kos/pkg/identity"
@@ -28,6 +31,15 @@ const maxBodyBytes = 1 << 20
 // maxValueLength bounds one stored setting value in bytes; it keeps a single
 // request from filling the control-plane database.
 const maxValueLength = 8192
+
+// Audit vocabulary of the domain's write (C-14): every attempt names the item
+// and the verb that assigns it.
+const (
+	// settingKind names a setting item in the audit trail.
+	settingKind = "Setting"
+	// verbSet names the write that assigns a value.
+	verbSet = "set"
+)
 
 // Declarations reports the setting items active components declare (C-23).
 type Declarations interface {
@@ -47,15 +59,43 @@ type Values interface {
 	SetSettingValue(ctx context.Context, scope, target, identifier, value string) error
 }
 
+// Config carries what the settings domain needs besides its declarations and
+// values.
+type Config struct {
+	// Auditor records every write attempt (C-14); nil records nothing.
+	Auditor controlplane.Auditor
+	// Log records a trail failure the caller must not learn about; defaults to
+	// discarding it.
+	Log *slog.Logger
+	// Now supplies the clock the audit record carries; defaults to time.Now.
+	Now func() time.Time
+}
+
 // Service is the settings domain over the declarations and the value store.
 type Service struct {
 	declarations Declarations
 	values       Values
+	auditor      controlplane.Auditor
+	log          *slog.Logger
+	now          func() time.Time
 }
 
 // New builds the settings domain.
-func New(declarations Declarations, values Values) *Service {
-	return &Service{declarations: declarations, values: values}
+func New(declarations Declarations, values Values, config Config) *Service {
+	service := &Service{
+		declarations: declarations,
+		values:       values,
+		auditor:      config.Auditor,
+		log:          config.Log,
+		now:          config.Now,
+	}
+	if service.log == nil {
+		service.log = slog.New(slog.DiscardHandler)
+	}
+	if service.now == nil {
+		service.now = time.Now
+	}
+	return service
 }
 
 // Item is one setting item as the panel reads it.
@@ -121,8 +161,37 @@ func (s *Service) Items(ctx context.Context, session identity.Session, node stri
 
 // Set stores one value and returns the item as it now reads. Only the user
 // writer's editable items accept a write, so an item another subject writes
-// stays with that subject (C-23).
+// stays with that subject (C-23). Every attempt leaves one audit record,
+// whether it took effect or was refused (C-14); an attempt naming a target the
+// record cannot hold is refused before anything is recorded.
 func (s *Service) Set(ctx context.Context, session identity.Session, id, node, value string) (Item, *controlplane.Error) {
+	if failure := validateTarget(id, node); failure != nil {
+		return Item{}, failure
+	}
+	item, failure := s.assign(ctx, session, id, node, value)
+	s.record(ctx, session, id, node, failure)
+	return item, failure
+}
+
+// validateTarget refuses a setting id or node name the audit record cannot
+// hold, so a malformed request cannot grow the trail. A node is a Kubernetes
+// node name; an item id only has to be a declared identifier, so the bound
+// covers its length and format instead of imposing a name shape C-23 never
+// required.
+func validateTarget(id, node string) *controlplane.Error {
+	if !controlplane.RecordableName(id) {
+		return invalid("设置项名称无效或超过 " + strconv.Itoa(controlplane.MaxRecordNameLength) + " 字节")
+	}
+	if node != "" {
+		if problems := validation.IsDNS1123Subdomain(node); len(problems) > 0 {
+			return invalid("节点名不是合法的 DNS 子域：" + problems[0])
+		}
+	}
+	return nil
+}
+
+// assign carries out one write and reports why it was refused.
+func (s *Service) assign(ctx context.Context, session identity.Session, id, node, value string) (Item, *controlplane.Error) {
 	setting, ok := s.declarations.Setting(id)
 	if !ok {
 		return Item{}, &controlplane.Error{
@@ -155,6 +224,43 @@ func (s *Service) Set(ctx context.Context, session identity.Session, id, node, v
 		return Item{}, unavailable()
 	}
 	return itemOf(setting, value), nil
+}
+
+// record appends the audit record of one write attempt (C-14): the account that
+// asked, the item, the verb, the outcome, the surface and the time. A refused
+// attempt is recorded too, so a rejection is as visible as an accepted write.
+func (s *Service) record(ctx context.Context, session identity.Session, id, node string, failure *controlplane.Error) {
+	if s.auditor == nil {
+		return
+	}
+	record := controlplane.AuditRecord{
+		Actor:      session.Username,
+		Object:     controlplane.ObjectRef{Group: api.Group, Kind: settingKind, Namespace: s.namespaceOf(id, node), Name: id},
+		Verb:       verbSet,
+		Result:     resultOf(failure),
+		Source:     controlplane.SourceAPI,
+		OccurredAt: s.now().UTC(),
+	}
+	controlplane.RecordAudit(ctx, s.auditor, s.log, record)
+}
+
+// namespaceOf places a node-scoped item under the node it was written for; a
+// cluster or account item has no node, and an undeclared item was never bound
+// to one.
+func (s *Service) namespaceOf(id, node string) string {
+	setting, ok := s.declarations.Setting(id)
+	if !ok || setting.Scope != extension.SettingScopeNode {
+		return ""
+	}
+	return node
+}
+
+// resultOf names the outcome of one attempt.
+func resultOf(failure *controlplane.Error) string {
+	if failure != nil {
+		return controlplane.ResultRejected
+	}
+	return controlplane.ResultAccepted
 }
 
 // itemOf renders one declared item with a current value.

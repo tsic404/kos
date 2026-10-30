@@ -2,9 +2,22 @@ package controlplane
 
 import (
 	"context"
+	"log/slog"
 	"time"
+	"unicode"
 
 	"github.com/tsic404/kos/pkg/write"
+)
+
+// Results an audit record carries: a write either took effect or was refused,
+// and both outcomes are recorded (C-14).
+const (
+	// ResultAccepted marks a write the control plane carried out.
+	ResultAccepted = "accepted"
+	// ResultRejected marks a write the control plane refused.
+	ResultRejected = "rejected"
+	// SourceAPI names the control-plane API as where a write came from.
+	SourceAPI = "api"
 )
 
 // Actor names the principal behind one request (C-14). The control plane
@@ -13,7 +26,28 @@ import (
 // means the request cannot be attributed, and the process subject is recorded.
 type Actor func(ctx context.Context) string
 
-// AuditRecord is one accepted write as the audit trail keeps it (C-14): who
+// MaxRecordNameLength bounds one name an audit record carries as its object, in
+// bytes; it matches the object-name limit the control plane already serves.
+const MaxRecordNameLength = 253
+
+// RecordableName reports whether one name fits an audit record's object: it must
+// be non-empty, within MaxRecordNameLength, and carry no path separator or
+// control character, either of which would make the recorded object ambiguous.
+// A write surface refuses a target that fails this before the record is written,
+// so unbounded input never reaches the trail.
+func RecordableName(name string) bool {
+	if name == "" || len(name) > MaxRecordNameLength {
+		return false
+	}
+	for _, character := range name {
+		if unicode.IsControl(character) || character == '/' {
+			return false
+		}
+	}
+	return true
+}
+
+// AuditRecord is one write attempt as the audit trail keeps it (C-14): who
 // acted, on what, with which verb, with which result, from where, and when.
 type AuditRecord struct {
 	// Actor names the principal the write is attributed to.
@@ -23,11 +57,11 @@ type AuditRecord struct {
 	// Verb is the operation the write performed; application lifecycle actions
 	// use stop, start, restart and scale.
 	Verb string `json:"verb"`
-	// Result is the outcome, "accepted" for a write this API carried out.
+	// Result is the outcome, ResultAccepted or ResultRejected.
 	Result string `json:"result"`
 	// Source is where the request came from.
 	Source string `json:"source"`
-	// OccurredAt is when the write was accepted.
+	// OccurredAt is when the attempt happened.
 	OccurredAt time.Time `json:"occurredAt"`
 }
 
@@ -50,22 +84,33 @@ func (s *Server) actorOf(ctx context.Context) string {
 	return string(write.SubjectAPIProcess)
 }
 
-// audit records one accepted write. A failing trail is logged and does not fail
-// the request: the write already happened, and C-14 owns the remedy, not this
-// call.
+// RecordAudit appends one record to a trail. A nil trail records nothing, and a
+// nil log discards the failure report; a failing trail never fails the caller,
+// because the write the record describes has already happened and C-14 owns the
+// remedy, not this call.
+func RecordAudit(ctx context.Context, auditor Auditor, log *slog.Logger, record AuditRecord) {
+	if auditor == nil {
+		return
+	}
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	if err := auditor.Record(ctx, record); err != nil {
+		log.Error("audit record failed", "object", record.Object.String(), "verb", record.Verb, "error", err)
+	}
+}
+
+// audit records one accepted write.
 func (s *Server) audit(ctx context.Context, actor, verb string, ref ObjectRef) {
 	if s.auditor == nil {
 		return
 	}
-	record := AuditRecord{
+	RecordAudit(ctx, s.auditor, s.log, AuditRecord{
 		Actor:      actor,
 		Object:     ref,
 		Verb:       verb,
-		Result:     "accepted",
-		Source:     "api",
+		Result:     ResultAccepted,
+		Source:     SourceAPI,
 		OccurredAt: s.now().UTC(),
-	}
-	if err := s.auditor.Record(ctx, record); err != nil {
-		s.log.Error("audit record failed", "object", ref.String(), "verb", verb, "error", err)
-	}
+	})
 }

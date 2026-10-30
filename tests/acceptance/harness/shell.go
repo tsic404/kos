@@ -102,7 +102,7 @@ func (c *Cluster) StartShell(t *testing.T) *Shell {
 	}
 	t.Cleanup(server.Close)
 
-	settingsService := settings.New(registry, surface.Store)
+	settingsService := settings.New(registry, surface.Store, settings.Config{Auditor: surface.Trail})
 	catalogueService := catalogue.New(registry, c.Dynamic)
 	settingsHandler := settings.NewAPI(settingsService).Handler()
 	catalogueHandler := catalogue.NewAPI(catalogueService).Handler()
