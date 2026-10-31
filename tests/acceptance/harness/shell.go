@@ -11,7 +11,9 @@ import (
 	"github.com/tsic404/kos/pkg/controlplane"
 	"github.com/tsic404/kos/pkg/extension"
 	"github.com/tsic404/kos/pkg/identity"
+	"github.com/tsic404/kos/pkg/pages"
 	"github.com/tsic404/kos/pkg/settings"
+	"github.com/tsic404/kos/pkg/write"
 )
 
 // RegistrySource is the contribution projection every surface of the shell
@@ -46,6 +48,16 @@ func (r *RegistrySource) Settings() []extension.Setting {
 	return r.current().Settings()
 }
 
+// Pages returns the loaded pages (C-22).
+func (r *RegistrySource) Pages() []extension.Page {
+	return r.current().Pages()
+}
+
+// PageFor resolves one page a session role may see (C-22).
+func (r *RegistrySource) PageFor(id string, role write.Role) (extension.Page, bool) {
+	return r.current().PageFor(id, role)
+}
+
 // Setting resolves one setting item.
 func (r *RegistrySource) Setting(id string) (extension.Setting, bool) {
 	return r.current().Setting(id)
@@ -67,8 +79,8 @@ func (r *RegistrySource) PreferenceKeys(identifier string) ([]string, bool) {
 }
 
 // Shell is the control plane the panel talks to: the account middleware guards
-// the resource API, the settings domain and the catalogue over one database and
-// one cluster (C-12, C-23, C-24, C-27, C-63).
+// the resource API, the settings domain, the catalogue and the page shell over
+// one database and one cluster (C-12, C-22, C-23, C-24, C-27, C-63).
 type Shell struct {
 	// Cluster is the acceptance cluster.
 	Cluster *Cluster
@@ -82,11 +94,14 @@ type Shell struct {
 	Settings *settings.Service
 	// Catalogue is the catalogue domain.
 	Catalogue *catalogue.Service
+	// Pages is the page shell.
+	Pages *pages.Service
 }
 
 // StartShell serves the composed control plane over the cluster, with no
-// contributions active until a case publishes an install result.
-func (c *Cluster) StartShell(t *testing.T) *Shell {
+// contributions active until a case publishes an install result. configure may
+// wire the page shell's source readers before it starts.
+func (c *Cluster) StartShell(t *testing.T, configure ...func(*pages.Config)) *Shell {
 	t.Helper()
 	registry := &RegistrySource{}
 	surface := OpenIdentity(t, nil, func(config *identity.Config) {
@@ -104,13 +119,21 @@ func (c *Cluster) StartShell(t *testing.T) *Shell {
 
 	settingsService := settings.New(registry, surface.Store, settings.Config{Auditor: surface.Trail})
 	catalogueService := catalogue.New(registry, c.Dynamic)
+	pageConfig := pages.Config{Now: surface.Clock.Now}
+	for _, apply := range configure {
+		apply(&pageConfig)
+	}
+	pagesService := pages.New(registry, pageConfig)
 	settingsHandler := settings.NewAPI(settingsService).Handler()
 	catalogueHandler := catalogue.NewAPI(catalogueService).Handler()
+	pagesHandler := pages.NewAPI(pagesService).Handler()
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/v1/settings", settingsHandler)
 	mux.Handle("/api/v1/settings/", settingsHandler)
 	mux.Handle("/api/v1/catalogue/", catalogueHandler)
+	mux.Handle("/api/v1/pages", pagesHandler)
+	mux.Handle("/api/v1/pages/", pagesHandler)
 	mux.Handle("/", server.Handler())
 	surface.Serve(t, mux)
 
@@ -121,6 +144,7 @@ func (c *Cluster) StartShell(t *testing.T) *Shell {
 		Server:    server,
 		Settings:  settingsService,
 		Catalogue: catalogueService,
+		Pages:     pagesService,
 	}
 }
 

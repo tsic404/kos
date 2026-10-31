@@ -42,7 +42,12 @@ func declaration() extension.Declaration {
 				ID: "widget", Manages: []extension.GroupKind{{Group: widgetsGroup, Kind: "Widget"}},
 			}},
 			Capabilities: extension.CapabilityContributions{Items: []extension.Capability{{Name: "demo.widgets/panel", Version: "v1"}}},
-			Pages:        []extension.Page{{ID: "widgets", Title: "Widgets"}},
+			Pages: []extension.Page{{
+				ID: "widgets", Title: "Widgets", Location: "panel",
+				Items: []extension.PageItem{{
+					ID: "widgets", Label: "Widgets", Source: extension.PageSourceLocal, Store: "widgets", Reason: "只读展示",
+				}},
+			}},
 		},
 	}
 }

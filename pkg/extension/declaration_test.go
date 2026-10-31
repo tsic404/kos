@@ -27,8 +27,14 @@ func fullDeclaration(identifier string) Declaration {
 					Namespaces: []string{"default"},
 				},
 			}},
-			Capabilities:       CapabilityContributions{Items: []Capability{{Name: identifier + "/widgets", Version: "v1"}}},
-			Pages:              []Page{{ID: "widgets", Title: "Widgets", Actions: []Action{{ID: "create"}}}},
+			Capabilities: CapabilityContributions{Items: []Capability{{Name: identifier + "/widgets", Version: "v1"}}},
+			Pages: []Page{{
+				ID: "widgets", Title: "Widgets", Location: "panel",
+				Items: []PageItem{{
+					ID: "widgets", Label: "Widgets", Source: PageSourceLocal, Store: "widgets", Action: "create",
+				}},
+				Actions: []Action{{ID: "create", Method: "POST", Path: "/api/v1/action-requests"}},
+			}},
 			Settings:           []Setting{{ID: "widget-endpoint", Scope: SettingScopeCluster, Writer: SettingWriterUser, Editable: true}},
 			CatalogueSources:   []CatalogueSource{{ID: "widgets", Sync: "pull"}},
 			DiscoveryAdapters:  []DiscoveryAdapter{{ID: "widget-discovery", Covers: []GroupKind{{Kind: "Node"}}}},
@@ -80,7 +86,8 @@ func TestLoadFailsOneClassWithoutTakingOthersDown(t *testing.T) {
 	declaration.Contributions.Capabilities.Items = append(declaration.Contributions.Capabilities.Items,
 		Capability{Name: "unprefixed", Version: "v1"})
 	declaration.Contributions.Pages = append(declaration.Contributions.Pages,
-		Page{ID: "bad-role", Title: "Bad", RequiredRole: "admin"})
+		Page{ID: "bad-role", Title: "Bad", Location: "panel", RequiredRole: "admin",
+			Items: []PageItem{{ID: "bad", Label: "Bad", Source: PageSourceLocal, Store: "bad", Reason: "只读展示"}}})
 	declaration.Contributions.Settings = append(declaration.Contributions.Settings,
 		Setting{ID: "bad-scope", Scope: "galaxy", Writer: SettingWriterUser})
 
