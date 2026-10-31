@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
+	"path"
 	"slices"
 	"strings"
 
@@ -244,17 +247,78 @@ type SelfReport struct {
 	FailedCases []string `json:"failedCases,omitempty"`
 }
 
-// Page is a page and its actions (C-22).
+// Page is a page and its actions (C-22). A page declares where the shell shows
+// it, who may see it, the items it displays with their source types (C-53), and
+// the actions that write through the control plane. A read-only page states why
+// and carries no action.
 type Page struct {
-	ID           string   `json:"id"`
-	Title        string   `json:"title"`
-	RequiredRole string   `json:"requiredRole,omitempty"`
-	Actions      []Action `json:"actions,omitempty"`
+	ID             string     `json:"id"`
+	Title          string     `json:"title"`
+	Location       string     `json:"location"`
+	RequiredRole   string     `json:"requiredRole,omitempty"`
+	ReadOnly       bool       `json:"readOnly,omitempty"`
+	ReadOnlyReason string     `json:"readOnlyReason,omitempty"`
+	Items          []PageItem `json:"items,omitempty"`
+	Actions        []Action   `json:"actions,omitempty"`
 }
 
-// Action is one executable action of a page (C-22).
+// Source types a page item declares (C-53): the shell renders every item by the
+// type its source belongs to, and applies one freshness bound to all of them
+// (C-13).
+const (
+	// PageSourceObject reads a cluster object or its projection.
+	PageSourceObject = "object"
+	// PageSourceComputed reads a value the control plane computes from objects.
+	PageSourceComputed = "computed"
+	// PageSourceMetric reads a resource metric inside its sampling window.
+	PageSourceMetric = "metric"
+	// PageSourceProbe reads the result of a probe performed at read time.
+	PageSourceProbe = "probe"
+	// PageSourceRead reads at read time; logs belong here.
+	PageSourceRead = "read"
+	// PageSourceLocal reads browser storage; it never enters a cluster
+	// projection.
+	PageSourceLocal = "local"
+	// PageSourceDatabase reads control-plane database records.
+	PageSourceDatabase = "database"
+)
+
+// pageSources is the source vocabulary C-53 fixes.
+var pageSources = map[string]bool{
+	PageSourceObject:   true,
+	PageSourceComputed: true,
+	PageSourceMetric:   true,
+	PageSourceProbe:    true,
+	PageSourceRead:     true,
+	PageSourceLocal:    true,
+	PageSourceDatabase: true,
+}
+
+// IsPageSource reports whether source is one of C-53's seven source types.
+func IsPageSource(source string) bool { return pageSources[source] }
+
+// PageItem is one display item a page promises (C-53): its label, the source
+// type that judges it, and the input that source resolves. Object, computed,
+// metric, probe, read and database items carry a reference the control plane
+// resolves; a local item carries the browser storage key instead. Action names
+// the page action that modifies the item; a read-only page declares none.
+type PageItem struct {
+	ID        string `json:"id"`
+	Label     string `json:"label"`
+	Source    string `json:"source"`
+	Reference string `json:"reference,omitempty"`
+	Store     string `json:"store,omitempty"`
+	Action    string `json:"action,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// Action is one executable action of a page (C-22). It names the control-plane
+// API write the shell offers; the browser submits it with its own session, so
+// the shell never proxies a native resource write.
 type Action struct {
-	ID string `json:"id"`
+	ID     string `json:"id"`
+	Method string `json:"method"`
+	Path   string `json:"path"`
 }
 
 // roleRank orders the three session roles; an unknown or empty role is
@@ -700,7 +764,7 @@ func (c Contributions) loadCapabilities(identifier string) ([]Capability, []stri
 	return kept, problems
 }
 
-// loadPages validates page and action declarations (C-22).
+// loadPages validates page, item and action declarations (C-22, C-53).
 func loadPages(entries []Page) ([]Page, []string) {
 	ids := map[string]bool{}
 	kept := make([]Page, 0, len(entries))
@@ -716,21 +780,79 @@ func loadPages(entries []Page) ([]Page, []string) {
 		if strings.TrimSpace(entry.Title) == "" {
 			entryProblems = append(entryProblems, "title is required")
 		}
+		if strings.TrimSpace(entry.Location) == "" || strings.TrimSpace(entry.Location) != entry.Location {
+			entryProblems = append(entryProblems, "location is required")
+		}
 		if entry.RequiredRole != "" {
 			if _, known := roleRank[write.Role(entry.RequiredRole)]; !known {
 				entryProblems = append(entryProblems, "required role "+entry.RequiredRole+" is not a session role")
 			}
 		}
+		switch {
+		case entry.ReadOnly && strings.TrimSpace(entry.ReadOnlyReason) == "":
+			entryProblems = append(entryProblems, "a read-only page must state why")
+		case !entry.ReadOnly && entry.ReadOnlyReason != "":
+			entryProblems = append(entryProblems, "readOnlyReason requires readOnly")
+		}
+		if entry.ReadOnly && len(entry.Actions) > 0 {
+			entryProblems = append(entryProblems, "a read-only page declares no action")
+		}
+		if len(entry.Items) == 0 {
+			entryProblems = append(entryProblems, "at least one item is required")
+		}
 		actionIDs := map[string]bool{}
 		for actionIndex, action := range entry.Actions {
+			var actionProblems []string
 			if strings.TrimSpace(action.ID) == "" {
-				entryProblems = append(entryProblems, fmt.Sprintf("actions[%d]: id is required", actionIndex))
-				continue
+				actionProblems = append(actionProblems, "id is required")
 			}
 			if actionIDs[action.ID] {
-				entryProblems = append(entryProblems, "action "+action.ID+" is declared twice")
+				actionProblems = append(actionProblems, "action "+action.ID+" is declared twice")
 			}
 			actionIDs[action.ID] = true
+			if !isWriteMethod(action.Method) {
+				actionProblems = append(actionProblems, "method "+action.Method+" is not a control-plane write method")
+			}
+			if !isControlPlanePath(action.Path) {
+				actionProblems = append(actionProblems, "path "+action.Path+" is not a control-plane API path")
+			}
+			entryProblems = append(entryProblems, where(fmt.Sprintf("actions[%d]", actionIndex), actionProblems)...)
+		}
+		itemIDs := map[string]bool{}
+		for itemIndex, item := range entry.Items {
+			var itemProblems []string
+			if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.ID) != item.ID {
+				itemProblems = append(itemProblems, "id is required")
+			}
+			if itemIDs[item.ID] {
+				itemProblems = append(itemProblems, "item "+item.ID+" is declared twice")
+			}
+			itemIDs[item.ID] = true
+			if strings.TrimSpace(item.Label) == "" {
+				itemProblems = append(itemProblems, "label is required")
+			}
+			if !IsPageSource(item.Source) {
+				itemProblems = append(itemProblems, "source "+item.Source+" is not a page source type")
+			}
+			itemProblems = append(itemProblems, checkItemReference(item)...)
+			if entry.ReadOnly {
+				if item.Action != "" {
+					itemProblems = append(itemProblems, "a read-only page item has no modification entry")
+				}
+			} else {
+				switch {
+				case item.Action != "" && item.Reason != "":
+					itemProblems = append(itemProblems, "an item with a modification entry must not declare a reason")
+				case item.Action == "" && strings.TrimSpace(item.Reason) == "":
+					itemProblems = append(itemProblems, "a writable page item needs a modification entry or a reason")
+				case strings.TrimSpace(item.Reason) != item.Reason:
+					itemProblems = append(itemProblems, "reason must not carry surrounding whitespace")
+				}
+				if item.Action != "" && !actionIDs[item.Action] {
+					itemProblems = append(itemProblems, "item action "+item.Action+" is not a declared action")
+				}
+			}
+			entryProblems = append(entryProblems, where(fmt.Sprintf("items[%d]", itemIndex), itemProblems)...)
 		}
 		if len(entryProblems) > 0 {
 			problems = append(problems, where(fmt.Sprintf("pages[%d]", index), entryProblems)...)
@@ -741,6 +863,58 @@ func loadPages(entries []Page) ([]Page, []string) {
 		kept = append(kept, entry)
 	}
 	return kept, problems
+}
+
+// checkItemReference reports how one item's declared source names its input:
+// a local item holds a browser storage key and no control-plane reference, and
+// every server source holds a reference and no browser key.
+func checkItemReference(item PageItem) []string {
+	var problems []string
+	switch item.Source {
+	case PageSourceLocal:
+		if strings.TrimSpace(item.Store) == "" {
+			problems = append(problems, "a local item needs the browser storage key")
+		}
+		if item.Reference != "" {
+			problems = append(problems, "a local item has no control-plane reference")
+		}
+	default:
+		if strings.TrimSpace(item.Reference) == "" {
+			problems = append(problems, "a server item needs a reference")
+		}
+		if item.Store != "" {
+			problems = append(problems, "only a local item names browser storage")
+		}
+	}
+	return problems
+}
+
+// isWriteMethod reports whether method is one of the write verbs a control-plane
+// action may use (C-22).
+func isWriteMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+// isControlPlanePath reports whether path addresses the control-plane API
+// itself. An action can never name an external URL or a bare native resource
+// path, so the page cannot smuggle a proxy for native writes (F9).
+func isControlPlanePath(raw string) bool {
+	if raw == "" || strings.TrimSpace(raw) != raw {
+		return false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" || parsed.Fragment != "" {
+		return false
+	}
+	if !strings.HasPrefix(parsed.Path, "/api/v1/") || path.Clean(parsed.Path) != parsed.Path {
+		return false
+	}
+	return true
 }
 
 // loadSettings validates setting declarations (C-23).

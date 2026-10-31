@@ -31,7 +31,12 @@ func declaration() extension.Declaration {
 				{Group: group, Kind: "Widget", Resource: "widgets", Versions: []string{"v1"}, Namespaced: true},
 				{Group: group, Kind: "Gadget", Resource: "gadgets", Versions: []string{"v1"}, Namespaced: true},
 			},
-			Pages: []extension.Page{{ID: "widgets", Title: "Widgets", RequiredRole: string(write.RoleMember)}},
+			Pages: []extension.Page{{
+				ID: "widgets", Title: "Widgets", Location: "panel", RequiredRole: string(write.RoleMember),
+				Items: []extension.PageItem{{
+					ID: "widgets", Label: "Widgets", Source: extension.PageSourceLocal, Store: "widgets", Reason: "只读展示",
+				}},
+			}},
 		},
 		Permissions: []extension.Permission{{
 			Contribution:  "Widget",

@@ -21,8 +21,11 @@ func contributions() extension.Contributions {
 			Writer: extension.SettingWriterController, Editable: true,
 		}},
 		Pages: []extension.Page{{
-			ID: "catalogue", Title: "Catalogue", RequiredRole: string(write.RoleMember),
-			Actions: []extension.Action{{ID: "install"}},
+			ID: "catalogue", Title: "Catalogue", Location: "panel", RequiredRole: string(write.RoleMember),
+			Items: []extension.PageItem{{
+				ID: "entries", Label: "Entries", Source: extension.PageSourceLocal, Store: "catalogue", Action: "install",
+			}},
+			Actions: []extension.Action{{ID: "install", Method: "POST", Path: "/api/v1/action-requests"}},
 		}},
 	}
 }

@@ -136,7 +136,8 @@ func TestEvaluateDependencyOrderDoesNotMatter(t *testing.T) {
 func TestEvaluateDegradesOneClassOnly(t *testing.T) {
 	declaration := fullDeclaration("demo.widgets")
 	declaration.Contributions.Pages = append(declaration.Contributions.Pages,
-		Page{ID: "broken", Title: "Broken", RequiredRole: "admin"})
+		Page{ID: "broken", Title: "Broken", Location: "panel", RequiredRole: "admin",
+			Items: []PageItem{{ID: "broken", Label: "Broken", Source: PageSourceLocal, Store: "broken", Reason: "只读展示"}}})
 	assessment := Evaluate([]Request{packageRequest(t, "widgets", declaration, time.Now())})
 	result := assessment.Components[0]
 	if result.Phase != PhaseDegraded || result.Reason != ReasonContributionFailed {

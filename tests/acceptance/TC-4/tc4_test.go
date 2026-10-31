@@ -27,8 +27,14 @@ func declaration() extension.Declaration {
 			Controllers: []extension.Controller{{
 				ID: "widget", Manages: []extension.GroupKind{{Group: "widgets.example.test", Kind: "Widget"}},
 			}},
-			Capabilities:       extension.CapabilityContributions{Items: []extension.Capability{{Name: "demo.widgets/panel", Version: "v1"}}},
-			Pages:              []extension.Page{{ID: "widgets", Title: "Widgets", Actions: []extension.Action{{ID: "install"}}}},
+			Capabilities: extension.CapabilityContributions{Items: []extension.Capability{{Name: "demo.widgets/panel", Version: "v1"}}},
+			Pages: []extension.Page{{
+				ID: "widgets", Title: "Widgets", Location: "panel",
+				Items: []extension.PageItem{{
+					ID: "widgets", Label: "Widgets", Source: extension.PageSourceLocal, Store: "widgets", Action: "install",
+				}},
+				Actions: []extension.Action{{ID: "install", Method: "POST", Path: "/api/v1/action-requests"}},
+			}},
 			Settings:           []extension.Setting{{ID: "widgets-endpoint", Scope: extension.SettingScopeCluster, Writer: extension.SettingWriterUser}},
 			CatalogueSources:   []extension.CatalogueSource{{ID: "widgets", Sync: "pull"}},
 			DiscoveryAdapters:  []extension.DiscoveryAdapter{{ID: "widget-discovery"}},

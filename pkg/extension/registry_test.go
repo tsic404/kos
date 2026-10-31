@@ -18,7 +18,10 @@ func TestRegistryShowsOnlyActivatedContributions(t *testing.T) {
 			ObjectClasses: []ObjectClass{{
 				Group: "widgets.example.test", Kind: "Widget", Resource: "widgets", Versions: []string{"v1"},
 			}},
-			Pages:    []Page{{ID: "widgets", Title: "Widgets"}},
+			Pages: []Page{{
+				ID: "widgets", Title: "Widgets", Location: "panel",
+				Items: []PageItem{{ID: "widgets", Label: "Widgets", Source: PageSourceLocal, Store: "widgets", Reason: "只读展示"}},
+			}},
 			Settings: []Setting{{ID: "widgets-endpoint", Scope: SettingScopeCluster, Writer: SettingWriterUser}},
 		},
 	}
@@ -72,9 +75,12 @@ func TestPageVisibilityFollowsTheSessionRole(t *testing.T) {
 		Version:    "1.0.0",
 		Contributions: Contributions{
 			Pages: []Page{
-				{ID: "everyone", Title: "Everyone"},
-				{ID: "members", Title: "Members", RequiredRole: string(write.RoleMember)},
-				{ID: "owners", Title: "Owners", RequiredRole: string(write.RoleOwner)},
+				{ID: "everyone", Title: "Everyone", Location: "panel",
+					Items: []PageItem{{ID: "value", Label: "Value", Source: PageSourceLocal, Store: "everyone", Reason: "只读展示"}}},
+				{ID: "members", Title: "Members", Location: "panel", RequiredRole: string(write.RoleMember),
+					Items: []PageItem{{ID: "value", Label: "Value", Source: PageSourceLocal, Store: "members", Reason: "只读展示"}}},
+				{ID: "owners", Title: "Owners", Location: "panel", RequiredRole: string(write.RoleOwner),
+					Items: []PageItem{{ID: "value", Label: "Value", Source: PageSourceLocal, Store: "owners", Reason: "只读展示"}}},
 			},
 		},
 	}
