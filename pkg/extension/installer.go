@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 
 	"github.com/tsic404/kos/api"
@@ -31,6 +32,13 @@ type Installer struct {
 	Artifacts ArtifactSource
 	// Status writes component status as the component reconciler (C-03).
 	Status *write.Writer
+	// Frameworks is the framework API version set this kernel serves (C-16);
+	// nil selects SupportedFrameworks.
+	Frameworks []string
+	// Controllers applies each component's enabled state to its controller
+	// loops, so a disabled component stops reconciling (C-28); nil leaves the
+	// loops alone.
+	Controllers ControllerEnabler
 	// Preferences applies the declared fate of preference data when a component
 	// is withdrawn (C-27, C-29); nil keeps the store untouched.
 	Preferences PreferenceRetention
@@ -49,6 +57,12 @@ type PreferenceRetention interface {
 	// object to the extension identifier it declares now; an empty identifier
 	// means this round could not read the declaration, so its domains stay.
 	Withdraw(ctx context.Context, present map[string]string) error
+}
+
+// ControllerEnabler applies a component's enabled state to its controllers
+// (C-28). A disabled component's loops stop producing rounds.
+type ControllerEnabler interface {
+	SetEnabled(component string, isEnabled bool)
 }
 
 // Installation is the result of one install pass.
@@ -87,7 +101,7 @@ func (i *Installer) Install(ctx context.Context) (*Installation, error) {
 	// The gate runs first: a component whose deletion nothing blocks leaves the
 	// install set in this same pass, and one a dependent holds stays installed
 	// with the blocked condition already on it (C-17, C-48).
-	blocked, err := (&Gate{Dynamic: i.Dynamic, Resources: i.Resources, Status: i.Status}).Reconcile(ctx)
+	blocked, err := (&Gate{Dynamic: i.Dynamic, Resources: i.Resources, Status: i.Status, Artifacts: i.Artifacts}).Reconcile(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -119,10 +133,21 @@ func (i *Installer) Install(ctx context.Context) (*Installation, error) {
 			continue
 		}
 		request := Request{
-			Name:       object.GetName(),
-			Generation: object.GetGeneration(),
-			Created:    object.GetCreationTimestamp().Time,
-			IsAdopted:  attribution == markers.AttributionAdopted,
+			Name:          object.GetName(),
+			Generation:    object.GetGeneration(),
+			Created:       object.GetCreationTimestamp().Time,
+			IsAdopted:     attribution == markers.AttributionAdopted,
+			IsTerminating: object.GetDeletionTimestamp() != nil,
+		}
+		if disabled, _, err := unstructured.NestedBool(object.Object, "spec", "disable"); err != nil {
+			return nil, fmt.Errorf("component %s: read spec.disable: %w", object.GetName(), err)
+		} else {
+			request.IsDisabled = disabled
+		}
+		if phase, found, err := unstructured.NestedString(object.Object, "status", "phase"); err != nil {
+			return nil, fmt.Errorf("component %s: read status.phase: %w", object.GetName(), err)
+		} else {
+			request.WasDisabled = request.IsDisabled && found && phase == PhaseDisabled
 		}
 		if !request.IsAdopted {
 			reference, _, err := unstructured.NestedString(object.Object, "spec", "package", "reference")
@@ -146,7 +171,11 @@ func (i *Installer) Install(ctx context.Context) (*Installation, error) {
 		objects[request.Name] = object
 	}
 
-	assessment := Evaluate(requests)
+	assessment := EvaluateWith(requests, i.frameworks())
+	withdrawn := make(map[string]bool, len(requests))
+	for _, request := range requests {
+		withdrawn[request.Name] = request.IsDisabled || request.IsTerminating
+	}
 	for _, result := range assessment.Components {
 		object := objects[result.Name]
 		if object == nil {
@@ -156,11 +185,27 @@ func (i *Installer) Install(ctx context.Context) (*Installation, error) {
 		if err := i.writeStatus(ctx, result.Name, status, object); err != nil {
 			return nil, err
 		}
-		if !result.HasVerifiedPackage || !result.HasMetDependencies {
+		if result.HasVerifiedPackage && result.HasMetDependencies && isContributing(result) {
+			if err := i.registerProvider(ctx, result, object); err != nil {
+				return nil, err
+			}
 			continue
 		}
-		if err := i.registerProvider(ctx, result, object); err != nil {
-			return nil, err
+		// A component that is known not to contribute keeps no registration: its
+		// capabilities are no longer served (C-28, C-29). An unreadable package
+		// is a transient failure, not a withdrawal: the last registration stays.
+		if shouldClearRegistration(result, withdrawn[result.Name]) {
+			if err := i.clearRegistration(ctx, result.Name, object.GetUID()); err != nil {
+				return nil, err
+			}
+		}
+	}
+	// Controller loops follow the component state: a disabled, unavailable or
+	// incompatible component stops reconciling, a held uninstall keeps running
+	// until the uninstall completes (C-28).
+	if i.Controllers != nil {
+		for _, result := range assessment.Components {
+			i.Controllers.SetEnabled(result.Name, isContributing(result))
 		}
 	}
 	// Preference bookkeeping records what it can and never fails the pass: the
@@ -211,6 +256,103 @@ func (i *Installer) logger() *slog.Logger {
 		return i.Log
 	}
 	return slog.New(slog.DiscardHandler)
+}
+
+// frameworks returns the framework version set this installer judges against.
+func (i *Installer) frameworks() []string {
+	if len(i.Frameworks) == 0 {
+		return SupportedFrameworks()
+	}
+	return i.Frameworks
+}
+
+// isContributing reports whether a result's declared contributions are active:
+// ready, degraded, installed (an extension with no contribution to activate) or
+// terminating while a dependent holds the uninstall open.
+func isContributing(result ComponentResult) bool {
+	switch result.Phase {
+	case PhaseReady, PhaseDegraded, PhaseInstalled, PhaseTerminating:
+		return true
+	default:
+		return false
+	}
+}
+
+// shouldClearRegistration reports whether the pass knows the component no
+// longer serves its registration. A withdrawn component (disable request or
+// deletion) and an evaluated component without active contributions clear it;
+// an unreadable package leaves the last registration alone because the failure
+// is transient, not a withdrawal.
+func shouldClearRegistration(result ComponentResult, isWithdrawn bool) bool {
+	if isWithdrawn {
+		return true
+	}
+	switch result.Phase {
+	case PhaseIncompatible, PhaseTerminating, PhaseDisabled:
+		return true
+	}
+	return result.HasVerifiedPackage && result.HasEvaluatedDependencies && !isContributing(result)
+}
+
+// clearRegistration removes the capability registration a component no longer
+// serves. The Provider object stays (C-29 does not delete kernel objects); only
+// the spec fields the component-registry manager wrote are cleared. A Provider
+// this component does not own is left alone (C-02).
+func (i *Installer) clearRegistration(ctx context.Context, name string, uid types.UID) error {
+	return clearRegistration(ctx, i.Dynamic, i.Resources, i.Status, name, uid)
+}
+
+// Preflight reads the installed extensions and reports which ones the target
+// framework version set would strand (C-16). The upgrade is blocked while any
+// extension still depends on a removed version.
+func (i *Installer) Preflight(ctx context.Context, target []string) (FrameworkPreflight, error) {
+	if i.Dynamic == nil || i.Artifacts == nil {
+		return FrameworkPreflight{}, errors.New("preflight needs a dynamic client and an artifact source")
+	}
+	resource, err := i.resource()
+	if err != nil {
+		return FrameworkPreflight{}, err
+	}
+	list, err := resource.List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return FrameworkPreflight{}, fmt.Errorf("list system components: %w", err)
+	}
+	installed := make([]FrameworkDeclaration, 0, len(list.Items))
+	for index := range list.Items {
+		object := &list.Items[index]
+		if object.GetDeletionTimestamp() != nil {
+			continue
+		}
+		attribution, err := markers.AttributionOf(object.GetLabels())
+		if err != nil {
+			return FrameworkPreflight{}, fmt.Errorf("component %s: %w", object.GetName(), err)
+		}
+		if attribution == markers.AttributionUnmanaged || attribution == markers.AttributionAdopted {
+			continue
+		}
+		reference, _, err := unstructured.NestedString(object.Object, "spec", "package", "reference")
+		if err != nil || reference == "" {
+			continue
+		}
+		content, err := i.Artifacts.Fetch(ctx, reference)
+		if err != nil {
+			continue
+		}
+		declaration, err := Parse(content)
+		if err != nil {
+			continue
+		}
+		loaded, err := declaration.Load()
+		if err != nil {
+			continue
+		}
+		installed = append(installed, FrameworkDeclaration{
+			Component:        object.GetName(),
+			Identifier:       loaded.Identifier,
+			FrameworkVersion: loaded.FrameworkVersion,
+		})
+	}
+	return PreflightUpgradeFrom(i.frameworks(), target, installed)
 }
 
 // keepsContribution reports whether the declaration kept the data of one

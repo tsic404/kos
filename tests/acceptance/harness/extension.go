@@ -4,9 +4,11 @@ import (
 	"context"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/tsic404/kos/api"
 	"github.com/tsic404/kos/api/v1beta1"
@@ -132,6 +134,72 @@ func (c *Cluster) RepointComponent(t *testing.T, name, reference, digest string)
 	if _, err := resource.Update(ctx, object, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("update component %s: %v", name, err)
 	}
+}
+
+// ExtensionStateUsing runs one install pass with caller options, so a case can
+// wire controllers or a framework version set into the pipeline.
+func (c *Cluster) ExtensionStateUsing(t *testing.T, artifacts extension.ArtifactSource, configure func(*extension.Installer)) *extension.Installation {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	installer := c.ExtensionInstaller(artifacts)
+	if configure != nil {
+		configure(installer)
+	}
+	installation, err := installer.Install(ctx)
+	if err != nil {
+		t.Fatalf("install pass: %v", err)
+	}
+	return installation
+}
+
+// SetComponentDisabled writes the component's disable request (C-28). The
+// installer does not write this field: it is the user spec.
+func (c *Cluster) SetComponentDisabled(t *testing.T, name string, isDisabled bool) {
+	t.Helper()
+	resource := c.resourceIn(t, v1beta1.GroupVersion.Version, "SystemComponent", "")
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	object, err := resource.Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("read component %s: %v", name, err)
+	}
+	if err := unstructured.SetNestedField(object.Object, isDisabled, "spec", "disable"); err != nil {
+		t.Fatalf("set component %s disable: %v", name, err)
+	}
+	if _, err := resource.Update(ctx, object, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update component %s: %v", name, err)
+	}
+}
+
+// ComponentUID reads the UID that names one component's residual manifest.
+func (c *Cluster) ComponentUID(t *testing.T, name string) string {
+	t.Helper()
+	return string(c.Get(t, "v1beta1", "SystemComponent", name).GetUID())
+}
+
+// Residuals reads the uninstall manifest of one component (C-29). A component
+// without one returns nil.
+func (c *Cluster) Residuals(t *testing.T, uid string) []extension.Residual {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	object, err := c.Direct(t, "", "v1", "ConfigMap", api.SystemNamespace).Get(ctx, extension.ResidualName(types.UID(uid)), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read the residual manifest of %s: %v", uid, err)
+	}
+	encoded, found, err := unstructured.NestedString(object.Object, "data", extension.ResidualKey)
+	if err != nil || !found {
+		t.Fatalf("manifest of %s carries no %s: %v", uid, extension.ResidualKey, err)
+	}
+	entries, err := extension.DecodeResiduals(encoded)
+	if err != nil {
+		t.Fatalf("decode the residual manifest of %s: %v", uid, err)
+	}
+	return entries
 }
 
 // ComponentStatus reads the stored status of one system component.

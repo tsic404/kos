@@ -295,8 +295,8 @@ func TestTC15DeletionGateDecidesWhichComponentsAreLive(t *testing.T) {
 		installation = cluster.ExtensionStateWith(t, artifacts, shell.Retention())
 		shell.Use(installation)
 		result, present := installation.Component("drop")
-		if !present || result.Phase != extension.PhaseReady {
-			t.Fatalf("component = %+v/%v, want the held component still installed", result, present)
+		if !present || result.Phase != extension.PhaseTerminating {
+			t.Fatalf("component = %+v/%v, want the held component terminating", result, present)
 		}
 		stored, err := shell.Accounts.Store.PreferencesOf(context.Background(), ownerName, dropExtension)
 		if err != nil {

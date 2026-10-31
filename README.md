@@ -5,10 +5,11 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 <https://gitea.tsic.top/tsic/kos-design>，契约以 `docs/02-contracts.md` 为准。
 
 当前阶段交付内核对象模型、归属三态、写入路径、ABI、控制面 API、通用调和内核、
-扩展装载（包摘要、声明、九类贡献、依赖激活与可见性投影）、应用渲染与生命周期动作
+扩展装载（包摘要、声明、九类贡献、依赖激活与可见性投影）、扩展停用与卸载
+（数据保留语义、遗留清单与依赖阻塞）、框架版本兼容与升级预检、应用渲染与生命周期动作
 （停止、启动、重启、扩缩容与资源规格）、入口形态与证书状态、升级回滚与外部改动仲裁、
 本地账号会话、发现适配器与设备事实、卷迁移的六阶段状态机与回滚，以及设置域、用户偏好
-与目录来源三类贡献的自身语义；不含停用与卸载、其余贡献类的语义与 Provider 能力验证。
+与目录来源三类贡献的自身语义；不含其余贡献类的语义与 Provider 能力验证。
 
 ## 布局
 
@@ -34,7 +35,7 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `pkg/volume/` | C-38/C-39：卷的声明、绑定观察、扩容预检与删除保护 |
 | `pkg/migration/` | C-40 卷迁移：六阶段状态机、目标声明与步骤 Job、回滚点与失败记录 |
 | `pkg/endpoint/` | C-43 至 C-46：五种入口形态、唯一性台账、应用反查、证书状态与组件依赖边 |
-| `pkg/extension/` | C-17 至 C-20/C-28/C-48：包摘要、声明、九类贡献、依赖激活、可见性投影、贡献类控制器与删除受阻门 |
+| `pkg/extension/` | C-16 至 C-20/C-28/C-29/C-48：包摘要、声明、九类贡献、依赖激活、可见性投影、停用与卸载（数据保留、遗留清单）、框架版本兼容与升级预检、贡献类控制器与删除受阻门 |
 | `pkg/settings/` | C-23 设置域投影：当前值、来源、修改入口与不可修改原因 |
 | `pkg/catalogue/` | C-24 目录来源：条目结构、摘要校验、定义同步与来源缺失的升级路径 |
 | `pkg/access/` | C-59/C-60 判定：可见性谓词、角色写权限、所有权与跨所有者引用，扩展对象按声明授权 |
@@ -99,6 +100,14 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `tests/acceptance/TC-10/` | 来源移除后条目消失、应用保留，升级路径标记来源缺失 |
 | `tests/acceptance/TC-14/` | 偏好按账号与扩展分域、跨浏览器一致、不进对象投影 |
 | `tests/acceptance/TC-15/` | 偏好的保留语义：声明保留的仍在，默认删除的为空 |
+| `tests/acceptance/TC-106/` | 第三方产品以扩展包加入，对象类只在扩展组，页面带声明来源 |
+| `tests/acceptance/TC-107/` | 扩展对象引用内核卷时删除受阻并列出引用者 |
+| `tests/acceptance/TC-108/` | 扩展能力缺失停在 Pending，安装后继续，自报不构成验证 |
+| `tests/acceptance/TC-109/` | 扩展控制器越界写入内核对象与 PVC 被拒，声明范围仍可写 |
+| `tests/acceptance/TC-110/` | 停用撤除贡献并停控制器，对象保留，启用后恢复 |
+| `tests/acceptance/TC-111/` | 卸载按声明保留或删除数据，保留项进遗留清单；组件、引用、应用与 Provider 依赖逐个阻塞；坏声明只阻塞自身卸载 |
+| `tests/acceptance/TC-112/` | 目标框架版本不兼容时安装被拒绝并列出不兼容项 |
+| `tests/acceptance/TC-113/` | 升级预检列出框架依赖者，仍有依赖时阻塞 |
 
 ## 对象模型
 
@@ -112,7 +121,8 @@ ApplicationDefinition 与 NodeDevice 没有 status 写者，因此没有 status 
 `spec` 字段由契约逐个加入：尚未固定字段的对象保持空 spec，实现不发明线格式。当前已兑现
 C-60 的 `spec.owner`（五类带所有者的对象）、C-59 的 `Application.spec.visibility`、
 C-41/C-60 的 `BackupPolicy.spec.selector`、
-C-17 的 `SystemComponent.spec.package`（工件引用与 sha256 摘要）、
+C-17 的 `SystemComponent.spec.package`（工件引用与 sha256 摘要）与 C-28 的
+`spec.disable`（停用请求）、
 C-32 的 `Application.spec.definitionRef`/`namespace`/`config`/`volumes` 与定义侧
 `spec.package`/`config`/`template`/`hooks`/`chart`/`requires`、C-66 的
 `Application.spec.replicas`/`paused`、C-67 的 `Application.spec.resources`、
