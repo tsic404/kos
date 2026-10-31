@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -146,6 +147,26 @@ func (c *Cluster) StartShell(t *testing.T, configure ...func(*pages.Config)) *Sh
 		Catalogue: catalogueService,
 		Pages:     pagesService,
 	}
+}
+
+// PageAction resolves one action a page declares and fills its {name} and
+// {namespace} placeholders. Taking the path from the declaration keeps a case
+// from calling an address the page does not offer (C-22).
+func PageAction(t *testing.T, page extension.Page, id, name, namespace string) (method, path string) {
+	t.Helper()
+	for _, action := range page.Actions {
+		if action.ID != id {
+			continue
+		}
+		path = strings.ReplaceAll(action.Path, "{name}", name)
+		path = strings.ReplaceAll(path, "{namespace}", namespace)
+		if strings.Contains(path, "{") {
+			t.Fatalf("action %s of page %s leaves a placeholder unfilled: %s", id, page.ID, path)
+		}
+		return action.Method, path
+	}
+	t.Fatalf("page %s declares no action %s", page.ID, id)
+	return "", ""
 }
 
 // Use publishes the projection one install pass produced; every surface reads
