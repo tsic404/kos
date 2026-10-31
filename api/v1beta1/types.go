@@ -1054,7 +1054,7 @@ type BackupPolicy struct {
 	Spec BackupPolicySpec `json:"spec,omitempty"`
 	// Status is written by the backup reconciler (C-03, C-07).
 	// +optional
-	Status ObjectStatus `json:"status,omitempty"`
+	Status BackupPolicyStatus `json:"status,omitempty"`
 }
 
 // BackupPolicySpec holds the user-owned backup schedule.
@@ -1069,6 +1069,66 @@ type BackupPolicySpec struct {
 	// member may not reach another account's objects with it (C-60).
 	// +optional
 	Selector string `json:"selector,omitempty"`
+	// Schedule is the five-field cron expression the policy runs on (C-41).
+	// +optional
+	Schedule string `json:"schedule,omitempty"`
+	// Consistency is the consistency level the copies reach (C-41).
+	// +optional
+	Consistency BackupConsistency `json:"consistency,omitempty"`
+	// Target is where the copies are written and the failure domain they live
+	// in (C-41).
+	// +optional
+	Target BackupTarget `json:"target,omitempty"`
+	// Retention is how many completed runs are kept (C-41).
+	// +optional
+	Retention BackupRetention `json:"retention,omitempty"`
+	// Drill decides whether every successful run is verified by a restore
+	// drill (C-41, C-42).
+	// +optional
+	Drill BackupDrill `json:"drill,omitempty"`
+}
+
+// BackupConsistency is the consistency level a backup reaches (C-41).
+type BackupConsistency string
+
+const (
+	// BackupConsistencyCrash copies the volumes as they are (C-41).
+	BackupConsistencyCrash BackupConsistency = "crash-consistent"
+	// BackupConsistencyQuiesced copies volumes whose applications are stopped
+	// (C-41).
+	BackupConsistencyQuiesced BackupConsistency = "quiesced-consistent"
+	// BackupConsistencyHook runs the application's backup hook before the
+	// copy; a hook that exits non-zero fails the whole backup (C-41, C-32).
+	BackupConsistencyHook BackupConsistency = "application-hook"
+)
+
+// BackupTarget is where a policy writes its copies (C-41). The failure domain
+// names the node or device the target lives on, so a target in the source's
+// failure domain is refused instead of being sold as a backup.
+type BackupTarget struct {
+	// Path is the directory runs are written to; the default target is another
+	// local disk (C-41).
+	// +optional
+	Path string `json:"path,omitempty"`
+	// FailureDomain names the node or device the target lives on. Empty means
+	// the domain cannot be determined: the policy runs and keeps a hint (C-41).
+	// +optional
+	FailureDomain string `json:"failureDomain,omitempty"`
+}
+
+// BackupRetention is how many completed runs a policy keeps (C-41).
+type BackupRetention struct {
+	// Keep is the number of newest runs to keep; zero keeps every run (C-41).
+	// +optional
+	Keep int32 `json:"keep,omitempty"`
+}
+
+// BackupDrill decides whether a policy verifies each successful run by
+// restoring it and comparing the four baseline items (C-41, C-42).
+type BackupDrill struct {
+	// Enabled runs a drill after every successful backup (C-42).
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // BackupPolicyList is the list form of BackupPolicy.
@@ -1094,8 +1154,23 @@ type RestoreJob struct {
 	Spec RestoreJobSpec `json:"spec,omitempty"`
 	// Status is written by the restore reconciler (C-03, C-07).
 	// +optional
-	Status ObjectStatus `json:"status,omitempty"`
+	Status RestoreJobStatus `json:"status,omitempty"`
 }
+
+// Phases of a restore job (C-42). A failure in any phase ends the job in Failed
+// with the reason kept readable.
+const (
+	// RestorePhasePreflight validates the request before any data moves.
+	RestorePhasePreflight = "Preflight"
+	// RestorePhaseRestoring copies the backup into the new instance.
+	RestorePhaseRestoring = "Restoring"
+	// RestorePhaseVerifying compares the restored data with the baseline.
+	RestorePhaseVerifying = "Verifying"
+	// RestorePhaseSucceeded is the terminal success phase.
+	RestorePhaseSucceeded = "Succeeded"
+	// RestorePhaseFailed is the terminal failure phase.
+	RestorePhaseFailed = "Failed"
+)
 
 // RestoreJobSpec holds the user-owned restore request.
 type RestoreJobSpec struct {
@@ -1103,6 +1178,52 @@ type RestoreJobSpec struct {
 	// and only the global Owner may transfer it (C-60).
 	// +optional
 	Owner string `json:"owner,omitempty"`
+	// Policy names the backup policy whose run is restored (C-41).
+	// +optional
+	Policy string `json:"policy,omitempty"`
+	// TargetApplication names the new instance. Each backed-up volume becomes
+	// a new volume named <targetApplication>-<sourceVolume> (C-41).
+	// +optional
+	TargetApplication string `json:"targetApplication,omitempty"`
+	// InPlace restores over the source instance; it must be declared, and the
+	// applications must be stopped (C-41).
+	// +optional
+	InPlace bool `json:"inPlace,omitempty"`
+}
+
+// RestoreJobStatus is the status of a restore: the phases C-42 fixes plus the
+// items they compare.
+type RestoreJobStatus struct {
+	ObjectStatus `json:",inline"`
+	// StartedAt is when the preflight began.
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+	// CompletedAt is when the job settled.
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+	// Baseline is the backup's four items (C-42).
+	// +optional
+	Baseline *BackupBaseline `json:"baseline,omitempty"`
+	// BackupPath is the run directory this job restores; it is resolved once in
+	// the preflight, so a later run of the policy cannot change it mid-flight.
+	// +optional
+	BackupPath string `json:"backupPath,omitempty"`
+	// Observed is what the restored data measured (C-42).
+	// +optional
+	Observed *BackupBaseline `json:"observed,omitempty"`
+	// Running is the long action the restore component is executing and the
+	// job has not observed yet (C-06, C-42).
+	// +optional
+	Running *Running `json:"running,omitempty"`
+	// Diffs lists the differences that failed the verification (C-42).
+	// +optional
+	Diffs []BackupDiff `json:"diffs,omitempty"`
+	// TargetApplication is the instance the restore writes.
+	// +optional
+	TargetApplication string `json:"targetApplication,omitempty"`
+	// TargetVolumes are the volumes the restore writes.
+	// +optional
+	TargetVolumes []string `json:"targetVolumes,omitempty"`
 }
 
 // RestoreJobList is the list form of RestoreJob.
@@ -1112,6 +1233,174 @@ type RestoreJobList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []RestoreJob `json:"items"`
+}
+
+// BackupPolicyStatus is the status of a backup policy: the two shared axes plus
+// the runs and drills C-41 and C-42 make observable.
+type BackupPolicyStatus struct {
+	ObjectStatus `json:",inline"`
+	// NextRunTime is the next instant the schedule runs at (C-41).
+	// +optional
+	NextRunTime *metav1.Time `json:"nextRunTime,omitempty"`
+	// LastBackup is the newest run (C-41).
+	// +optional
+	LastBackup *BackupRecord `json:"lastBackup,omitempty"`
+	// LastDrill is the newest drill of a run, in progress or settled (C-42).
+	// +optional
+	LastDrill *DrillRecord `json:"lastDrill,omitempty"`
+	// Running is the long action the backup component is executing and the
+	// policy has not observed yet (C-06, C-42). It is cleared when the outcome
+	// is recorded, so a restarted controller resubmits instead of losing it.
+	// +optional
+	Running *Running `json:"running,omitempty"`
+}
+
+// BackupRecord is one backup run (C-41). A run a hook or a drill failed is
+// recorded with Succeeded false and the reason; it is never reported as a
+// success.
+type BackupRecord struct {
+	// ScheduledAt is the schedule instant the run answers (C-41).
+	// +optional
+	ScheduledAt *metav1.Time `json:"scheduledAt,omitempty"`
+	// StartedAt is when the run began.
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+	// CompletedAt is when the run settled.
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+	// Consistency is the level the run reached (C-41).
+	// +optional
+	Consistency BackupConsistency `json:"consistency,omitempty"`
+	// Path is the run directory the copies were written to.
+	// +optional
+	Path string `json:"path,omitempty"`
+	// Succeeded reports whether the run and its drill passed (C-41, C-42).
+	// +optional
+	Succeeded bool `json:"succeeded,omitempty"`
+	// Reason explains a failure; it points at the drill when the drill found
+	// the restored data inconsistent (C-42).
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// Baseline is the four items recorded at backup time (C-42).
+	// +optional
+	Baseline *BackupBaseline `json:"baseline,omitempty"`
+	// Diffs lists the drill differences that failed the run (C-42).
+	// +optional
+	Diffs []BackupDiff `json:"diffs,omitempty"`
+}
+
+// BackupBaseline is the four items C-42 compares: every table's row count, the
+// number of files, the total bytes and the content checksum. The checksum is
+// computed over every row and every file, never over a sample.
+type BackupBaseline struct {
+	// Tables carries one entry per table (C-42).
+	// +optional
+	Tables []TableBaseline `json:"tables,omitempty"`
+	// Files is the number of regular files across the covered volumes (C-42).
+	Files int64 `json:"files"`
+	// Bytes is the total size of those files (C-42).
+	Bytes int64 `json:"bytes"`
+	// Checksum is the content checksum of every row and file (C-42).
+	Checksum string `json:"checksum"`
+	// Engines names the table engines the table entries cover, or "none" when
+	// no recognized database was found: an empty table list is then not
+	// mistaken for a measured empty schema (C-42).
+	// +optional
+	Engines string `json:"engines,omitempty"`
+	// Order records the sorting and digest rules the checksum was computed
+	// with (C-42).
+	// +optional
+	Order string `json:"order,omitempty"`
+}
+
+// TableBaseline is one table's row count and row checksum (C-42).
+type TableBaseline struct {
+	// Volume is the volume the database file lives in.
+	// +optional
+	Volume string `json:"volume,omitempty"`
+	// Database is the database file path inside the volume.
+	// +optional
+	Database string `json:"database,omitempty"`
+	// Name is the table name.
+	Name string `json:"name"`
+	// Rows is the table's row count (C-42).
+	Rows int64 `json:"rows"`
+	// Checksum is the row checksum, computed in primary-key order (C-42).
+	// +optional
+	Checksum string `json:"checksum,omitempty"`
+}
+
+// BackupDiff is one item a restore found different from the baseline (C-42).
+type BackupDiff struct {
+	// Item names the compared item.
+	Item string `json:"item"`
+	// Baseline is the recorded value.
+	// +optional
+	Baseline string `json:"baseline,omitempty"`
+	// Observed is the value the restored data carried.
+	// +optional
+	Observed string `json:"observed,omitempty"`
+}
+
+// Phases of a restore drill (C-42). A drill that finds a difference settles in
+// Failed and the backup it verified is no longer reported as a success.
+const (
+	// DrillPhaseRestoring copies the run into the drill destination.
+	DrillPhaseRestoring = "Restoring"
+	// DrillPhaseVerifying compares the drill data with the baseline.
+	DrillPhaseVerifying = "Verifying"
+	// DrillPhaseSucceeded is the terminal pass.
+	DrillPhaseSucceeded = "Succeeded"
+	// DrillPhaseFailed is the terminal failure.
+	DrillPhaseFailed = "Failed"
+)
+
+// DrillRecord is one restore drill of a run (C-42).
+type DrillRecord struct {
+	// Phase is the drill stage: Restoring, Verifying, Succeeded or Failed.
+	// +optional
+	Phase string `json:"phase,omitempty"`
+	// Run is the run directory the drill restores.
+	// +optional
+	Run string `json:"run,omitempty"`
+	// CompletedAt is when the drill settled.
+	// +optional
+	CompletedAt *metav1.Time `json:"completedAt,omitempty"`
+	// Succeeded reports whether the restored data equals the baseline (C-42).
+	// +optional
+	Succeeded bool `json:"succeeded,omitempty"`
+	// Reason points at the drill inconsistency when it failed (C-42).
+	// +optional
+	Reason string `json:"reason,omitempty"`
+	// Diffs lists the differences (C-42).
+	// +optional
+	Diffs []BackupDiff `json:"diffs,omitempty"`
+}
+
+// Running names one long data action the backup component executes for an
+// object (C-06, C-42). The reconciler hands the action off, records it here and
+// observes the outcome on a later round; it never performs the copy or the
+// checksum itself.
+type Running struct {
+	// Kind is the action: capture, copy or measure.
+	Kind string `json:"kind"`
+	// Run is the run directory the action reads or writes.
+	// +optional
+	Run string `json:"run,omitempty"`
+	// Sequence is the action's ordinal on its object: a result pairs only with
+	// the action that started it (C-06).
+	// +optional
+	Sequence int64 `json:"sequence,omitempty"`
+	// Scope is the set of volumes the action reads or writes, so two actions
+	// over the same run never pair (C-06).
+	// +optional
+	Scope string `json:"scope,omitempty"`
+	// ScheduledAt is the schedule instant a capture answers (C-41).
+	// +optional
+	ScheduledAt *metav1.Time `json:"scheduledAt,omitempty"`
+	// StartedAt is when the action was handed off.
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
 }
 
 // NodeDevice is a cluster-scoped hardware fact reported by discovery.

@@ -712,7 +712,7 @@ func TestDownstreamAllocation(t *testing.T) {
 		{name: "extension stays inside its declared namespaces", subject: SubjectExtensionReconciler, scope: downstreamScope([]string{"other"}, schema.GroupKind{Kind: "Service"}), verb: VerbCreate},
 		{name: "extension writes only declared kinds", subject: SubjectExtensionReconciler, scope: downstreamScope([]string{"apps"}, schema.GroupKind{Kind: "ConfigMap"}), verb: VerbCreate},
 		{name: "extension without a declaration writes nothing", subject: SubjectExtensionReconciler, verb: VerbCreate},
-		{name: "backup reconciler writes no downstream object until its CronJob row lands", subject: SubjectBackupReconciler, verb: VerbCreate},
+		{name: "backup reconciler writes only its CronJob", subject: SubjectBackupReconciler, verb: VerbCreate},
 		{name: "migration flow writes only its step Jobs", subject: SubjectMigrationReconciler, verb: VerbCreate},
 		{name: "volume reconciler writes no downstream object", subject: SubjectVolumeReconciler, verb: VerbApply},
 		{name: "user writes no downstream object", subject: SubjectUser, verb: VerbApply},
@@ -739,10 +739,43 @@ func TestDownstreamAllocation(t *testing.T) {
 	}
 }
 
+// TestBackupCronJobRowIsObjectLevel covers the object-level scope of C-04's
+// backup row: only the schedule CronJob, and only inside the policy namespace
+// (C-41).
+func TestBackupCronJobRowIsObjectLevel(t *testing.T) {
+	cases := []struct {
+		name    string
+		subject Subject
+		object  Ref
+		scope   Scope
+	}{
+		{name: "backup reconciler writes no other downstream object", subject: SubjectBackupReconciler, object: Ref{Version: "v1", Kind: "Service", Namespace: "apps", Name: "nightly"}, scope: namespaces("apps")},
+		{name: "backup reconciler writes its CronJob only inside the policy namespace", subject: SubjectBackupReconciler, object: Ref{Group: "batch", Version: "v1", Kind: "CronJob", Namespace: "other", Name: "nightly"}, scope: namespaces("apps")},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			err := Admit(Request{
+				Subject: test.subject,
+				Object:  test.object,
+				Verb:    VerbCreate,
+				Parts:   []Part{PartObject},
+				Markers: creatorMarkers("uid-owner"),
+				Scope:   test.scope,
+			})
+			var denied *Denied
+			if !errors.As(err, &denied) {
+				t.Fatalf("write was not refused: %v", err)
+			}
+			if denied.Code() != 403 {
+				t.Fatalf("refusal code = %d, want 403", denied.Code())
+			}
+		})
+	}
+}
+
 // TestMigrationJobRowIsObjectLevel covers the C-04 row the migration flow
 // landed: a Job in the namespace the flow declares is admitted for create and
-// delete only, another kind is refused, and the backup reconciler's CronJob row
-// (C-41) is still unimplemented and refused.
+// delete only, and another kind is refused (C-40).
 func TestMigrationJobRowIsObjectLevel(t *testing.T) {
 	job := Ref{Group: "batch", Version: "v1", Kind: "Job", Namespace: "apps", Name: "copy"}
 	cases := []struct {
@@ -758,7 +791,6 @@ func TestMigrationJobRowIsObjectLevel(t *testing.T) {
 		{name: "migration flow does not apply a step Job", subject: SubjectMigrationReconciler, object: job, verb: VerbApply, namespace: "apps"},
 		{name: "migration flow stays inside its namespace", subject: SubjectMigrationReconciler, object: job, verb: VerbCreate, namespace: "other"},
 		{name: "migration flow writes no target object", subject: SubjectMigrationReconciler, object: Ref{Version: "v1", Kind: "Service", Namespace: "apps", Name: "target"}, verb: VerbCreate, namespace: "apps"},
-		{name: "backup reconciler writes no CronJob", subject: SubjectBackupReconciler, object: Ref{Group: "batch", Version: "v1", Kind: "CronJob", Namespace: "apps", Name: "nightly"}, verb: VerbCreate, namespace: "apps"},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -789,6 +821,57 @@ func TestMigrationJobRowIsObjectLevel(t *testing.T) {
 			}
 			if denied.Code() != 403 {
 				t.Fatalf("refusal code = %d, want 403", denied.Code())
+			}
+		})
+	}
+}
+
+// TestBackupScheduleCronJob covers the positive half of C-04's backup row: the
+// reconciler creates the CronJob that carries one policy's schedule (C-41).
+func TestBackupScheduleCronJob(t *testing.T) {
+	err := Admit(Request{
+		Subject: SubjectBackupReconciler,
+		Object:  Ref{Group: "batch", Version: "v1", Kind: "CronJob", Namespace: "apps", Name: "nightly"},
+		Verb:    VerbCreate,
+		Parts:   []Part{PartObject},
+		Markers: creatorMarkers("uid-policy"),
+		Scope:   namespaces("apps"),
+	})
+	if err != nil {
+		t.Fatalf("create the schedule CronJob refused: %v", err)
+	}
+}
+
+// TestRestoreCreatesNewInstanceOnly covers the restore allocation: restoring to
+// a new instance creates an application and its volumes and never rewrites one
+// that already exists (C-41, ADR-015).
+func TestRestoreCreatesNewInstanceOnly(t *testing.T) {
+	for _, kind := range []string{"Application", "Volume"} {
+		t.Run(kind+" created", func(t *testing.T) {
+			err := Admit(Request{
+				Subject: SubjectMigrationReconciler,
+				Object:  Ref{Group: "kos.tsic.top", Version: "v1beta1", Kind: kind, Namespace: "apps", Name: "restored"},
+				Verb:    VerbCreate,
+				Parts:   []Part{PartSpec},
+			})
+			if err != nil {
+				t.Fatalf("restore creation refused: %v", err)
+			}
+		})
+		t.Run(kind+" rewrite", func(t *testing.T) {
+			current := &unstructured.Unstructured{Object: map[string]any{"metadata": map[string]any{
+				"name": "restored", "namespace": "apps",
+				"labels": map[string]any{markers.ManagedBy: ManagedByValue},
+			}}}
+			err := Admit(Request{
+				Subject: SubjectMigrationReconciler,
+				Object:  Ref{Group: "kos.tsic.top", Version: "v1beta1", Kind: kind, Namespace: "apps", Name: "restored"},
+				Verb:    VerbApply,
+				Parts:   []Part{PartSpec},
+				Current: current,
+			})
+			if err == nil {
+				t.Fatal("the restore flow rewrote an existing object")
 			}
 		})
 	}

@@ -8,8 +8,9 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 扩展装载（包摘要、声明、九类贡献、依赖激活与可见性投影）、扩展停用与卸载
 （数据保留语义、遗留清单与依赖阻塞）、框架版本兼容与升级预检、应用渲染与生命周期动作
 （停止、启动、重启、扩缩容与资源规格）、入口形态与证书状态、升级回滚与外部改动仲裁、
-本地账号会话、发现适配器与设备事实、卷迁移的六阶段状态机与回滚，以及设置域、用户偏好
-与目录来源三类贡献的自身语义；不含其余贡献类的语义与 Provider 能力验证。
+备份策略调和与恢复到新实例（含演练基线）、本地账号会话、发现适配器与设备事实、卷迁移的六阶段
+状态机与回滚，以及设置域、用户偏好与目录来源三类贡献的自身语义；不含其余贡献类的语义与
+Provider 能力验证。
 
 ## 布局
 
@@ -39,6 +40,7 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `pkg/settings/` | C-23 设置域投影：当前值、来源、修改入口与不可修改原因 |
 | `pkg/catalogue/` | C-24 目录来源：条目结构、摘要校验、定义同步与来源缺失的升级路径 |
 | `pkg/access/` | C-59/C-60 判定：可见性谓词、角色写权限、所有权与跨所有者引用，扩展对象按声明授权 |
+| `pkg/backup/` | C-41/C-42 数据保护：策略调和与计划触发、失败域拒绝、四类基线项的全量计算、恢复到新实例与演练比对；复制与摘要交给工作进程，调和轮只观测结果 |
 | `tests/acceptance/TC-66/` | 卷迁移六阶段完成，绑定换到新声明、应用不变 |
 | `tests/acceptance/TC-67/` | 五个阶段各注入一次失败后回滚到源卷 |
 | `tests/acceptance/TC-68/` | 清理只打释放标记，不删除源卷 |
@@ -77,6 +79,9 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `tests/acceptance/TC-126/` | 上限小于请求被拒并指出字段，工作负载与投影保持原值 |
 | `tests/acceptance/TC-127/` | 停止期间写副本数被接受，启动按最后写入值收敛 |
 | `tests/acceptance/TC-72/` | 自身数据库的每日导出与离线恢复 |
+| `tests/acceptance/TC-69/` | 应用一致性备份恢复到新实例，四项基线与源应用不变 |
+| `tests/acceptance/TC-70/` | 同失败域目标被预检拒绝，不产生成功记录 |
+| `tests/acceptance/TC-71/` | 被篡改的演练数据使演练与备份都失败并列出差异 |
 | `tests/acceptance/TC-117/` | 登录失败同一结果、按登录名锁定与退出 |
 | `tests/acceptance/TC-118/` | 角色变更、改口令、停用与删除前置转移 |
 | `tests/acceptance/TC-30/` | 可见性谓词：所有者、列名与未列名成员、访客 |
@@ -120,9 +125,11 @@ ApplicationDefinition 与 NodeDevice 没有 status 写者，因此没有 status 
 
 `spec` 字段由契约逐个加入：尚未固定字段的对象保持空 spec，实现不发明线格式。当前已兑现
 C-60 的 `spec.owner`（五类带所有者的对象）、C-59 的 `Application.spec.visibility`、
-C-41/C-60 的 `BackupPolicy.spec.selector`、
-C-17 的 `SystemComponent.spec.package`（工件引用与 sha256 摘要）与 C-28 的
-`spec.disable`（停用请求）、
+C-41 的 `BackupPolicy.spec.selector`/`schedule`/`consistency`/`target`/`retention`/`drill`、
+`status.lastBackup`（基线四项）、`status.lastDrill` 与 `status.running`（在办的长动作），C-42 的
+`RestoreJob.spec.policy`/`targetApplication`/`inPlace` 与 `status.phase` 四阶段、`status.backupPath`
+（解析出的运行目录）及差异项，C-17 的 `SystemComponent.spec.package`（工件引用与 sha256 摘要）与
+C-28 的 `spec.disable`（停用请求）、
 C-32 的 `Application.spec.definitionRef`/`namespace`/`config`/`volumes` 与定义侧
 `spec.package`/`config`/`template`/`hooks`/`chart`/`requires`、C-66 的
 `Application.spec.replicas`/`paused`、C-67 的 `Application.spec.resources`、

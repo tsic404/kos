@@ -20,6 +20,12 @@ var routeKinds = map[schema.GroupKind]bool{
 	{Group: "", Kind: "Service"}:                  true,
 }
 
+// cronJobKinds is the downstream object C-41 allocates to the backup
+// reconciler: the CronJob that carries the policy's schedule.
+var cronJobKinds = map[schema.GroupKind]bool{
+	{Group: "batch", Kind: "CronJob"}: true,
+}
+
 // migrationJobKinds are the downstream objects C-40 gives the migration flow:
 // the batch Job a copy or a verification runs. The row is object-level, so the
 // flow cannot use it for another kind.
@@ -148,8 +154,16 @@ func admitKernelDelete(req Request) error {
 }
 
 // admitKernelSpec applies the spec column of C-03: the user writes a user spec,
-// one named subject writes a system spec, nobody else writes either.
+// one named subject writes a system spec, nobody else writes either. A restore
+// creates the new instance's application and volumes (C-41, ADR-015) and may
+// not rewrite one that already exists.
 func admitKernelSpec(req Request) error {
+	if creator, isRestore := restoreCreators[req.Object.Kind]; isRestore && req.Subject == creator {
+		if req.Current != nil {
+			return denyf(req, "the restore flow creates a new instance and never rewrites an existing object")
+		}
+		return nil
+	}
 	if writer, isSystem := systemSpecWriters[req.Object.Kind]; isSystem {
 		if req.Subject != writer {
 			return denyf(req, "the system spec is written by %q", writer)
@@ -327,6 +341,15 @@ func admitDownstream(req Request) error {
 		}
 		if !req.Scope.Kinds[req.Object.GroupKind()] {
 			return denyf(req, "kind is not declared by the extension")
+		}
+	case SubjectBackupReconciler:
+		// C-04 allocates the schedule CronJob to the backup reconciler (C-41), so
+		// the row cannot carry another downstream object.
+		if !cronJobKinds[req.Object.GroupKind()] {
+			return denyf(req, "the backup reconciler writes only the schedule CronJob")
+		}
+		if !req.Scope.Namespaces[req.Object.Namespace] {
+			return denyf(req, "namespace is not declared by the backup policy")
 		}
 	}
 	if !downstreamWriters[req.Subject][req.Verb] {

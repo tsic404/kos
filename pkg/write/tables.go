@@ -31,6 +31,16 @@ var systemSpecWriters = map[string]Subject{
 	"NodeDevice":            SubjectDiscovery,
 }
 
+// restoreCreators is the extra C-03 allocation a restore needs (C-41): restoring
+// to a new instance creates a new application and its volumes, and never
+// rewrites an object that already exists. The created objects keep the owner
+// the restore request carries (C-60); the restore reconciler writes no other
+// user spec, so a field still has one writer.
+var restoreCreators = map[string]Subject{
+	"Application": SubjectMigrationReconciler,
+	"Volume":      SubjectMigrationReconciler,
+}
+
 // ownedKinds carry spec.owner, which the API writes from the session and only
 // the global Owner may transfer (C-60). They are also the kinds a Member may
 // write, and only when it owns them: an endpoint's owner comes from its target
@@ -78,20 +88,21 @@ var markerClasses = map[Subject]map[markers.Class]bool{
 // downstreamWriters is the C-04 allocation for native objects below a KOS
 // object. The application reconciler renders inside its declared namespaces, the
 // extension controller inside its declared scope, the installer in its own, the
-// endpoint reconciler inside one entry's namespace and the migration flow inside
-// the namespace of the volume it moves; the volume reconciler, the catalogue,
+// endpoint reconciler inside one entry's namespace, the migration flow inside the
+// namespace of the volume it moves, and the backup reconciler creates the
+// schedule CronJob of one policy; the volume reconciler, the catalogue,
 // discovery and the projection write none. The endpoint reconciler's row is
 // object-level (C-43): admission fixes it to the Ingress and Service kinds, so it
 // cannot use the row for another kind. The migration flow's row is object-level
 // too (C-40): admission fixes it to the batch Jobs a copy or a verification runs.
-// The backup reconciler's CronJob is a row (C-41) that is not implemented yet:
-// that subject is refused rather than granted a class-wide write it was never
-// given.
+// The backup reconciler's row is object-level as well (C-41): admission fixes it
+// to the CronJob kind.
 var downstreamWriters = map[Subject]map[Verb]bool{
 	SubjectInstaller:             allVerbs(),
 	SubjectApplicationReconciler: allVerbs(),
 	SubjectEndpointReconciler:    allVerbs(),
 	SubjectExtensionReconciler:   allVerbs(),
+	SubjectBackupReconciler:      allVerbs(),
 	SubjectMigrationReconciler:   {VerbCreate: true, VerbDelete: true},
 }
 

@@ -324,9 +324,10 @@ func (p *Policy) requireApplicationOwner(ctx context.Context, session Session, r
 }
 
 // checkReferences enforces C-60's cross-owner rules on one Member write: an
-// application may not reference another account's volume, and a backup policy's
-// selector may not reach another account's applications or volumes. The rules
-// only decide range; they never change ownership.
+// application may not reference another account's volume, a backup policy's
+// selector may not reach another account's applications or volumes, and a
+// restore job may not read another account's policy (C-41). The rules only
+// decide range; they never change ownership.
 func (p *Policy) checkReferences(ctx context.Context, session Session, ref controlplane.ObjectRef, object map[string]any) error {
 	if object == nil {
 		return nil
@@ -341,6 +342,21 @@ func (p *Policy) checkReferences(ctx context.Context, session Session, ref contr
 			if found && owner != "" && owner != session.Username {
 				return denyf("volume %q is owned by %q", name, owner)
 			}
+		}
+	case "RestoreJob":
+		policyName := nestedString(object, "spec", "policy")
+		if policyName == "" {
+			return denyf("spec.policy is required: a restore reads one policy's run")
+		}
+		owner, found, err := p.ownerOf(ctx, "BackupPolicy", ref.Namespace, policyName)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return denyf("backup policy %q does not exist, so its owner cannot be resolved", policyName)
+		}
+		if owner != "" && owner != session.Username {
+			return denyf("backup policy %q is owned by %q", policyName, owner)
 		}
 	case "BackupPolicy":
 		selector := nestedString(object, "spec", "selector")
