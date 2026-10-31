@@ -26,34 +26,47 @@ import (
 // the subject that also writes the component status (C-03).
 const ComponentFinalizer = "kos.tsic.top/system-component"
 
-// DeprovisionBlocked is the condition of a component whose deletion a dependent
-// keeps open (C-48).
+// DeprovisionBlocked is the condition of a component whose deletion a hold
+// keeps open: a dependent object (C-48), or a declaration that cannot be read
+// (C-29).
 const (
 	// ConditionDeprovisionBlocked reports a blocked deletion.
 	ConditionDeprovisionBlocked = "DeprovisionBlocked"
-	// ReasonDeprovisionBlocked is its reason.
+	// ReasonDeprovisionBlocked is its reason when a dependent holds it.
 	ReasonDeprovisionBlocked = "DeprovisionBlocked"
+	// ReasonDeclarationUnreadable is the reason of an uninstall held by a
+	// structurally broken extension declaration (C-29).
+	ReasonDeclarationUnreadable = "DeclarationUnreadable"
 )
 
 // Gate holds a deleting system component open while another object depends on
-// it, and releases the component once nothing does (C-17, C-46, C-48). It reads
-// the dependency edges from the endpoints: the spec references and the issuer
-// an endpoint's status resolved.
+// it, and releases the component once nothing does (C-17, C-46, C-48, C-29). It
+// reads the dependency edges from every live component's declaration, from the
+// applications and Providers that require its capabilities, from extension
+// objects that reference its classes, and from the endpoints that reference it.
 type Gate struct {
-	// Dynamic reads the components and the endpoints that depend on them.
+	// Dynamic reads the components and the objects that depend on them.
 	Dynamic dynamic.Interface
 	// Resources maps a kernel kind to its served resource name.
 	Resources map[schema.GroupKind]string
-	// Status writes the component condition and finalizers (C-03).
+	// Status writes the component condition, finalizers and the residual
+	// manifest (C-03, C-29).
 	Status *write.Writer
+	// Artifacts resolves the package of a live component so its declaration can
+	// be read. It is optional while nothing is being deleted; a pending deletion
+	// without it fails the round, because the dependents and the retention
+	// cannot be judged.
+	Artifacts ArtifactSource
 }
 
-// Blocked is one component a dependent kept from being removed, with every
-// dependent that holds it.
+// Blocked is one component a hold kept from being removed. A dependent-driven
+// hold names every dependent; a hold for an unreadable declaration names none,
+// because its edges cannot be read.
 type Blocked struct {
 	// Name is the component's object name.
 	Name string
-	// Dependents are the endpoints that reference it, ordered.
+	// Dependents are the objects that reference it, ordered. The list is empty
+	// when the hold comes from an unreadable declaration.
 	Dependents []write.Ref
 }
 
@@ -72,6 +85,10 @@ func (g *Gate) Reconcile(ctx context.Context) ([]Blocked, error) {
 	if err != nil {
 		return nil, err
 	}
+	declarationSet, err := g.declarations(ctx, components)
+	if err != nil {
+		return nil, err
+	}
 	dependents := dependentsOf(endpoints)
 	blocked := make([]Blocked, 0, len(components))
 	for _, component := range components {
@@ -82,7 +99,6 @@ func (g *Gate) Reconcile(ctx context.Context) ([]Blocked, error) {
 		if attribution == markers.AttributionUnmanaged {
 			continue
 		}
-		refs := dependents[component.GetName()]
 		if component.GetDeletionTimestamp() == nil {
 			if err := g.keepFinalizer(ctx, component); err != nil {
 				return nil, err
@@ -99,6 +115,22 @@ func (g *Gate) Reconcile(ctx context.Context) ([]Blocked, error) {
 			// (C-48). The component leaves the install set like any uninstall.
 			continue
 		}
+		if cause, broken := declarationSet.unreadable[component.GetName()]; broken {
+			// A structurally broken declaration is permanent until the package
+			// changes. It holds only this uninstall and is reported like any
+			// other blocked hold, so the install pass keeps the component live,
+			// its phase Terminating and its preference domains intact.
+			if err := g.blockUnreadable(ctx, component, cause); err != nil {
+				return nil, err
+			}
+			blocked = append(blocked, Blocked{Name: component.GetName()})
+			continue
+		}
+		refs, err := g.componentDependents(ctx, component.GetName(), declarationSet.readable)
+		if err != nil {
+			return nil, err
+		}
+		refs = orderedRefs(append(dependents[component.GetName()], refs...))
 		if len(refs) > 0 {
 			if err := g.blockDeletion(ctx, component, refs); err != nil {
 				return nil, err
@@ -106,11 +138,121 @@ func (g *Gate) Reconcile(ctx context.Context) ([]Blocked, error) {
 			blocked = append(blocked, Blocked{Name: component.GetName(), Dependents: refs})
 			continue
 		}
-		if err := g.releaseFinalizer(ctx, component); err != nil {
+		if err := g.uninstall(ctx, component, declarationSet.readable[component.GetName()]); err != nil {
 			return nil, err
 		}
 	}
 	return blocked, nil
+}
+
+// declarationSet is what the gate could read from the live components: the
+// loaded declarations and the permanent parse/load errors that block only their
+// own deleting component.
+type declarationSet struct {
+	readable   map[string]Loaded
+	unreadable map[string]error
+}
+
+// declarations reads the declaration of every live component that names a
+// package. A fetch failure is transient, so the whole round retries; a package
+// that parses or loads into no usable declaration is structurally broken and is
+// recorded against its component, whose own deletion then waits while every
+// other component proceeds (C-29). Without a deletion no declaration is needed.
+func (g *Gate) declarations(ctx context.Context, components []*unstructured.Unstructured) (declarationSet, error) {
+	set := declarationSet{
+		readable:   make(map[string]Loaded, len(components)),
+		unreadable: make(map[string]error),
+	}
+	if !hasDeletion(components) {
+		return set, nil
+	}
+	if g.Artifacts == nil {
+		return declarationSet{}, errors.New("component gate cannot read package declarations while a deletion is pending")
+	}
+	for _, component := range components {
+		attribution, err := markers.AttributionOf(component.GetLabels())
+		if err != nil {
+			return declarationSet{}, fmt.Errorf("component %s: %w", component.GetName(), err)
+		}
+		if attribution == markers.AttributionUnmanaged || attribution == markers.AttributionAdopted {
+			continue
+		}
+		reference, _, err := unstructured.NestedString(component.Object, "spec", "package", "reference")
+		if err != nil {
+			set.unreadable[component.GetName()] = fmt.Errorf("read spec.package.reference: %w", err)
+			continue
+		}
+		if reference == "" {
+			continue
+		}
+		content, err := g.Artifacts.Fetch(ctx, reference)
+		if err != nil {
+			return declarationSet{}, fmt.Errorf("component %s: read package %q: %w", component.GetName(), reference, err)
+		}
+		declaration, err := Parse(content)
+		if err != nil {
+			set.unreadable[component.GetName()] = err
+			continue
+		}
+		loaded, err := declaration.Load()
+		if err != nil {
+			set.unreadable[component.GetName()] = err
+			continue
+		}
+		set.readable[component.GetName()] = loaded
+	}
+	return set, nil
+}
+
+// hasDeletion reports whether any live component carries a deletion timestamp.
+func hasDeletion(components []*unstructured.Unstructured) bool {
+	for _, component := range components {
+		if component.GetDeletionTimestamp() != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// componentDependents returns every edge that keeps one component installed:
+// dependent components, extension objects referencing its classes, and the
+// applications and Providers that require its capabilities (C-28, C-29).
+func (g *Gate) componentDependents(ctx context.Context, name string, declarations map[string]Loaded) ([]write.Ref, error) {
+	refs := componentDependents(name, declarations)
+	target, known := declarations[name]
+	if !known {
+		return refs, nil
+	}
+	objects, err := objectDependents(ctx, g.Dynamic, name, declarations)
+	if err != nil {
+		return nil, err
+	}
+	refs = append(refs, objects...)
+	applications, err := applicationAndProviderDependents(ctx, g.Dynamic, g.Resources, name, target)
+	if err != nil {
+		return nil, err
+	}
+	refs = append(refs, applications...)
+	return refs, nil
+}
+
+// uninstall settles the declared fate of the component's data, records the
+// residual manifest and clears the capability registration before the finalizer
+// is released (C-29).
+func (g *Gate) uninstall(ctx context.Context, component *unstructured.Unstructured, declaration Loaded) error {
+	if g.Artifacts != nil && len(declaration.Identifier) > 0 {
+		residuals, err := applyRetention(ctx, g.Dynamic, g.Status, declaration.Contributions.ObjectClasses, declaration.Retention)
+		if err != nil {
+			return err
+		}
+		if err := writeResiduals(ctx, g.Status, component.GetUID(), residuals); err != nil {
+			return err
+		}
+	}
+	if err := clearRegistration(ctx, g.Dynamic, g.Resources, g.Status, component.GetName(), component.GetUID()); err != nil {
+		return err
+	}
+	return g.releaseFinalizer(ctx, component)
 }
 
 // BlockedNames returns the names of the components a round held open, so the
@@ -247,6 +389,24 @@ func (g *Gate) clearBlocked(ctx context.Context, component *unstructured.Unstruc
 		return nil
 	}
 	status["conditions"] = conditionsValue(kept)
+	return g.applyStatus(ctx, component, status)
+}
+
+// blockUnreadable marks one component's uninstall as undecidable because its
+// own declaration cannot be parsed or loaded. The error is permanent until the
+// package changes, so it holds this deletion and lets the round continue (C-29).
+func (g *Gate) blockUnreadable(ctx context.Context, component *unstructured.Unstructured, cause error) error {
+	status, err := statusOf(component)
+	if err != nil {
+		return err
+	}
+	conditions, err := conditionsFrom(status["conditions"])
+	if err != nil {
+		return fmt.Errorf("component %s: %w", component.GetName(), err)
+	}
+	condition := state.Condition(ConditionDeprovisionBlocked, metav1.ConditionTrue, component.GetGeneration(),
+		ReasonDeclarationUnreadable, "卸载无法判定：扩展声明不可读："+cause.Error())
+	status["conditions"] = conditionsValue(state.Set(conditions, condition))
 	return g.applyStatus(ctx, component, status)
 }
 

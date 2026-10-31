@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -38,6 +39,9 @@ const (
 	ConditionClaimBlocked      = "ClaimBlocked"
 	ConditionLost              = "Lost"
 	ConditionImported          = "Imported"
+	// ConditionDeletionBlocked reports an extension object reference that
+	// holds a deleting volume in place (C-19).
+	ConditionDeletionBlocked = "DeletionBlocked"
 )
 
 // Capability names a volume backend resolves (C-09, C-38). The baseline names
@@ -85,13 +89,19 @@ type CapabilitySource interface {
 type Registered []v1beta1.VolumeCapability
 
 // Version implements CapabilitySource.
-func (r Registered) Version(_ context.Context, name string) (string, bool, error) {
+func (r Registered) Version(_ context.Context, name string) (version string, ok bool, err error) {
 	for _, capability := range r {
 		if capability.Name == name {
 			return capability.Version, true, nil
 		}
 	}
 	return "", false, nil
+}
+
+// ReferenceGate reports the extension objects that declare a reference to one
+// kernel object (C-19). A deleting volume stays while any reference exists.
+type ReferenceGate interface {
+	Referrers(ctx context.Context, target write.Ref) ([]v1beta1.ObjectRef, error)
 }
 
 // Options configures a Controller.
@@ -104,6 +114,9 @@ type Options struct {
 	// NodeGrace is the heartbeat grace period the confirmation window adds
 	// five minutes to; zero selects DefaultNodeGrace.
 	NodeGrace time.Duration
+	// References reports extension object references that hold a deletion
+	// (C-19); nil lets every deletion proceed.
+	References ReferenceGate
 }
 
 // Controller reconciles volumes: it creates and expands the one claim a volume
@@ -113,11 +126,12 @@ type Controller struct {
 	capabilities CapabilitySource
 	clock        func() time.Time
 	nodeGrace    time.Duration
+	references   ReferenceGate
 }
 
 // NewController builds a controller over one store.
 func NewController(store Store, options Options) *Controller {
-	controller := &Controller{store: store, capabilities: options.Capabilities, clock: options.Clock, nodeGrace: options.NodeGrace}
+	controller := &Controller{store: store, capabilities: options.Capabilities, clock: options.Clock, nodeGrace: options.NodeGrace, references: options.References}
 	if controller.clock == nil {
 		controller.clock = time.Now
 	}
@@ -300,6 +314,18 @@ func (c *Controller) expand(ctx context.Context, volume *v1beta1.Volume, claim *
 // decision reads the object field, so the kubectl and panel paths agree. A
 // claim KOS does not own is neither marked nor deleted (C-02, C-04).
 func (c *Controller) release(ctx context.Context, volume *v1beta1.Volume) (reconcile.Result, error) {
+	if c.references != nil {
+		referrers, err := c.references.Referrers(ctx, write.Ref{
+			Group: api.Group, Version: "v1beta1", Kind: "Volume",
+			Namespace: volume.Namespace, Name: volume.Name,
+		})
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+		if len(referrers) > 0 {
+			return c.blockReferences(ctx, volume, referrers)
+		}
+	}
 	claimName := volume.Name
 	if volume.Status.BoundClaim != "" {
 		claimName = volume.Status.BoundClaim
@@ -334,6 +360,33 @@ func (c *Controller) release(ctx context.Context, volume *v1beta1.Volume) (recon
 		}
 	}
 	return reconcile.Result{}, c.clearFinalizer(ctx, volume)
+}
+
+// blockReferences keeps a deleting volume in place while an extension object
+// references it, and lists the referrers on a condition (C-19). The volume's
+// phase and health stay as observed: the user asked for a deletion that is
+// refused, not for a different state.
+func (c *Controller) blockReferences(ctx context.Context, volume *v1beta1.Volume, referrers []v1beta1.ObjectRef) (reconcile.Result, error) {
+	status := volume.Status
+	status.Conditions = append([]metav1.Condition(nil), volume.Status.Conditions...)
+	if status.Phase == "" {
+		status.Phase = PhasePending
+	}
+	if status.Health.State == "" {
+		status.Health = v1beta1.Health{State: v1beta1.HealthStateUnavailable}
+	}
+	names := make([]string, 0, len(referrers))
+	for _, ref := range referrers {
+		name := ref.Kind + " " + ref.Name
+		if ref.Namespace != "" {
+			name = ref.Kind + " " + ref.Namespace + "/" + ref.Name
+		}
+		names = append(names, name)
+	}
+	message := "删除被扩展对象引用阻塞：引用者 " + strings.Join(names, ", ")
+	status.Conditions = withFailure(status.Conditions, volume.Generation, ConditionDeletionBlocked, message)
+	status.Conditions = state.Set(status.Conditions, state.Blocked(volume.Generation, ConditionDeletionBlocked, message))
+	return reconcile.Result{RequeueAfter: boundResync}, c.writeStatus(ctx, volume, status)
 }
 
 // releaseForeignClaim ends the deletion of a volume whose claim belongs to
@@ -473,6 +526,7 @@ var failureConditions = []string{
 	ConditionStorageMissing,
 	ConditionClaimBlocked,
 	ConditionLost,
+	ConditionDeletionBlocked,
 }
 
 // withFailure sets one failure condition and removes the ones that no longer

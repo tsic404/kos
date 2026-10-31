@@ -39,6 +39,11 @@ spec:
           spec:
             description: Spec is the desired state owned by the installer (C-03).
             properties:
+              disable:
+                description: |-
+                  Disable asks for the component's contributions to be withdrawn while its
+                  objects and data stay (C-28). Clearing it restores the contributions.
+                type: boolean
               package:
                 description: |-
                   Package is the artifact this component installs (C-17). An adopted
@@ -162,6 +167,11 @@ spec:
           spec:
             description: Spec is the desired state owned by the installer (C-03).
             properties:
+              disable:
+                description: |-
+                  Disable asks for the component's contributions to be withdrawn while its
+                  objects and data stay (C-28). Clearing it restores the contributions.
+                type: boolean
               package:
                 description: |-
                   Package is the artifact this component installs (C-17). An adopted

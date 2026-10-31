@@ -115,6 +115,11 @@ type ObjectClass struct {
 	Resource   string   `json:"resource"`
 	Versions   []string `json:"versions"`
 	Namespaced bool     `json:"namespaced,omitempty"`
+	// References are the dotted field paths inside an object of this class that
+	// carry declarative references to other objects (C-19). Only object fields
+	// are followed: bracket indexes (items[0]) and numeric segments (items.0)
+	// are rejected, and the kernel does not interpret the rest of the spec.
+	References []string `json:"references,omitempty"`
 }
 
 // GroupKind returns the class identity.
@@ -664,7 +669,53 @@ func checkObjectClass(entry ObjectClass, apiGroup string) []string {
 		}
 		seen[version] = true
 	}
+	paths := map[string]bool{}
+	for _, path := range entry.References {
+		problem := checkReferencePath(path)
+		if problem != "" {
+			problems = append(problems, problem)
+			continue
+		}
+		if paths[path] {
+			problems = append(problems, "reference path "+path+" is declared twice")
+		}
+		paths[path] = true
+	}
 	return problems
+}
+
+// checkReferencePath reports a reference path that is not a dotted spec path
+// (C-19). The kernel follows only these declared locations.
+func checkReferencePath(path string) string {
+	if strings.TrimSpace(path) != path || path == "" {
+		return "reference paths must be non-empty and carry no surrounding whitespace"
+	}
+	segments := strings.Split(path, ".")
+	if len(segments) < 2 || segments[0] != "spec" {
+		return "reference path " + path + " must start with spec."
+	}
+	for _, segment := range segments {
+		if segment == "" {
+			return "reference path " + path + " has an empty segment"
+		}
+		if strings.ContainsAny(segment, "[]") || isNumericSegment(segment) {
+			// The reader walks object fields only; an indexed path would pass
+			// validation and never resolve, silently disabling C-19.
+			return "reference path " + path + " must name object fields only; index segments are not followed"
+		}
+	}
+	return ""
+}
+
+// isNumericSegment reports whether a path segment is a bare array index. The
+// reader cannot walk a list by index, so such a segment is a declaration error.
+func isNumericSegment(segment string) bool {
+	for _, character := range segment {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return segment != ""
 }
 
 // loadControllers validates controller declarations and their scope (C-20).

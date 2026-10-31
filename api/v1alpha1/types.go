@@ -1008,6 +1008,10 @@ type SystemComponentSpec struct {
 	// component installs no package and leaves it empty.
 	// +optional
 	Package ExtensionPackage `json:"package,omitempty"`
+	// Disable asks for the component's contributions to be withdrawn while its
+	// objects and data stay (C-28). Clearing it restores the contributions.
+	// +optional
+	Disable bool `json:"disable,omitempty"`
 }
 
 // ExtensionPackage identifies one extension package artifact and the digest it

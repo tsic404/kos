@@ -18,6 +18,10 @@ import (
 // controller unavailable (C-20).
 const DefaultFailureThreshold = 3
 
+// ErrControllerDisabled is returned when a disabled component's controller is
+// asked for a round; a disabled component's controllers stop writing (C-28).
+var ErrControllerDisabled = errors.New("controller is disabled")
+
 // ControllerState is the observed availability of one extension controller.
 type ControllerState struct {
 	Component           string
@@ -47,6 +51,7 @@ type controllerKey struct {
 type controllerEntry struct {
 	controller *reconcile.Controller
 	state      ControllerState
+	isEnabled  bool
 }
 
 // NewControllerSet builds a set of controller loops; a threshold below one
@@ -88,6 +93,7 @@ func (s *ControllerSet) Register(component string, contribution Controller, reco
 	}
 	s.entries[key] = &controllerEntry{
 		controller: controller,
+		isEnabled:  true,
 		state: ControllerState{
 			Component:   component,
 			Controller:  contribution.ID,
@@ -104,12 +110,38 @@ func (s *ControllerSet) Register(component string, contribution Controller, reco
 func (s *ControllerSet) Enqueue(component, id string, request reconcile.Request) error {
 	s.mu.Lock()
 	entry, ok := s.entries[controllerKey{component: component, controller: id}]
-	s.mu.Unlock()
 	if !ok {
+		s.mu.Unlock()
 		return fmt.Errorf("no controller %s/%s", component, id)
+	}
+	isEnabled := entry.isEnabled
+	s.mu.Unlock()
+	if !isEnabled {
+		return ErrControllerDisabled
 	}
 	entry.controller.Enqueue(request)
 	return nil
+}
+
+// SetEnabled starts or stops every controller of one component. A disabled
+// component's controllers produce no further rounds; enabling them resumes
+// reconciliation (C-28).
+func (s *ControllerSet) SetEnabled(component string, isEnabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, entry := range s.entries {
+		if key.component == component {
+			entry.isEnabled = isEnabled
+		}
+	}
+}
+
+// isEnabled reports whether one controller accepts rounds.
+func (s *ControllerSet) isEnabled(key controllerKey) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.entries[key]
+	return !ok || entry.isEnabled
 }
 
 // Run starts every loop and blocks until ctx is done.
@@ -199,8 +231,13 @@ type recordingReconciler struct {
 	inner reconcile.Reconciler
 }
 
-// Reconcile runs the round and records its outcome.
+// Reconcile runs the round and records its outcome. A round belonging to a
+// component that was disabled while queued is dropped, so a stopped controller
+// never writes (C-28).
 func (r recordingReconciler) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+	if !r.set.isEnabled(r.key) {
+		return reconcile.Result{}, nil
+	}
 	result, err := r.inner.Reconcile(ctx, request)
 	r.set.record(r.key, err)
 	return result, err

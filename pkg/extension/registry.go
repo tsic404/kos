@@ -214,8 +214,9 @@ func (r *Registry) Preferences() []PreferenceSchema {
 
 // activated is one component that passed the dependency gate.
 type activated struct {
-	name   string
-	loaded Loaded
+	name             string
+	loaded           Loaded
+	disableBlockedBy []string
 }
 
 // buildRegistry merges the activated contributions. A class two components both
