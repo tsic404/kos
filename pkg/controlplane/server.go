@@ -234,6 +234,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/action-requests", s.handleAction)
 	s.mux.HandleFunc("GET /api/v1/diagnostics/{namespace}/{name}", s.handleDiagnosticsChain)
 	s.mux.HandleFunc("GET /api/v1/diagnostics/{namespace}/{name}/bundle", s.handleDiagnosticsBundle)
+	s.mux.HandleFunc("POST /api/v1/diagnostics/bundles", s.handleDiagnosticsExport)
 	s.mux.HandleFunc("GET /api/v1/logs/{namespace}/{name}", s.handleApplicationLogs)
 	s.mux.HandleFunc("GET /api/v1/events", s.handleEvents)
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {

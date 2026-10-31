@@ -40,28 +40,54 @@ func (c *Catalogue) Capabilities(ctx context.Context) ([]app.Capability, error) 
 		if err != nil {
 			return nil, err
 		}
-		results := make(map[string]v1beta1.ProviderCapabilityResult, len(status.Capabilities))
-		for _, result := range status.Capabilities {
-			results[result.Name+"@"+result.Version] = result
-		}
-		for _, capability := range status.EffectiveCapabilities {
-			result, found := results[capability.Name+"@"+capability.Version]
-			capabilities = append(capabilities, app.Capability{
-				Name:       capability.Name,
-				Version:    capability.Version,
-				Scope:      capability.Scope,
-				Guarantees: guaranteesOf(capability),
-				Verified:   found && result.State == conformance.StateVerified,
-			})
-		}
+		capabilities = append(capabilities, StatusCapabilities(status)...)
 	}
+	sortCapabilities(capabilities)
+	return capabilities, nil
+}
+
+// Capabilities projects the effective capability set of the given providers
+// into the comparison input of C-11, each carrying the verification state the
+// validator wrote (C-09, C-10, C-48).
+func Capabilities(providers []v1beta1.Provider) []app.Capability {
+	var capabilities []app.Capability
+	for _, provider := range providers {
+		capabilities = append(capabilities, StatusCapabilities(provider.Status)...)
+	}
+	sortCapabilities(capabilities)
+	return capabilities
+}
+
+// StatusCapabilities projects one provider's status into the comparison input
+// of C-11. Only the effective set counts: a blocked withdrawal keeps the old set
+// in service (C-48).
+func StatusCapabilities(status v1beta1.ProviderStatus) []app.Capability {
+	results := make(map[string]v1beta1.ProviderCapabilityResult, len(status.Capabilities))
+	for _, result := range status.Capabilities {
+		results[result.Name+"@"+result.Version] = result
+	}
+	capabilities := make([]app.Capability, 0, len(status.EffectiveCapabilities))
+	for _, capability := range status.EffectiveCapabilities {
+		result, found := results[capability.Name+"@"+capability.Version]
+		capabilities = append(capabilities, app.Capability{
+			Name:       capability.Name,
+			Version:    capability.Version,
+			Scope:      capability.Scope,
+			Guarantees: guaranteesOf(capability),
+			Verified:   found && result.State == conformance.StateVerified,
+		})
+	}
+	return capabilities
+}
+
+// sortCapabilities orders the comparison input by name and version.
+func sortCapabilities(capabilities []app.Capability) {
 	sort.SliceStable(capabilities, func(left, right int) bool {
 		if capabilities[left].Name != capabilities[right].Name {
 			return capabilities[left].Name < capabilities[right].Name
 		}
 		return capabilities[left].Version < capabilities[right].Version
 	})
-	return capabilities, nil
 }
 
 // guaranteesOf converts the registered guarantee values into the comparison

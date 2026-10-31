@@ -52,6 +52,15 @@ type Device struct {
 	IsAllocatable bool
 }
 
+// FactMarkers reports the stale and invalid state of one stored device fact: a
+// fact is invalid when the marker exists or its node field differs from the
+// object name, and stale when the marker exists or its observation is older than
+// StaleAfter (C-37).
+func FactMarkers(object *unstructured.Unstructured, fact *v1beta1.NodeDevice, now time.Time) (invalid, stale bool) {
+	return object.GetLabels()[markers.Invalid] != "" || fact.Spec.Node != fact.Name,
+		object.GetLabels()[markers.Stale] != "" || isOlderThan(fact.Spec.ObservedAt, StaleAfter, now)
+}
+
 // BuildView turns stored device facts into the device view. A fact whose node
 // field differs from its name is invalid even when the marker has not been
 // written yet (C-37).
@@ -63,8 +72,7 @@ func BuildView(facts []*unstructured.Unstructured, now time.Time) View {
 			view.Warnings = append(view.Warnings, fmt.Sprintf("无法读取设备事实 %s", object.GetName()))
 			continue
 		}
-		invalid := object.GetLabels()[markers.Invalid] != "" || node.Spec.Node != node.Name
-		stale := object.GetLabels()[markers.Stale] != "" || isOlderThan(node.Spec.ObservedAt, StaleAfter, now)
+		invalid, stale := FactMarkers(object, node, now)
 		if invalid {
 			view.Warnings = append(view.Warnings, fmt.Sprintf("节点 %s 的设备事实被标记为无效", node.Name))
 		}

@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math"
 	"net/http"
 	"sort"
@@ -65,7 +66,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := namespace
-	var filter *eventFilter
+	var filter *EventFilter
 	if kind != "" {
 		objectType, failure := resolveType(kind, query.Get("apiVersion"), s.extensions)
 		if failure != nil {
@@ -95,37 +96,80 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			writeError(w, failure)
 			return
 		}
-		filter = &eventFilter{ref: ref}
+		filter = &EventFilter{Ref: ref}
 		scope = ref.Namespace
 	}
-	// The read time is taken before the cluster reads the projection names it
-	// at (C-13), so it stays the instant the read started however many subject
-	// lookups the visibility rule below needs.
-	now := s.now()
-	observed, err := s.source.List(r.Context(), eventClass, scope)
-	if err != nil {
-		writeError(w, s.clusterReadFailure(err, ObjectRef{Kind: "Event", Namespace: scope}))
+	read, failure := (EventReader{
+		Source: s.source, Authorizer: s.authorizer, Now: s.now, Log: s.log,
+	}).Read(r.Context(), scope, filter)
+	if failure != nil {
+		writeError(w, failure)
 		return
+	}
+	writeJSON(w, http.StatusOK, read)
+}
+
+// EventFilter narrows a read to the events about one subject (C-64).
+type EventFilter struct {
+	// Ref is the object the read is about.
+	Ref ObjectRef
+}
+
+// Matches reports whether an event concerns the filtered object. All four
+// identity fields compare equal: a subject that names the same kind and name
+// under another API group, another namespace, or no apiVersion at all is
+// another object, whatever the session may see of it (C-64).
+func (f EventFilter) Matches(event Event) bool {
+	return event.InvolvedObject == f.Ref
+}
+
+// EventReader reads C-64's window over one object source. It is the one
+// implementation of the window, the order and the visibility rule, so the API
+// handler and a page source cannot report the same event differently.
+type EventReader struct {
+	// Source reads the events and the objects the visibility rule judges;
+	// required.
+	Source ObjectSource
+	// Authorizer judges whether a session may read an event's subject; nil
+	// admits every event.
+	Authorizer Authorizer
+	// Now supplies the read clock; defaults to time.Now.
+	Now func() time.Time
+	// Log records the detail a user-facing failure must not carry; nil
+	// discards it.
+	Log *slog.Logger
+}
+
+// Read returns the events of the window that ends at the read, newest first. An
+// event the session may not see is absent from the answer; a cluster read that
+// failed fails the whole read (C-64).
+func (r EventReader) Read(ctx context.Context, namespace string, filter *EventFilter) (EventRead, *Error) {
+	if r.Authorizer == nil {
+		r.Authorizer = AllowAll{}
+	}
+	now := r.now()
+	observed, err := r.Source.List(ctx, eventClass, namespace)
+	if err != nil {
+		return EventRead{}, ClusterReadFailure(err, ObjectRef{Kind: "Event", Namespace: namespace}, r.Log)
 	}
 	cutoff := now.Add(-EventWindow)
 	events := make([]Event, 0, len(observed))
 	visible := make(map[string]bool)
 	for _, item := range observed {
-		event, ok := decodeEvent(item.Object)
+		event, ok := DecodeEvent(item.Object)
 		// The window is the hour that ends at the read (C-13): an event the
 		// cluster stamped after it cannot be part of what this read observed,
 		// so a clock ahead of the control plane's does not put it in front.
 		if !ok || event.LastSeen.Before(cutoff) || event.LastSeen.After(now) {
 			continue
 		}
-		if filter != nil && !filter.matches(event) {
+		if filter != nil && !filter.Matches(event) {
 			continue
 		}
 		if filter == nil {
-			shown, failure := s.eventVisible(r.Context(), event.InvolvedObject, visible)
+			shown, failure := r.visible(ctx, event.InvolvedObject, visible)
 			if failure != nil {
-				writeError(w, failure)
-				return
+				return EventRead{}, failure
 			}
 			if !shown {
 				continue
@@ -139,27 +183,21 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		return events[left].Name < events[right].Name
 	})
-	writeJSON(w, http.StatusOK, EventRead{ObservedAt: now, Window: EventWindow.String(), Events: events})
+	return EventRead{ObservedAt: now, Window: EventWindow.String(), Events: events}, nil
 }
 
-// eventFilter narrows a read to the events about one object.
-type eventFilter struct {
-	ref ObjectRef
+// now returns the read clock.
+func (r EventReader) now() time.Time {
+	if r.Now == nil {
+		return time.Now()
+	}
+	return r.Now()
 }
 
-// matches reports whether an event concerns the filtered object. All four
-// identity fields compare equal: a subject that names the same kind and name
-// under another API group, another namespace, or no apiVersion at all is
-// another object, whatever the session may see of it (C-64).
-func (f *eventFilter) matches(event Event) bool {
-	return event.InvolvedObject == f.ref
-}
-
-// eventVisible applies C-64's visibility rule to one event subject. A refusal
-// hides that event, not the whole read: the read spans many objects, so a
-// session that may not see one still reads the rest. Only a cluster read that
-// failed fails the request.
-func (s *Server) eventVisible(ctx context.Context, subject ObjectRef, cache map[string]bool) (bool, *Error) {
+// visible applies C-64's rule to one event subject. A refusal hides that event,
+// not the whole read; the verdict is cached per subject, so one read resolves
+// each subject once instead of re-reading it per event.
+func (r EventReader) visible(ctx context.Context, subject ObjectRef, cache map[string]bool) (bool, *Error) {
 	key := subject.String()
 	if shown, cached := cache[key]; cached {
 		return shown, nil
@@ -167,7 +205,7 @@ func (s *Server) eventVisible(ctx context.Context, subject ObjectRef, cache map[
 	var object map[string]any
 	objectType, known := kernelType(subject.Kind)
 	if known && (subject.Group == "" || subject.Group == objectType.Group) {
-		observed, err := s.source.Get(ctx, objectType, subject.Namespace, subject.Name)
+		observed, err := r.Source.Get(ctx, objectType, subject.Namespace, subject.Name)
 		switch {
 		case err == nil:
 			object = observed.Object
@@ -175,14 +213,14 @@ func (s *Server) eventVisible(ctx context.Context, subject ObjectRef, cache map[
 			// An event about an object that is gone is judged as an object
 			// without an owner.
 		default:
-			return false, s.clusterReadFailure(err, subject)
+			return false, ClusterReadFailure(err, subject, r.Log)
 		}
 	}
 	verb := VerbEventRead
 	if known && objectType.Group == api.Group && objectType.Kind == "Application" {
 		verb = VerbRead
 	}
-	_, err := s.authorizer.Decide(ctx, Request{Verb: verb, Ref: subject, Object: object})
+	_, err := r.Authorizer.Decide(ctx, Request{Verb: verb, Ref: subject, Object: object})
 	switch {
 	case err == nil:
 		cache[key] = true
@@ -191,15 +229,17 @@ func (s *Server) eventVisible(ctx context.Context, subject ObjectRef, cache map[
 		cache[key] = false
 		return false, nil
 	default:
-		s.log.Info("event hidden from session", "object", key, "reason", err)
+		if r.Log != nil {
+			r.Log.Info("event hidden from session", "object", key, "reason", err)
+		}
 		cache[key] = false
 		return false, nil
 	}
 }
 
-// decodeEvent reads one stored event. An event without a subject or without any
+// DecodeEvent reads one stored event. An event without a subject or without any
 // timestamp is not a readable event of the window.
-func decodeEvent(object map[string]any) (Event, bool) {
+func DecodeEvent(object map[string]any) (Event, bool) {
 	kind := nestedText(object, "involvedObject", "kind")
 	if kind == "" || nestedText(object, "involvedObject", "name") == "" {
 		return Event{}, false
