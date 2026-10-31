@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 
@@ -49,6 +50,55 @@ func (s *Server) handleDiagnosticsBundle(w http.ResponseWriter, r *http.Request)
 		writeError(w, s.diagnosticsFailure(err, namespace, name))
 		return
 	}
+	s.writeDiagnosticsBundle(w, bundle, name)
+}
+
+// diagnosticsExportRequest names the application one export is about.
+type diagnosticsExportRequest struct {
+	// Namespace is the application's namespace.
+	Namespace string `json:"namespace"`
+	// Name is the application name.
+	Name string `json:"name"`
+}
+
+// handleDiagnosticsExport exports one application's bundle on a write request.
+// C-22 admits only a write as a page action and C-51 names the export as the
+// diagnostics page's modification entry, so the export is reachable with POST
+// as well as the read-only download of C-26. Both answer the same document.
+func (s *Server) handleDiagnosticsExport(w http.ResponseWriter, r *http.Request) {
+	var request diagnosticsExportRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeError(w, invalidField("导出请求必须是 JSON"))
+		return
+	}
+	if request.Namespace == "" || request.Name == "" {
+		writeError(w, invalidField("namespace 与 name 必须同时给出"))
+		return
+	}
+	if failure := s.authorizeDiagnostics(r, request.Namespace, request.Name); failure != nil {
+		writeError(w, failure)
+		return
+	}
+	bundle, err := s.diagnostics.Bundle(r.Context(), request.Namespace, request.Name)
+	if err != nil {
+		writeError(w, s.diagnosticsFailure(err, request.Namespace, request.Name))
+		return
+	}
+	// C-14 covers every write attempt, and C-51 declares the export a
+	// modification entry, so the accepted export leaves a record naming the
+	// application it was about.
+	RecordAudit(r.Context(), s.auditor, s.log, AuditRecord{
+		Actor:  s.actorOf(r.Context()),
+		Object: ObjectRef{Group: api.Group, Kind: "Application", Namespace: request.Namespace, Name: request.Name},
+		Verb:   "export",
+		Result: ResultAccepted,
+		Source: SourceAPI,
+	})
+	s.writeDiagnosticsBundle(w, bundle, request.Name)
+}
+
+// writeDiagnosticsBundle writes the bundle as a downloadable document (C-26).
+func (s *Server) writeDiagnosticsBundle(w http.ResponseWriter, bundle diagnostics.Bundle, name string) {
 	encoded, err := bundle.Encode()
 	if err != nil {
 		s.log.Error("encode diagnostic bundle", "application", name, "error", err)

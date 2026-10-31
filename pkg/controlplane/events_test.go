@@ -357,7 +357,7 @@ func TestDecodeEventFallsBackToTheEventTime(t *testing.T) {
 		},
 		"eventTime": when.Format(time.RFC3339Nano),
 	}
-	event, ok := decodeEvent(object)
+	event, ok := DecodeEvent(object)
 	if !ok {
 		t.Fatal("an event with only eventTime was dropped")
 	}
@@ -366,6 +366,22 @@ func TestDecodeEventFallsBackToTheEventTime(t *testing.T) {
 	}
 	if event.FirstSeen != nil {
 		t.Fatalf("firstSeen = %v, want none", event.FirstSeen)
+	}
+}
+
+// TestDecodeEventKeepsTheStoredCount pins the shared decode: the events route
+// and a page source report the same repeat count, and an event without one
+// reads zero.
+func TestDecodeEventKeepsTheStoredCount(t *testing.T) {
+	object := storedEvent("with-count", "Pod", "default", "shop-0", fixedReadTime.Add(-time.Minute))
+	event, ok := DecodeEvent(object)
+	if !ok || event.Count != 3 {
+		t.Fatalf("event = %+v, want the stored count", event)
+	}
+	delete(object, "count")
+	event, ok = DecodeEvent(object)
+	if !ok || event.Count != 0 {
+		t.Fatalf("event = %+v, want zero when no count is stored", event)
 	}
 }
 

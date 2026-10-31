@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -78,13 +79,23 @@ func resourceOf(client dynamic.Interface, object ObjectType, namespace string) d
 // apart from an unreachable API because only the first needs a repair before a
 // retry can work. The cluster's own text stays in the log (C-12).
 func (s *Server) clusterReadFailure(err error, ref ObjectRef) *Error {
+	return ClusterReadFailure(err, ref, s.log)
+}
+
+// ClusterReadFailure maps a cluster read error to C-64's reasons for a caller
+// outside the API handler. It is the same answer the handler gives, so a page
+// source and the events route name a failure the same way (C-12, C-64).
+func ClusterReadFailure(err error, ref ObjectRef, log *slog.Logger) *Error {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	switch {
 	case apierrors.IsNotFound(err):
 		return notFound("对象 " + ref.String() + " 不存在").about(ref)
 	case apierrors.IsUnauthorized(err), apierrors.IsForbidden(err):
-		s.log.Error("cluster credential rejected", "object", ref.String(), "error", err)
+		log.Error("cluster credential rejected", "object", ref.String(), "error", err)
 		return clusterCredentialsInvalid("访问集群的凭据无效，读取不可用").about(ref)
 	}
-	s.log.Error("cluster read failed", "object", ref.String(), "error", err)
+	log.Error("cluster read failed", "object", ref.String(), "error", err)
 	return clusterUnavailable("集群 API 不可达，读取不可用").about(ref)
 }
