@@ -44,6 +44,7 @@ var nativeResources = map[schema.GroupKind]string{
 	{Group: "", Kind: "PersistentVolumeClaim"}:    "persistentvolumeclaims",
 	{Group: "", Kind: "Node"}:                     "nodes",
 	{Group: "", Kind: "Service"}:                  "services",
+	{Group: "batch", Kind: "CronJob"}:             "cronjobs",
 	{Group: "networking.k8s.io", Kind: "Ingress"}: "ingresses",
 }
 

@@ -441,7 +441,8 @@ func (c *Cluster) Resources() map[schema.GroupKind]string {
 	}
 	// Rendered application objects are native ones: the write path resolves
 	// their resources from discovery here, as an installed controller would
-	// (C-04, C-32).
+	// (C-04, C-32); batch carries the migration Jobs (C-40) and the backup
+	// schedule CronJob (C-41).
 	for _, groupVersion := range []schema.GroupVersion{
 		{Version: "v1"}, {Group: "apps", Version: "v1"}, {Group: "batch", Version: "v1"},
 	} {

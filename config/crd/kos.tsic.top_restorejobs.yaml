@@ -39,15 +39,100 @@ spec:
           spec:
             description: Spec is the desired state owned by the user (C-03).
             properties:
+              inPlace:
+                description: |-
+                  InPlace restores over the source instance; it must be declared, and the
+                  applications must be stopped (C-41).
+                type: boolean
               owner:
                 description: |-
                   Owner is the local username of the creating session; the API writes it
                   and only the global Owner may transfer it (C-60).
                 type: string
+              policy:
+                description: Policy names the backup policy whose run is restored
+                  (C-41).
+                type: string
+              targetApplication:
+                description: |-
+                  TargetApplication names the new instance. Each backed-up volume becomes
+                  a new volume named <targetApplication>-<sourceVolume> (C-41).
+                type: string
             type: object
           status:
             description: Status is written by the restore reconciler (C-03, C-07).
             properties:
+              backupPath:
+                description: |-
+                  BackupPath is the run directory this job restores; it is resolved once in
+                  the preflight, so a later run of the policy cannot change it mid-flight.
+                type: string
+              baseline:
+                description: Baseline is the backup's four items (C-42).
+                properties:
+                  bytes:
+                    description: Bytes is the total size of those files (C-42).
+                    format: int64
+                    type: integer
+                  checksum:
+                    description: Checksum is the content checksum of every row and
+                      file (C-42).
+                    type: string
+                  engines:
+                    description: |-
+                      Engines names the table engines the table entries cover, or "none" when
+                      no recognized database was found: an empty table list is then not
+                      mistaken for a measured empty schema (C-42).
+                    type: string
+                  files:
+                    description: Files is the number of regular files across the covered
+                      volumes (C-42).
+                    format: int64
+                    type: integer
+                  order:
+                    description: |-
+                      Order records the sorting and digest rules the checksum was computed
+                      with (C-42).
+                    type: string
+                  tables:
+                    description: Tables carries one entry per table (C-42).
+                    items:
+                      description: TableBaseline is one table's row count and row
+                        checksum (C-42).
+                      properties:
+                        checksum:
+                          description: Checksum is the row checksum, computed in primary-key
+                            order (C-42).
+                          type: string
+                        database:
+                          description: Database is the database file path inside the
+                            volume.
+                          type: string
+                        name:
+                          description: Name is the table name.
+                          type: string
+                        rows:
+                          description: Rows is the table's row count (C-42).
+                          format: int64
+                          type: integer
+                        volume:
+                          description: Volume is the volume the database file lives
+                            in.
+                          type: string
+                      required:
+                      - name
+                      - rows
+                      type: object
+                    type: array
+                required:
+                - bytes
+                - checksum
+                - files
+                type: object
+              completedAt:
+                description: CompletedAt is when the job settled.
+                format: date-time
+                type: string
               conditions:
                 description: Conditions carries Reconciled and the object's failure
                   conditions (C-07).
@@ -109,6 +194,26 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              diffs:
+                description: Diffs lists the differences that failed the verification
+                  (C-42).
+                items:
+                  description: BackupDiff is one item a restore found different from
+                    the baseline (C-42).
+                  properties:
+                    baseline:
+                      description: Baseline is the recorded value.
+                      type: string
+                    item:
+                      description: Item names the compared item.
+                      type: string
+                    observed:
+                      description: Observed is the value the restored data carried.
+                      type: string
+                  required:
+                  - item
+                  type: object
+                type: array
               health:
                 description: Health is the availability axis of the object (C-08).
                 properties:
@@ -121,9 +226,117 @@ spec:
                     - Unknown
                     type: string
                 type: object
+              observed:
+                description: Observed is what the restored data measured (C-42).
+                properties:
+                  bytes:
+                    description: Bytes is the total size of those files (C-42).
+                    format: int64
+                    type: integer
+                  checksum:
+                    description: Checksum is the content checksum of every row and
+                      file (C-42).
+                    type: string
+                  engines:
+                    description: |-
+                      Engines names the table engines the table entries cover, or "none" when
+                      no recognized database was found: an empty table list is then not
+                      mistaken for a measured empty schema (C-42).
+                    type: string
+                  files:
+                    description: Files is the number of regular files across the covered
+                      volumes (C-42).
+                    format: int64
+                    type: integer
+                  order:
+                    description: |-
+                      Order records the sorting and digest rules the checksum was computed
+                      with (C-42).
+                    type: string
+                  tables:
+                    description: Tables carries one entry per table (C-42).
+                    items:
+                      description: TableBaseline is one table's row count and row
+                        checksum (C-42).
+                      properties:
+                        checksum:
+                          description: Checksum is the row checksum, computed in primary-key
+                            order (C-42).
+                          type: string
+                        database:
+                          description: Database is the database file path inside the
+                            volume.
+                          type: string
+                        name:
+                          description: Name is the table name.
+                          type: string
+                        rows:
+                          description: Rows is the table's row count (C-42).
+                          format: int64
+                          type: integer
+                        volume:
+                          description: Volume is the volume the database file lives
+                            in.
+                          type: string
+                      required:
+                      - name
+                      - rows
+                      type: object
+                    type: array
+                required:
+                - bytes
+                - checksum
+                - files
+                type: object
               phase:
                 description: Phase is the flow stage; it is orthogonal to health (C-07).
                 type: string
+              running:
+                description: |-
+                  Running is the long action the restore component is executing and the
+                  job has not observed yet (C-06, C-42).
+                properties:
+                  kind:
+                    description: 'Kind is the action: capture, copy or measure.'
+                    type: string
+                  run:
+                    description: Run is the run directory the action reads or writes.
+                    type: string
+                  scheduledAt:
+                    description: ScheduledAt is the schedule instant a capture answers
+                      (C-41).
+                    format: date-time
+                    type: string
+                  scope:
+                    description: |-
+                      Scope is the set of volumes the action reads or writes, so two actions
+                      over the same run never pair (C-06).
+                    type: string
+                  sequence:
+                    description: |-
+                      Sequence is the action's ordinal on its object: a result pairs only with
+                      the action that started it (C-06).
+                    format: int64
+                    type: integer
+                  startedAt:
+                    description: StartedAt is when the action was handed off.
+                    format: date-time
+                    type: string
+                required:
+                - kind
+                type: object
+              startedAt:
+                description: StartedAt is when the preflight began.
+                format: date-time
+                type: string
+              targetApplication:
+                description: TargetApplication is the instance the restore writes.
+                type: string
+              targetVolumes:
+                description: TargetVolumes are the volumes the restore writes.
+                items:
+                  type: string
+                type: array
             type: object
         type: object
     served: true
@@ -155,15 +368,100 @@ spec:
           spec:
             description: Spec is the desired state owned by the user (C-03).
             properties:
+              inPlace:
+                description: |-
+                  InPlace restores over the source instance; it must be declared, and the
+                  applications must be stopped (C-41).
+                type: boolean
               owner:
                 description: |-
                   Owner is the local username of the creating session; the API writes it
                   and only the global Owner may transfer it (C-60).
                 type: string
+              policy:
+                description: Policy names the backup policy whose run is restored
+                  (C-41).
+                type: string
+              targetApplication:
+                description: |-
+                  TargetApplication names the new instance. Each backed-up volume becomes
+                  a new volume named <targetApplication>-<sourceVolume> (C-41).
+                type: string
             type: object
           status:
             description: Status is written by the restore reconciler (C-03, C-07).
             properties:
+              backupPath:
+                description: |-
+                  BackupPath is the run directory this job restores; it is resolved once in
+                  the preflight, so a later run of the policy cannot change it mid-flight.
+                type: string
+              baseline:
+                description: Baseline is the backup's four items (C-42).
+                properties:
+                  bytes:
+                    description: Bytes is the total size of those files (C-42).
+                    format: int64
+                    type: integer
+                  checksum:
+                    description: Checksum is the content checksum of every row and
+                      file (C-42).
+                    type: string
+                  engines:
+                    description: |-
+                      Engines names the table engines the table entries cover, or "none" when
+                      no recognized database was found: an empty table list is then not
+                      mistaken for a measured empty schema (C-42).
+                    type: string
+                  files:
+                    description: Files is the number of regular files across the covered
+                      volumes (C-42).
+                    format: int64
+                    type: integer
+                  order:
+                    description: |-
+                      Order records the sorting and digest rules the checksum was computed
+                      with (C-42).
+                    type: string
+                  tables:
+                    description: Tables carries one entry per table (C-42).
+                    items:
+                      description: TableBaseline is one table's row count and row
+                        checksum (C-42).
+                      properties:
+                        checksum:
+                          description: Checksum is the row checksum, computed in primary-key
+                            order (C-42).
+                          type: string
+                        database:
+                          description: Database is the database file path inside the
+                            volume.
+                          type: string
+                        name:
+                          description: Name is the table name.
+                          type: string
+                        rows:
+                          description: Rows is the table's row count (C-42).
+                          format: int64
+                          type: integer
+                        volume:
+                          description: Volume is the volume the database file lives
+                            in.
+                          type: string
+                      required:
+                      - name
+                      - rows
+                      type: object
+                    type: array
+                required:
+                - bytes
+                - checksum
+                - files
+                type: object
+              completedAt:
+                description: CompletedAt is when the job settled.
+                format: date-time
+                type: string
               conditions:
                 description: Conditions carries Reconciled and the object's failure
                   conditions (C-07).
@@ -225,6 +523,26 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              diffs:
+                description: Diffs lists the differences that failed the verification
+                  (C-42).
+                items:
+                  description: BackupDiff is one item a restore found different from
+                    the baseline (C-42).
+                  properties:
+                    baseline:
+                      description: Baseline is the recorded value.
+                      type: string
+                    item:
+                      description: Item names the compared item.
+                      type: string
+                    observed:
+                      description: Observed is the value the restored data carried.
+                      type: string
+                  required:
+                  - item
+                  type: object
+                type: array
               health:
                 description: Health is the availability axis of the object (C-08).
                 properties:
@@ -237,9 +555,117 @@ spec:
                     - Unknown
                     type: string
                 type: object
+              observed:
+                description: Observed is what the restored data measured (C-42).
+                properties:
+                  bytes:
+                    description: Bytes is the total size of those files (C-42).
+                    format: int64
+                    type: integer
+                  checksum:
+                    description: Checksum is the content checksum of every row and
+                      file (C-42).
+                    type: string
+                  engines:
+                    description: |-
+                      Engines names the table engines the table entries cover, or "none" when
+                      no recognized database was found: an empty table list is then not
+                      mistaken for a measured empty schema (C-42).
+                    type: string
+                  files:
+                    description: Files is the number of regular files across the covered
+                      volumes (C-42).
+                    format: int64
+                    type: integer
+                  order:
+                    description: |-
+                      Order records the sorting and digest rules the checksum was computed
+                      with (C-42).
+                    type: string
+                  tables:
+                    description: Tables carries one entry per table (C-42).
+                    items:
+                      description: TableBaseline is one table's row count and row
+                        checksum (C-42).
+                      properties:
+                        checksum:
+                          description: Checksum is the row checksum, computed in primary-key
+                            order (C-42).
+                          type: string
+                        database:
+                          description: Database is the database file path inside the
+                            volume.
+                          type: string
+                        name:
+                          description: Name is the table name.
+                          type: string
+                        rows:
+                          description: Rows is the table's row count (C-42).
+                          format: int64
+                          type: integer
+                        volume:
+                          description: Volume is the volume the database file lives
+                            in.
+                          type: string
+                      required:
+                      - name
+                      - rows
+                      type: object
+                    type: array
+                required:
+                - bytes
+                - checksum
+                - files
+                type: object
               phase:
                 description: Phase is the flow stage; it is orthogonal to health (C-07).
                 type: string
+              running:
+                description: |-
+                  Running is the long action the restore component is executing and the
+                  job has not observed yet (C-06, C-42).
+                properties:
+                  kind:
+                    description: 'Kind is the action: capture, copy or measure.'
+                    type: string
+                  run:
+                    description: Run is the run directory the action reads or writes.
+                    type: string
+                  scheduledAt:
+                    description: ScheduledAt is the schedule instant a capture answers
+                      (C-41).
+                    format: date-time
+                    type: string
+                  scope:
+                    description: |-
+                      Scope is the set of volumes the action reads or writes, so two actions
+                      over the same run never pair (C-06).
+                    type: string
+                  sequence:
+                    description: |-
+                      Sequence is the action's ordinal on its object: a result pairs only with
+                      the action that started it (C-06).
+                    format: int64
+                    type: integer
+                  startedAt:
+                    description: StartedAt is when the action was handed off.
+                    format: date-time
+                    type: string
+                required:
+                - kind
+                type: object
+              startedAt:
+                description: StartedAt is when the preflight began.
+                format: date-time
+                type: string
+              targetApplication:
+                description: TargetApplication is the instance the restore writes.
+                type: string
+              targetVolumes:
+                description: TargetVolumes are the volumes the restore writes.
+                items:
+                  type: string
+                type: array
             type: object
         type: object
     served: true
