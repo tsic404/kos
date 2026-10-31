@@ -87,6 +87,59 @@ func TestEntriesCarryTheDeclaredStructure(t *testing.T) {
 	}
 }
 
+// TestJudgeInstallReportsAnEntryThatCannotBeInstalled checks the judgement the
+// write path reads before anything is written (C-24, C-31): a missing
+// capability is reported with its name, and a definition no source offers is
+// not a catalogue install at all.
+func TestJudgeInstallReportsAnEntryThatCannotBeInstalled(t *testing.T) {
+	declarations := fixedDeclarations{[]extension.CatalogueSource{{
+		ID: "demo",
+		Entries: []extension.CatalogueEntry{
+			offer("needs-gpu", definition(t, []v1beta1.CapabilityRequirement{{Name: "compute.gpu", Version: "v1"}})),
+			offer("ok", definition(t, nil)),
+		},
+	}}}
+	service := New(declarations, nil)
+
+	verdict, found := service.JudgeInstall("needs-gpu")
+	if !found || verdict.Installable {
+		t.Fatalf("verdict = %+v (found %v), want a refused install", verdict, found)
+	}
+	if len(verdict.Missing) != 1 || verdict.Missing[0] != "compute.gpu" {
+		t.Fatalf("missing = %v, want compute.gpu", verdict.Missing)
+	}
+	if !strings.Contains(verdict.Reason, "compute.gpu") {
+		t.Fatalf("reason = %q, want the capability named", verdict.Reason)
+	}
+
+	verdict, found = service.JudgeInstall("ok")
+	if !found || !verdict.Installable || verdict.Reason != "" {
+		t.Fatalf("verdict = %+v (found %v), want an installable entry", verdict, found)
+	}
+
+	if _, found := service.JudgeInstall("absent"); found {
+		t.Fatal("a definition no source offers was judged as a catalogue entry")
+	}
+}
+
+// TestCapabilityScopeTravelsWithTheRegistration checks that a cluster-wide
+// requirement is served by a cluster-wide registration (C-11): dropping the
+// scope would report a satisfied dependency as missing and refuse the install.
+func TestCapabilityScopeTravelsWithTheRegistration(t *testing.T) {
+	available := catalogueCapabilities([]extension.Capability{{
+		Name: "network.http-endpoint", Version: "v1", Scope: v1beta1.CapabilityScopeCluster,
+	}})
+	result, err := app.Compare([]v1beta1.CapabilityRequirement{{
+		Name: "network.http-endpoint", Version: "v1", Scope: v1beta1.CapabilityScopeCluster,
+	}}, available)
+	if err != nil {
+		t.Fatalf("compare the requirement: %v", err)
+	}
+	if len(result.Missing) != 0 || len(result.Unsatisfied) != 0 {
+		t.Fatalf("result = %+v, want the cluster-wide registration to satisfy it", result)
+	}
+}
+
 // fixedDeclarations is a declaration set with a fixed source list.
 type fixedDeclarations struct {
 	sources []extension.CatalogueSource

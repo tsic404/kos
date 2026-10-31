@@ -1,12 +1,15 @@
 package harness
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/tsic404/kos/pkg/appstore"
 	"github.com/tsic404/kos/pkg/catalogue"
 	"github.com/tsic404/kos/pkg/controlplane"
 	"github.com/tsic404/kos/pkg/extension"
@@ -96,6 +99,9 @@ type Shell struct {
 	Catalogue *catalogue.Service
 	// Pages is the page shell.
 	Pages *pages.Service
+	// Logs is everything the control plane logged during the case; C-14's
+	// sensitivity boundary reads it.
+	Logs *bytes.Buffer
 }
 
 // StartShell serves the composed control plane over the cluster, with no
@@ -107,10 +113,14 @@ func (c *Cluster) StartShell(t *testing.T, configure ...func(*pages.Config)) *Sh
 	surface := OpenIdentity(t, nil, func(config *identity.Config) {
 		config.Preferences = registry
 	})
+	catalogueService := catalogue.New(registry, c.Dynamic)
+	logs := &bytes.Buffer{}
 	server, err := controlplane.New(controlplane.Config{
 		Dynamic:    c.Dynamic,
 		Extensions: registry,
+		Catalogue:  catalogueService,
 		Authorizer: identity.Authorizer{},
+		Log:        slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	if err != nil {
 		t.Fatalf("build control plane: %v", err)
@@ -118,8 +128,10 @@ func (c *Cluster) StartShell(t *testing.T, configure ...func(*pages.Config)) *Sh
 	t.Cleanup(server.Close)
 
 	settingsService := settings.New(registry, surface.Store, settings.Config{Auditor: surface.Trail})
-	catalogueService := catalogue.New(registry, c.Dynamic)
-	pageConfig := pages.Config{Now: surface.Clock.Now}
+	pageConfig := pages.Config{
+		Now:      surface.Clock.Now,
+		Readings: appstore.NewReadings(catalogueService, surface.Clock.Now),
+	}
 	for _, apply := range configure {
 		apply(&pageConfig)
 	}
@@ -145,6 +157,7 @@ func (c *Cluster) StartShell(t *testing.T, configure ...func(*pages.Config)) *Sh
 		Settings:  settingsService,
 		Catalogue: catalogueService,
 		Pages:     pagesService,
+		Logs:      logs,
 	}
 }
 
@@ -164,6 +177,25 @@ func (s *Shell) SignInOwner(t *testing.T, username, password string) string {
 	oneTime := s.Accounts.BootstrapOwner(t, username)
 	token, _ := s.Accounts.SignIn(t, username, oneTime)
 	s.Accounts.ChangePassword(t, token, oneTime, password)
+	return token
+}
+
+// Account creates a further account with a role and returns a usable token.
+func (s *Shell) Account(t *testing.T, ownerToken, username, password string, role write.Role) string {
+	t.Helper()
+	status, body := s.Call(t, http.MethodPost, "/api/v1/accounts", map[string]any{
+		"username": username, "role": string(role),
+	}, ownerToken)
+	if status != http.StatusCreated {
+		t.Fatalf("create account %s: status %d, body %v", username, status, body)
+	}
+	oneTime, _ := body["oneTimePassword"].(string)
+	if oneTime == "" {
+		t.Fatalf("create account %s returned no one-time password: %v", username, body)
+	}
+	token, _ := s.Accounts.SignIn(t, username, oneTime)
+	s.Accounts.ChangePassword(t, token, oneTime, password)
+	token, _ = s.Accounts.SignIn(t, username, password)
 	return token
 }
 

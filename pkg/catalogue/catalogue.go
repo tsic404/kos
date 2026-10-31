@@ -85,6 +85,9 @@ type Entry struct {
 	Installable bool `json:"installable"`
 	// Reason explains why the entry cannot be installed.
 	Reason string `json:"reason,omitempty"`
+	// Missing lists the required capabilities no active registration satisfies
+	// (C-11); an entry with any missing capability cannot be installed (C-24).
+	Missing []string `json:"missing,omitempty"`
 }
 
 // Upgrade is the upgrade path of one installed application (C-24, C-31).
@@ -159,9 +162,34 @@ func judgeEntry(sourceID string, offer extension.CatalogueEntry, available []app
 	}
 	if len(comparison.Missing) > 0 {
 		entry.Installable = false
+		entry.Missing = append([]string(nil), comparison.Missing...)
 		entry.Reason = "缺少依赖：" + strings.Join(comparison.Missing, ", ")
 	}
 	return entry
+}
+
+// JudgeInstall reports what the catalogue judges about the entry behind one
+// definition (C-24, C-31). A write naming an offered definition is an install
+// from the app center, so an entry that is missing a dependency cannot be
+// installed: the caller refuses it and lists the missing capabilities. A
+// definition no active source offers returns false, which leaves the write to
+// the C-33 rules of a directly installed application.
+func (s *Service) JudgeInstall(definition string) (controlplane.CatalogueVerdict, bool) {
+	available := catalogueCapabilities(s.declarations.Capabilities())
+	for _, source := range s.declarations.CatalogueSources() {
+		for _, offer := range source.Entries {
+			if offer.ID != definition {
+				continue
+			}
+			entry := judgeEntry(source.ID, offer, available)
+			return controlplane.CatalogueVerdict{
+				Installable: entry.Installable,
+				Reason:      entry.Reason,
+				Missing:     entry.Missing,
+			}, true
+		}
+	}
+	return controlplane.CatalogueVerdict{}, false
 }
 
 // Sync writes the definitions the active sources offer (C-24). An entry is
@@ -317,11 +345,15 @@ func (s *Service) Upgrades(ctx context.Context) ([]Upgrade, *controlplane.Error)
 }
 
 // catalogueCapabilities renders the registry capability list for the C-11
-// comparison.
+// comparison. The scope travels with each registration: a cluster-wide
+// requirement is not served by a node-scoped capability, so dropping it would
+// report a satisfied dependency as missing.
 func catalogueCapabilities(capabilities []extension.Capability) []app.Capability {
 	available := make([]app.Capability, 0, len(capabilities))
 	for _, capability := range capabilities {
-		available = append(available, app.Capability{Name: capability.Name, Version: capability.Version})
+		available = append(available, app.Capability{
+			Name: capability.Name, Version: capability.Version, Scope: capability.Scope,
+		})
 	}
 	return available
 }

@@ -50,6 +50,17 @@ func (s *Server) validateApplicationWrite(ctx context.Context, object *unstructu
 	if definitionRef == "" {
 		return nil
 	}
+	// An application written from an offered catalogue entry is an app-center
+	// install: an entry that cannot be installed now is refused before anything
+	// is written (C-24, C-31). The judgement precedes the definition read
+	// because a sync never writes the definition of an entry it judged
+	// uninstallable. A definition no source offers keeps the C-33 pending rule
+	// below, which the reconciler applies.
+	if s.catalogue != nil {
+		if verdict, offered := s.catalogue.JudgeInstall(definitionRef); offered && !verdict.Installable {
+			return installRefused(definitionRef, verdict)
+		}
+	}
 	definition, err := s.applicationDefinition(ctx, definitionRef)
 	if err != nil {
 		return s.readFailure(err, kernelRef("ApplicationDefinition", "", definitionRef))
@@ -84,6 +95,20 @@ func (s *Server) applicationDefinition(ctx context.Context, name string) (*v1bet
 		return nil, fmt.Errorf("decode definition %q: %w", name, err)
 	}
 	return definition, nil
+}
+
+// installRefused is the answer to installing a catalogue entry that cannot be
+// installed now: the entry is not an application, so nothing is written and the
+// reason names the missing capabilities (C-24, C-31).
+func installRefused(definition string, verdict CatalogueVerdict) *Error {
+	failure := &Error{
+		Code:               CodeCapabilityMissing,
+		Message:            "目录条目 " + definition + " 不可安装：" + verdict.Reason,
+		Stage:              StageCapability,
+		RequiresUserAction: true,
+		SideEffects:        SideEffectsNone,
+	}
+	return failure.about(kernelRef("ApplicationDefinition", "", definition))
 }
 
 // invalidApplication renders a config refusal as the field-level failure C-12
