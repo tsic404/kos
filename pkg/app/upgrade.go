@@ -214,8 +214,12 @@ type VolumeSource interface {
 // what the baseline keeps, so starting an application still falls back to the
 // count the package declares; the pause, replica and resource facts the round
 // writes are recorded beside it.
-func (c *Controller) buildTarget(application *v1beta1.Application, definition *v1beta1.ApplicationDefinition, config map[string]any) (*target, error) {
-	objects, err := Render(definition.Spec, renderInput(application, config))
+func (c *Controller) buildTarget(ctx context.Context, application *v1beta1.Application, definition *v1beta1.ApplicationDefinition, config map[string]any) (*target, error) {
+	claims, err := c.claimNames(ctx, application)
+	if err != nil {
+		return nil, err
+	}
+	objects, err := Render(definition.Spec, renderInput(application, config, claims))
 	if err != nil {
 		return nil, err
 	}
@@ -258,6 +262,7 @@ func (c *Controller) buildTarget(application *v1beta1.Application, definition *v
 			RenderDigest:     renderDigest,
 			Config:           encodedConfig,
 			Volumes:          volumes,
+			Claims:           claims,
 			Render:           manifests,
 			Lifecycle:        lifecycleFacts(application, resources),
 		},
@@ -763,6 +768,18 @@ func driftedObjects(entries []v1beta1.DriftEntry) map[string]bool {
 		objects[identityOfRef(entry.Object)] = true
 	}
 	return objects
+}
+
+// configPaths reports which manifest paths one render of the application can
+// move through its config. The render names the claim each declared volume is
+// bound to, so the same binding a cutover wrote is what the probe renders with
+// (C-35, C-40).
+func (c *Controller) configPaths(ctx context.Context, definition *v1beta1.ApplicationDefinition, application *v1beta1.Application, config map[string]any) (map[string]bool, error) {
+	input, err := c.renderInputFor(ctx, application, config)
+	if err != nil {
+		return nil, err
+	}
+	return configPaths(definition.Spec, input, config)
 }
 
 // configPaths lists the manifest paths a config value can move, keyed by object

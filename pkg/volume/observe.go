@@ -79,10 +79,10 @@ func (c *Controller) sharedCapability(ctx context.Context) (string, bool, error)
 
 // observe reads the binding C-38 makes observable: the claim's phase, the
 // persistent volume it resolved to, and for a node-local volume the node it is
-// pinned to.
+// pinned to. The binding claim itself stays whatever the migration flow wrote
+// (ADR-015, C-40): this round only reads it.
 func (c *Controller) observe(ctx context.Context, volume *v1beta1.Volume, claim *unstructured.Unstructured, class *storageClass, sharedVersion string) (v1beta1.VolumeStatus, reconcile.Result, error) {
 	status := baseStatus(volume)
-	status.BoundClaim = claim.GetName()
 	phase, _, _ := unstructured.NestedString(claim.Object, "status", "phase")
 	pvName, _, _ := unstructured.NestedString(claim.Object, "spec", "volumeName")
 	if phase != "Bound" || pvName == "" {

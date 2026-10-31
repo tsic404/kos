@@ -125,10 +125,27 @@ type storeVolumes struct {
 }
 
 // VolumeFacts reads the desired and bound size and storage policy of one
-// volume. A volume whose claim the cluster does not have yields no facts: the
-// volume module has not bound it yet, so no size and no policy can change.
+// volume. The claim it reads is the one the volume is bound to, which a
+// migration may have moved to another claim (C-40); before any migration that
+// is the claim named after the volume. A volume whose claim the cluster does
+// not have yields no facts: the volume module has not bound it yet, so no size
+// and no policy can change.
 func (v storeVolumes) VolumeFacts(ctx context.Context, namespace, name string) (VolumeFacts, error) {
-	claimRef := write.Ref{Version: "v1", Kind: "PersistentVolumeClaim", Namespace: namespace, Name: name}
+	claimName := name
+	stored, err := v.store.Get(ctx, write.Ref{Group: api.Group, Version: "v1beta1", Kind: "Volume", Namespace: namespace, Name: name})
+	switch {
+	case apierrors.IsNotFound(err):
+		// A declaration the volume module has not created yet still names its
+		// claim after itself, which is where the claim lives before any
+		// migration moved it (C-38).
+	case err != nil:
+		return VolumeFacts{}, err
+	default:
+		if bound, _, _ := unstructured.NestedString(stored.Object, "status", "boundClaim"); bound != "" {
+			claimName = bound
+		}
+	}
+	claimRef := write.Ref{Version: "v1", Kind: "PersistentVolumeClaim", Namespace: namespace, Name: claimName}
 	claim, err := v.store.Get(ctx, claimRef)
 	if apierrors.IsNotFound(err) {
 		return VolumeFacts{}, nil
@@ -150,14 +167,14 @@ func (v storeVolumes) VolumeFacts(ctx context.Context, namespace, name string) (
 	if bound == "" {
 		return facts, nil
 	}
-	stored, err := v.store.Get(ctx, write.Ref{Version: "v1", Kind: "PersistentVolume", Name: bound})
+	persistentVolume, err := v.store.Get(ctx, write.Ref{Version: "v1", Kind: "PersistentVolume", Name: bound})
 	if apierrors.IsNotFound(err) {
 		return facts, nil
 	}
 	if err != nil {
 		return VolumeFacts{}, err
 	}
-	facts.ActualPolicy = nestedString(stored.Object, "spec", "storageClassName")
+	facts.ActualPolicy = nestedString(persistentVolume.Object, "spec", "storageClassName")
 	return facts, nil
 }
 

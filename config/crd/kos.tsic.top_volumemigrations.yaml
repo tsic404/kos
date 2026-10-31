@@ -44,6 +44,29 @@ spec:
                   Owner is the local username of the creating session; the API writes it
                   and only the global Owner may transfer it (C-60).
                 type: string
+              targetStorageClass:
+                description: |-
+                  TargetStorageClass is the policy the volume must already declare; the
+                  preflight refuses a request that names another value (C-40).
+                type: string
+              volume:
+                description: |-
+                  Volume is the volume this migration moves, in the migration's own
+                  namespace (C-40).
+                type: string
+              window:
+                description: Window is the downtime the migration is allowed (C-40).
+                properties:
+                  duration:
+                    description: Duration is the allowed downtime as a Go duration
+                      string, such as 30m.
+                    type: string
+                  start:
+                    description: Start is when the window opens; empty reads as immediately
+                      (C-40).
+                    format: date-time
+                    type: string
+                type: object
             type: object
           status:
             description: Status is written by the migration reconciler (C-03, C-07).
@@ -109,6 +132,21 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              failure:
+                description: |-
+                  Failure names the phase the attempt failed in and why; a rolled-back
+                  attempt keeps it (C-40).
+                properties:
+                  message:
+                    description: Message is why it failed.
+                    type: string
+                  phase:
+                    description: Phase is the phase the attempt failed in.
+                    type: string
+                required:
+                - message
+                - phase
+                type: object
               health:
                 description: Health is the availability axis of the object (C-08).
                 properties:
@@ -123,6 +161,28 @@ spec:
                 type: object
               phase:
                 description: Phase is the flow stage; it is orthogonal to health (C-07).
+                type: string
+              rollbackPoint:
+                description: |-
+                  RollbackPoint is the phase the current attempt started from. It is
+                  written when the phase is entered and cleared once the attempt is rolled
+                  back or completes (C-40).
+                type: string
+              sourceClaim:
+                description: |-
+                  SourceClaim is the claim the volume was bound to when the attempt
+                  started; a rollback returns the volume to it (C-40).
+                type: string
+              targetClaim:
+                description: |-
+                  TargetClaim is the claim the flow created for the copy; it belongs to no
+                  volume before Cutover (C-40).
+                type: string
+              windowStartedAt:
+                description: |-
+                  WindowStartedAt is when Quiesce began, which is what the window counts
+                  from (C-40).
+                format: date-time
                 type: string
             type: object
         type: object
@@ -160,6 +220,29 @@ spec:
                   Owner is the local username of the creating session; the API writes it
                   and only the global Owner may transfer it (C-60).
                 type: string
+              targetStorageClass:
+                description: |-
+                  TargetStorageClass is the policy the volume must already declare; the
+                  preflight refuses a request that names another value (C-40).
+                type: string
+              volume:
+                description: |-
+                  Volume is the volume this migration moves, in the migration's own
+                  namespace (C-40).
+                type: string
+              window:
+                description: Window is the downtime the migration is allowed (C-40).
+                properties:
+                  duration:
+                    description: Duration is the allowed downtime as a Go duration
+                      string, such as 30m.
+                    type: string
+                  start:
+                    description: Start is when the window opens; empty reads as immediately
+                      (C-40).
+                    format: date-time
+                    type: string
+                type: object
             type: object
           status:
             description: Status is written by the migration reconciler (C-03, C-07).
@@ -225,6 +308,21 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              failure:
+                description: |-
+                  Failure names the phase the attempt failed in and why; a rolled-back
+                  attempt keeps it (C-40).
+                properties:
+                  message:
+                    description: Message is why it failed.
+                    type: string
+                  phase:
+                    description: Phase is the phase the attempt failed in.
+                    type: string
+                required:
+                - message
+                - phase
+                type: object
               health:
                 description: Health is the availability axis of the object (C-08).
                 properties:
@@ -239,6 +337,28 @@ spec:
                 type: object
               phase:
                 description: Phase is the flow stage; it is orthogonal to health (C-07).
+                type: string
+              rollbackPoint:
+                description: |-
+                  RollbackPoint is the phase the current attempt started from. It is
+                  written when the phase is entered and cleared once the attempt is rolled
+                  back or completes (C-40).
+                type: string
+              sourceClaim:
+                description: |-
+                  SourceClaim is the claim the volume was bound to when the attempt
+                  started; a rollback returns the volume to it (C-40).
+                type: string
+              targetClaim:
+                description: |-
+                  TargetClaim is the claim the flow created for the copy; it belongs to no
+                  volume before Cutover (C-40).
+                type: string
+              windowStartedAt:
+                description: |-
+                  WindowStartedAt is when Quiesce began, which is what the window counts
+                  from (C-40).
+                format: date-time
                 type: string
             type: object
         type: object

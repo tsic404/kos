@@ -127,6 +127,12 @@ type AppliedState struct {
 	// Volumes are the volume declarations the baseline was applied with (C-34).
 	// +optional
 	Volumes []string `json:"volumes,omitempty"`
+	// Claims is the claim each declared volume was bound to when the baseline
+	// was rendered. A migration that cuts a volume over to another claim
+	// changes this render input, so the reconciler re-renders the baseline
+	// instead of re-applying one that names the released claim (C-40).
+	// +optional
+	Claims map[string]string `json:"claims,omitempty"`
 	// Render is the manifest set the baseline wrote. It is kept so an automatic
 	// rollback re-applies the previous manifests and an external write is told
 	// from the desired shape (C-34, C-35).
@@ -625,10 +631,16 @@ type VolumeSpec struct {
 // C-38 and C-39 make observable.
 type VolumeStatus struct {
 	ObjectStatus `json:",inline"`
-	// BoundClaim is the claim the volume is bound to; before a migration it
-	// equals the volume name (C-38, C-40).
+	// BoundClaim is the claim the volume is bound to. The migration flow writes
+	// it when it moves the volume, so it is empty until a migration binds a
+	// claim; the volume's own claim is then the one named here (C-40).
 	// +optional
 	BoundClaim string `json:"boundClaim,omitempty"`
+	// StorageClass is the policy the bound claim actually resolved. The
+	// migration flow writes it together with BoundClaim, so the preflight of
+	// C-34 can compare it with the desired policy (C-34, C-40).
+	// +optional
+	StorageClass string `json:"storageClass,omitempty"`
 	// Provider is the storage provider the claim resolved to (C-38).
 	// +optional
 	Provider VolumeBackend `json:"provider,omitempty"`
@@ -1185,15 +1197,76 @@ type VolumeMigration struct {
 	Spec VolumeMigrationSpec `json:"spec,omitempty"`
 	// Status is written by the migration reconciler (C-03, C-07).
 	// +optional
-	Status ObjectStatus `json:"status,omitempty"`
+	Status VolumeMigrationStatus `json:"status,omitempty"`
 }
 
-// VolumeMigrationSpec holds the user-owned migration request.
+// VolumeMigrationSpec holds the user-owned migration request. It never changes
+// the volume's spec: the target policy is the one the user already wrote on the
+// volume, and the preflight refuses a request that names another (C-40).
 type VolumeMigrationSpec struct {
 	// Owner is the local username of the creating session; the API writes it
 	// and only the global Owner may transfer it (C-60).
 	// +optional
 	Owner string `json:"owner,omitempty"`
+	// Volume is the volume this migration moves, in the migration's own
+	// namespace (C-40).
+	// +optional
+	Volume string `json:"volume,omitempty"`
+	// TargetStorageClass is the policy the volume must already declare; the
+	// preflight refuses a request that names another value (C-40).
+	// +optional
+	TargetStorageClass string `json:"targetStorageClass,omitempty"`
+	// Window is the downtime the migration is allowed (C-40).
+	// +optional
+	Window MigrationWindow `json:"window,omitempty"`
+}
+
+// MigrationWindow is the allowed downtime of one migration (C-40). The duration
+// counts from Quiesce; a start time in the future makes the preflight wait, and
+// a window that closed before Quiesce ends the attempt without changing the
+// volume.
+type MigrationWindow struct {
+	// Start is when the window opens; empty reads as immediately (C-40).
+	// +optional
+	Start *metav1.Time `json:"start,omitempty"`
+	// Duration is the allowed downtime as a Go duration string, such as 30m.
+	// +optional
+	Duration string `json:"duration,omitempty"`
+}
+
+// VolumeMigrationStatus is the status of one migration: the flow stage, the
+// attempt's rollback point and what a failed attempt reports (C-40).
+type VolumeMigrationStatus struct {
+	ObjectStatus `json:",inline"`
+	// SourceClaim is the claim the volume was bound to when the attempt
+	// started; a rollback returns the volume to it (C-40).
+	// +optional
+	SourceClaim string `json:"sourceClaim,omitempty"`
+	// RollbackPoint is the phase the current attempt started from. It is
+	// written when the phase is entered and cleared once the attempt is rolled
+	// back or completes (C-40).
+	// +optional
+	RollbackPoint string `json:"rollbackPoint,omitempty"`
+	// TargetClaim is the claim the flow created for the copy; it belongs to no
+	// volume before Cutover (C-40).
+	// +optional
+	TargetClaim string `json:"targetClaim,omitempty"`
+	// WindowStartedAt is when Quiesce began, which is what the window counts
+	// from (C-40).
+	// +optional
+	WindowStartedAt *metav1.Time `json:"windowStartedAt,omitempty"`
+	// Failure names the phase the attempt failed in and why; a rolled-back
+	// attempt keeps it (C-40).
+	// +optional
+	Failure *MigrationFailure `json:"failure,omitempty"`
+}
+
+// MigrationFailure is one failed attempt's phase and reason (C-40).
+type MigrationFailure struct {
+	// Phase is the phase the attempt failed in.
+	Phase string `json:"phase"`
+	// Message is why it failed.
+	Message string `json:"message"`
 }
 
 // VolumeMigrationList is the list form of VolumeMigration.

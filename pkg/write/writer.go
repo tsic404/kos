@@ -561,11 +561,29 @@ func partsOf(object *unstructured.Unstructured) []Part {
 	return parts
 }
 
-// fieldsOf lists the field paths a document sets that the tables reason about.
+// fieldsOf lists the field paths a document sets that the tables reason about:
+// spec.owner and the top-level status fields, which C-05 allocates per field on
+// the volume status (C-40).
 func fieldsOf(object *unstructured.Unstructured) []string {
 	var fields []string
 	if _, found, _ := unstructured.NestedFieldNoCopy(object.Object, "spec", "owner"); found {
 		fields = append(fields, ownerField)
+	}
+	value, found, _ := unstructured.NestedFieldNoCopy(object.Object, "status")
+	if !found {
+		return fields
+	}
+	status, ok := value.(map[string]any)
+	if !ok {
+		return fields
+	}
+	names := make([]string, 0, len(status))
+	for name := range status {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fields = append(fields, "status."+name)
 	}
 	return fields
 }

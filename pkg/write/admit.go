@@ -20,6 +20,22 @@ var routeKinds = map[schema.GroupKind]bool{
 	{Group: "", Kind: "Service"}:                  true,
 }
 
+// migrationJobKinds are the downstream objects C-40 gives the migration flow:
+// the batch Job a copy or a verification runs. The row is object-level, so the
+// flow cannot use it for another kind.
+var migrationJobKinds = map[schema.GroupKind]bool{
+	{Group: "batch", Kind: "Job"}: true,
+}
+
+// migrationVolumeStatusFields is the Volume status field set C-40 and ADR-015
+// allocate to the migration flow: the bound claim and the policy it actually
+// resolved. The volume reconciler writes every other status field and neither
+// of these, so the two writers merge by field (C-05).
+var migrationVolumeStatusFields = map[string]bool{
+	"status.boundClaim":   true,
+	"status.storageClass": true,
+}
+
 // Admit decides one write. A nil error means it may proceed; a *Denied names
 // the subject, the object and the rule that refused it.
 func Admit(req Request) error {
@@ -147,7 +163,30 @@ func admitKernelSpec(req Request) error {
 }
 
 // admitKernelStatus applies the status column of C-03: one subject per kind.
+// ADR-015 carves two fields of the volume status out to the migration flow, so
+// a migration writes only the binding it cut over to and the policy that
+// binding resolved, while the volume reconciler writes the rest (C-05, C-40).
 func admitKernelStatus(req Request) error {
+	if req.Object.Kind == "Volume" {
+		switch req.Subject {
+		case SubjectMigrationReconciler:
+			if len(req.Fields) == 0 {
+				return denyf(req, "the migration flow writes no field of the volume status")
+			}
+			for _, field := range req.Fields {
+				if !migrationVolumeStatusFields[field] {
+					return denyf(req, "the migration flow does not write %s of the volume status", field)
+				}
+			}
+			return admitAttributed(req)
+		case SubjectVolumeReconciler:
+			for _, field := range req.Fields {
+				if migrationVolumeStatusFields[field] {
+					return denyf(req, "%s of the volume status is written by the migration flow", field)
+				}
+			}
+		}
+	}
 	writer, hasWriter := statusWriters[req.Object.Kind]
 	if !hasWriter {
 		return denyf(req, "the kind has no status writer")
@@ -272,6 +311,15 @@ func admitDownstream(req Request) error {
 	case SubjectApplicationReconciler:
 		if !req.Scope.Namespaces[req.Object.Namespace] {
 			return denyf(req, "namespace is not declared by the application")
+		}
+	case SubjectMigrationReconciler:
+		// C-04 allocates the flow's Jobs by kind: a copy or a verification Job
+		// below the migration, in the namespace of the volume it moves.
+		if !migrationJobKinds[req.Object.GroupKind()] {
+			return denyf(req, "the migration flow writes only the Jobs of C-40")
+		}
+		if !req.Scope.Namespaces[req.Object.Namespace] {
+			return denyf(req, "namespace is not declared by the migration")
 		}
 	case SubjectExtensionReconciler:
 		if !req.Scope.Namespaces[req.Object.Namespace] {
