@@ -209,6 +209,87 @@ func TestSetRefusesATargetTheTrailCannotHold(t *testing.T) {
 	}
 }
 
+// TestOnlyTheDeclaredWriterWrites checks C-23's single-writer rule across all
+// three writer kinds: a write from another subject is refused with the declared
+// writer named, and only the declared writer's value is stored.
+func TestOnlyTheDeclaredWriterWrites(t *testing.T) {
+	trail := &auditLog{}
+	values := &memoryValues{stored: map[string]string{}}
+	service := New(declarations{
+		{ID: "controller-owned", Scope: extension.SettingScopeCluster, Writer: extension.SettingWriterController},
+		{ID: "kernel-owned", Scope: extension.SettingScopeCluster, Writer: extension.SettingWriterKernel},
+		{ID: "user-owned", Scope: extension.SettingScopeCluster, Writer: extension.SettingWriterUser, Editable: true},
+		{ID: "locked", Scope: extension.SettingScopeCluster, Writer: extension.SettingWriterUser, Reason: "该项由安装流程写入"},
+	}, values, Config{Auditor: trail})
+
+	// The user surface may not write an item another subject owns, and the
+	// refusal names that writer.
+	if _, failure := service.Set(context.Background(), session, "controller-owned", "", "1"); failure == nil ||
+		failure.Code != controlplane.CodeInvalidField || !strings.Contains(failure.Message, "扩展控制器") {
+		t.Fatalf("user write to a controller item = %v, want a refusal naming the controller", failure)
+	}
+	// The declared writer writes the same item.
+	if item, failure := service.SetAs(context.Background(), Subject{Writer: extension.SettingWriterController},
+		"controller-owned", "", "controller-value"); failure != nil || item.Value != "controller-value" {
+		t.Fatalf("controller write = %+v / %v", item, failure)
+	}
+	// A controller may not claim the user's item either.
+	if _, failure := service.SetAs(context.Background(), Subject{Writer: extension.SettingWriterController},
+		"user-owned", "", "1"); failure == nil || !strings.Contains(failure.Message, "用户") {
+		t.Fatalf("controller write to a user item = %v, want a refusal naming the user writer", failure)
+	}
+	// The kernel validator writes its own item and only that item.
+	if _, failure := service.SetAs(context.Background(), Subject{Writer: extension.SettingWriterKernel},
+		"kernel-owned", "", "2"); failure != nil {
+		t.Fatalf("kernel write: %v", failure)
+	}
+	if _, failure := service.SetAs(context.Background(), Subject{Writer: extension.SettingWriterKernel},
+		"controller-owned", "", "2"); failure == nil || !strings.Contains(failure.Message, "扩展控制器") {
+		t.Fatalf("kernel write to a controller item = %v, want a refusal naming the controller", failure)
+	}
+	// A user item the declaration locks carries the declared reason instead of
+	// a derived one.
+	if _, failure := service.Set(context.Background(), session, "locked", "", "1"); failure == nil ||
+		failure.Message != "该项由安装流程写入" {
+		t.Fatalf("write to a locked item = %v, want the declared reason", failure)
+	}
+
+	items, failure := service.Items(context.Background(), session, "")
+	if failure != nil {
+		t.Fatalf("items: %v", failure)
+	}
+	if value := itemByID(t, items, "controller-owned").Value; value != "controller-value" {
+		t.Fatalf("controller item value = %q, want the declared writer's value", value)
+	}
+	if value := itemByID(t, items, "kernel-owned").Value; value != "2" {
+		t.Fatalf("kernel item value = %q, want the kernel's value", value)
+	}
+	// Every attempt reached the trail: the accepted controller and kernel writes
+	// and the four refusals, and each names the principal it was attributed to.
+	if len(trail.records) != 6 {
+		t.Fatalf("audit = %+v, want one record per attempt", trail.records)
+	}
+	if trail.records[1].Actor != extension.SettingWriterController {
+		t.Fatalf("controller record actor = %q, want the writer kind", trail.records[1].Actor)
+	}
+	if trail.records[0].Actor != session.Username {
+		t.Fatalf("user record actor = %q, want the session account", trail.records[0].Actor)
+	}
+}
+
+// TestUserScopeNeedsAnAccount checks that a writer acting for no account cannot
+// address a per-account item, which would otherwise store a value nobody reads.
+func TestUserScopeNeedsAnAccount(t *testing.T) {
+	service := New(declarations{
+		{ID: "theme", Scope: extension.SettingScopeUser, Writer: extension.SettingWriterController},
+	}, &memoryValues{stored: map[string]string{}}, Config{})
+
+	if _, failure := service.SetAs(context.Background(), Subject{Writer: extension.SettingWriterController},
+		"theme", "", "dark"); failure == nil || failure.Code != controlplane.CodeInvalidField {
+		t.Fatalf("accountless user-scope write = %v, want %q", failure, controlplane.CodeInvalidField)
+	}
+}
+
 // itemByID returns one projected item.
 func itemByID(t *testing.T, items []Item, id string) Item {
 	t.Helper()

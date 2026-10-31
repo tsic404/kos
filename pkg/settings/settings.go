@@ -159,17 +159,37 @@ func (s *Service) Items(ctx context.Context, session identity.Session, node stri
 	return items, nil
 }
 
-// Set stores one value and returns the item as it now reads. Only the user
-// writer's editable items accept a write, so an item another subject writes
-// stays with that subject (C-23). Every attempt leaves one audit record,
-// whether it took effect or was refused (C-14); an attempt naming a target the
-// record cannot hold is refused before anything is recorded.
+// Set stores one value and returns the item as it now reads. It is the user
+// writer's entry: the caller's account is the subject, and an item another
+// subject writes stays with that subject (C-23). Every attempt leaves one audit
+// record, whether it took effect or was refused (C-14); an attempt naming a
+// target the record cannot hold is refused before anything is recorded.
 func (s *Service) Set(ctx context.Context, session identity.Session, id, node, value string) (Item, *controlplane.Error) {
+	return s.SetAs(ctx, Subject{Writer: extension.SettingWriterUser, Session: session}, id, node, value)
+}
+
+// Subject is who issues one write (C-23): one declared writer kind and, for the
+// user writer, the account behind the request.
+type Subject struct {
+	// Writer is the writer kind the caller acts as: User, Controller or Kernel.
+	Writer string
+	// Session is the account behind a user write; the other writers act for no
+	// account.
+	Session identity.Session
+}
+
+// SetAs stores one value on behalf of the declared writer. Every writer kind
+// enters here — the user behind a session, an extension controller and the
+// kernel validator — so the declaration is the single authority on who may
+// write an item (C-23). A write from another subject is refused with the
+// declared writer named, which keeps one value per item however many writers
+// race for it.
+func (s *Service) SetAs(ctx context.Context, subject Subject, id, node, value string) (Item, *controlplane.Error) {
 	if failure := validateTarget(id, node); failure != nil {
 		return Item{}, failure
 	}
-	item, failure := s.assign(ctx, session, id, node, value)
-	s.record(ctx, session, id, node, failure)
+	item, failure := s.assign(ctx, subject, id, node, value)
+	s.record(ctx, subject, id, node, failure)
 	return item, failure
 }
 
@@ -190,8 +210,11 @@ func validateTarget(id, node string) *controlplane.Error {
 	return nil
 }
 
-// assign carries out one write and reports why it was refused.
-func (s *Service) assign(ctx context.Context, session identity.Session, id, node, value string) (Item, *controlplane.Error) {
+// assign carries out one write and reports why it was refused. The declared
+// writer decides first, so an item written by another subject is refused before
+// any value is stored (C-23); only the user writer's item carries the extra
+// editable flag and role check.
+func (s *Service) assign(ctx context.Context, subject Subject, id, node, value string) (Item, *controlplane.Error) {
 	setting, ok := s.declarations.Setting(id)
 	if !ok {
 		return Item{}, &controlplane.Error{
@@ -201,22 +224,27 @@ func (s *Service) assign(ctx context.Context, session identity.Session, id, node
 			SideEffects: controlplane.SideEffectsNone,
 		}
 	}
-	if !setting.Editable || setting.Writer != extension.SettingWriterUser {
-		return Item{}, invalid(reasonOf(setting))
+	if subject.Writer != setting.Writer {
+		return Item{}, invalid(refusalOf(setting.Writer, subject.Writer))
 	}
-	if session.Role == write.RoleGuest {
-		return Item{}, &controlplane.Error{
-			Code:               controlplane.CodePermissionDenied,
-			Message:            "当前身份只读，不能修改设置",
-			Stage:              controlplane.StageAuthorize,
-			RequiresUserAction: true,
-			SideEffects:        controlplane.SideEffectsNone,
+	if setting.Writer == extension.SettingWriterUser {
+		if !setting.Editable {
+			return Item{}, invalid(reasonOf(setting))
+		}
+		if subject.Session.Role == write.RoleGuest {
+			return Item{}, &controlplane.Error{
+				Code:               controlplane.CodePermissionDenied,
+				Message:            "当前身份只读，不能修改设置",
+				Stage:              controlplane.StageAuthorize,
+				RequiresUserAction: true,
+				SideEffects:        controlplane.SideEffectsNone,
+			}
 		}
 	}
 	if len(value) > maxValueLength {
 		return Item{}, invalid("设置值超过 " + strconv.Itoa(maxValueLength) + " 字节")
 	}
-	target, failure := targetOf(setting, session, node)
+	target, failure := targetOf(setting, subject.Session, node)
 	if failure != nil {
 		return Item{}, failure
 	}
@@ -226,15 +254,16 @@ func (s *Service) assign(ctx context.Context, session identity.Session, id, node
 	return itemOf(setting, value), nil
 }
 
-// record appends the audit record of one write attempt (C-14): the account that
-// asked, the item, the verb, the outcome, the surface and the time. A refused
-// attempt is recorded too, so a rejection is as visible as an accepted write.
-func (s *Service) record(ctx context.Context, session identity.Session, id, node string, failure *controlplane.Error) {
+// record appends the audit record of one write attempt (C-14): the principal
+// that asked, the item, the verb, the outcome, the surface and the time. A
+// refused attempt is recorded too, so a rejection is as visible as an accepted
+// write.
+func (s *Service) record(ctx context.Context, subject Subject, id, node string, failure *controlplane.Error) {
 	if s.auditor == nil {
 		return
 	}
 	record := controlplane.AuditRecord{
-		Actor:      session.Username,
+		Actor:      actorOf(subject),
 		Object:     controlplane.ObjectRef{Group: api.Group, Kind: settingKind, Namespace: s.namespaceOf(id, node), Name: id},
 		Verb:       verbSet,
 		Result:     resultOf(failure),
@@ -281,10 +310,14 @@ func itemOf(setting extension.Setting, value string) Item {
 }
 
 // reasonOf explains an item the user cannot modify (C-23). An editable item has
-// no reason.
+// no reason; otherwise the declaration's own reason wins, because only it can
+// explain an item the runtime kernel neither reads nor writes.
 func reasonOf(setting extension.Setting) string {
 	if setting.Editable && setting.Writer == extension.SettingWriterUser {
 		return ""
+	}
+	if setting.Reason != "" {
+		return setting.Reason
 	}
 	switch setting.Writer {
 	case extension.SettingWriterController:
@@ -294,6 +327,44 @@ func reasonOf(setting extension.Setting) string {
 	default:
 		return "扩展声明该项不可修改"
 	}
+}
+
+// refusalOf names the declared writer in a refusal, so the caller learns who
+// owns the item instead of only that the write failed (C-23, TC-63).
+func refusalOf(declared, acting string) string {
+	return "设置项由" + writerName(declared) + "写入，" + actorName(acting) + "不能修改"
+}
+
+// writerName is the readable name of one writer kind as the owner of an item.
+func writerName(kind string) string {
+	switch kind {
+	case extension.SettingWriterUser:
+		return "用户经控制面 API"
+	case extension.SettingWriterController:
+		return "扩展控制器"
+	case extension.SettingWriterKernel:
+		return "内核校验器"
+	default:
+		return kind
+	}
+}
+
+// actorName is the readable name of one writer kind as the subject of a refused
+// attempt.
+func actorName(kind string) string {
+	if kind == extension.SettingWriterUser {
+		return "用户"
+	}
+	return writerName(kind)
+}
+
+// actorOf names the principal one attempt is attributed to (C-14): the account
+// behind a user write, and the writer kind itself for the other writers.
+func actorOf(subject Subject) string {
+	if subject.Writer == extension.SettingWriterUser {
+		return subject.Session.Username
+	}
+	return subject.Writer
 }
 
 // targetOf resolves which value a read or write addresses. Node scope needs the
@@ -312,6 +383,9 @@ func targetOf(setting extension.Setting, session identity.Session, node string) 
 		}
 		return node, nil
 	case extension.SettingScopeUser:
+		if session.Username == "" {
+			return "", invalid("用户级设置项需要账号身份")
+		}
 		return session.Username, nil
 	default:
 		return "", &controlplane.Error{
