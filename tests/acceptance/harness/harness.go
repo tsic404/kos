@@ -229,6 +229,32 @@ func (c *Cluster) Get(t *testing.T, version, kind, name string) *unstructured.Un
 	return c.GetIn(t, Namespace, version, kind, name)
 }
 
+// CreateClusterObject writes one object of a class the kernel does not model,
+// so a case can shape a workload, a pod or an event the API server already
+// holds. The returned object is what the server stored.
+func (c *Cluster) CreateClusterObject(t *testing.T, group, version, resource, namespace string, object map[string]any) *unstructured.Unstructured {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	client := c.Dynamic.Resource(schema.GroupVersionResource{Group: group, Version: version, Resource: resource})
+	var writable dynamic.ResourceInterface = client
+	if namespace != "" {
+		writable = client.Namespace(namespace)
+	}
+	created, err := writable.Create(ctx, &unstructured.Unstructured{Object: object}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("create %s %s: %v", resource, nestedName(object), err)
+	}
+	return created
+}
+
+// nestedName reads the name of one object manifest for a failure message.
+func nestedName(object map[string]any) string {
+	metadata, _ := object["metadata"].(map[string]any)
+	name, _ := metadata["name"].(string)
+	return name
+}
+
 // GetIn reads an existing object in an explicit namespace.
 func (c *Cluster) GetIn(t *testing.T, namespace, version, kind, name string) *unstructured.Unstructured {
 	t.Helper()

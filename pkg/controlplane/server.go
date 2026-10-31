@@ -36,6 +36,10 @@ const (
 	VerbPlan Verb = "plan"
 	// VerbApply installs a desired object set.
 	VerbApply Verb = "apply"
+	// VerbEventRead judges whether a session may read one object's events
+	// (C-64): an application's events follow C-59, while every other object's
+	// events reach only the global Owner and the member owning the object.
+	VerbEventRead Verb = "event-read"
 )
 
 // Request is what the authorization seam judges.
@@ -134,6 +138,9 @@ type Config struct {
 	// Diagnostics answers the evidence chain and the diagnostic bundle (C-26);
 	// nil leaves both routes unserved.
 	Diagnostics Diagnostics
+	// Logs reads the log lines of one pod container (C-64); nil leaves the log
+	// route unserved.
+	Logs LogSource
 	// Now supplies the read clock; defaults to time.Now.
 	Now func() time.Time
 	// OperationTimeout bounds one accepted write; defaults to two minutes.
@@ -162,6 +169,7 @@ type Server struct {
 	endpointFacts   endpoint.Facts
 	volumeExpansion VolumeExpansion
 	diagnostics     Diagnostics
+	logs            LogSource
 	now             func() time.Time
 	timeout         time.Duration
 	log             *slog.Logger
@@ -187,6 +195,7 @@ func New(config Config) (*Server, error) {
 		endpointFacts:   config.EndpointFacts,
 		volumeExpansion: config.VolumeExpansion,
 		diagnostics:     config.Diagnostics,
+		logs:            config.Logs,
 		now:             config.Now,
 		timeout:         config.OperationTimeout,
 		log:             config.Log,
@@ -225,6 +234,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/action-requests", s.handleAction)
 	s.mux.HandleFunc("GET /api/v1/diagnostics/{namespace}/{name}", s.handleDiagnosticsChain)
 	s.mux.HandleFunc("GET /api/v1/diagnostics/{namespace}/{name}/bundle", s.handleDiagnosticsBundle)
+	s.mux.HandleFunc("GET /api/v1/logs/{namespace}/{name}", s.handleApplicationLogs)
+	s.mux.HandleFunc("GET /api/v1/events", s.handleEvents)
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, notFound("没有这个接口"))
 	})
@@ -790,17 +801,34 @@ func (s *Server) decide(ctx context.Context, verb Verb, ref ObjectRef, object, c
 // records nothing because it changes no row (C-62).
 func (s *Server) authorize(ctx context.Context, verb Verb, ref ObjectRef, object, current map[string]any) (Grant, *Error) {
 	grant, failure := s.decide(ctx, verb, ref, object, current)
-	if failure != nil && verb != VerbRead && verb != VerbPlan {
+	if failure != nil && changesRows(verb) {
 		s.audit(ctx, s.actorOfGrant(ctx, grant), grant.Extension, ref, string(verb), ResultRejected)
 	}
 	return grant, failure
+}
+
+// changesRows reports whether a refused verb leaves an audit record: only a
+// verb that would rewrite a row is recorded (C-14). The reads, including the
+// event read (C-64), and the plan (C-62) record nothing.
+func changesRows(verb Verb) bool {
+	switch verb {
+	case VerbRead, VerbEventRead, VerbPlan:
+		return false
+	}
+	return true
 }
 
 // visible reports whether a session may see one object of a read (C-59). Only
 // the hidden answer filters an object out; every other refusal fails the
 // request, because it names a session that may not read the class at all.
 func (s *Server) visible(ctx context.Context, ref ObjectRef, object map[string]any) (bool, *Error) {
-	_, err := s.authorizer.Decide(ctx, Request{Verb: VerbRead, Ref: ref, Object: object})
+	return s.visibleWithVerb(ctx, VerbRead, ref, object)
+}
+
+// visibleWithVerb is visible for one named read verb, so a read that carries
+// its own visibility rule (C-64's event rule) is judged by the same seam.
+func (s *Server) visibleWithVerb(ctx context.Context, verb Verb, ref ObjectRef, object map[string]any) (bool, *Error) {
+	_, err := s.authorizer.Decide(ctx, Request{Verb: verb, Ref: ref, Object: object})
 	switch {
 	case err == nil:
 		return true, nil

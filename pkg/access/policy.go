@@ -118,6 +118,8 @@ func (p *Policy) Decide(ctx context.Context, session Session, request controlpla
 		return item, err
 	case controlplane.VerbDelete:
 		return p.remove(ctx, session, request, grant)
+	case controlplane.VerbEventRead:
+		return grant, p.eventVisible(ctx, session, request)
 	default:
 		return grant, fmt.Errorf("access: verb %q is not judged", request.Verb)
 	}
@@ -159,6 +161,35 @@ func namesMember(visibility map[string]any, username string) bool {
 		}
 	}
 	return false
+}
+
+// eventVisible applies C-64's event rule on top of C-59: an application's
+// events follow the application's visibility, while every other object's events
+// reach only the global Owner and the member owning the object, never a Guest.
+// An object the read could not resolve counts as one without an owner, so the
+// rule never widens what the panel shows.
+func (p *Policy) eventVisible(ctx context.Context, session Session, request controlplane.Request) error {
+	ref := request.Ref
+	if ref.Group == api.Group && ref.Kind == "Application" {
+		visible, err := p.visible(ctx, session, ref, request.Object)
+		if err != nil {
+			return err
+		}
+		if !visible {
+			return controlplane.ErrHidden
+		}
+		return nil
+	}
+	if session.isOwner() {
+		return nil
+	}
+	if session.Role == write.RoleGuest {
+		return controlplane.ErrHidden
+	}
+	if owner, has := ownerOf(request.Object); has && owner == session.Username {
+		return nil
+	}
+	return controlplane.ErrHidden
 }
 
 // write judges a create, update, apply or plan (C-59, C-60).
