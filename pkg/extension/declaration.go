@@ -358,6 +358,10 @@ type Setting struct {
 	Scope    string `json:"scope"`
 	Writer   string `json:"writer"`
 	Editable bool   `json:"editable,omitempty"`
+	// Reason explains why the item cannot be modified; it is a declaration
+	// input, because the writer kind alone cannot explain an item the runtime
+	// kernel neither reads nor writes. An empty reason leaves the derived one.
+	Reason string `json:"reason,omitempty"`
 }
 
 // CatalogueSource is an application catalogue source (C-24): the entries it
