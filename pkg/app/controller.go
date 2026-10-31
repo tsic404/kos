@@ -254,6 +254,15 @@ func (c *Controller) install(ctx context.Context, application *v1beta1.Applicati
 			fmt.Sprintf("namespace %q does not exist", application.Spec.Namespace))
 	}
 
+	// A migration moving one of the volumes the application mounts stops its
+	// workloads first: the flow waits for them to exit, and this round holds the
+	// phase without writing the spec (C-40).
+	if migrationName, err := c.quiesceFor(ctx, application); err != nil {
+		return reconcile.Result{}, err
+	} else if migrationName != "" {
+		return c.quiesce(ctx, application, migrationName, comparison, now)
+	}
+
 	config, err := decodeConfig(application.Spec.Config)
 	if err != nil {
 		return c.fail(ctx, application, ConditionInvalidConfig, err.Error())
@@ -285,7 +294,7 @@ func (c *Controller) install(ctx context.Context, application *v1beta1.Applicati
 		return c.steady(ctx, application, definition, resolved, comparison, now)
 	}
 
-	next, err := c.buildTarget(application, definition, resolved)
+	next, err := c.buildTarget(ctx, application, definition, resolved)
 	if err != nil {
 		return c.fail(ctx, application, ConditionInvalidPackage, err.Error())
 	}
@@ -769,10 +778,14 @@ func sameStatus(left, right v1beta1.ApplicationStatus) bool {
 // baseStatus carries the status facts a new round starts from: the conditions,
 // the retry count and schedule, and the rendered objects an uninstall later
 // deletes. Only a user retry or a completed install resets the budget (C-33).
+// The quiesce condition is dropped here, so a round that finds no migration
+// running clears the stop it recorded before (C-40).
 func baseStatus(application *v1beta1.Application) v1beta1.ApplicationStatus {
+	conditions := append([]metav1.Condition(nil), application.Status.Conditions...)
+	meta.RemoveStatusCondition(&conditions, ConditionQuiesced)
 	return v1beta1.ApplicationStatus{
 		ObjectStatus: v1beta1.ObjectStatus{
-			Conditions: append([]metav1.Condition(nil), application.Status.Conditions...),
+			Conditions: conditions,
 			// An install that is not Ready is not available; a status write
 			// always carries a concrete value, never an empty health object.
 			Health: v1beta1.Health{State: v1beta1.HealthStateUnavailable},
@@ -975,14 +988,44 @@ func decodeConfig(config runtime.RawExtension) (map[string]any, error) {
 	return values, nil
 }
 
-// volumeClaims maps each declared volume name to the claim the volume object
-// creates under the same name (C-32, C-38).
-func volumeClaims(volumes []string) map[string]string {
-	claims := make(map[string]string, len(volumes))
-	for _, name := range volumes {
+// claimNames resolves the claim each declared volume is bound to (C-40): the
+// binding a migration wrote into the volume status, or the volume's own name
+// before any migration moved it. The render follows the binding, so a cutover
+// re-renders the workloads onto the new claim without changing the application
+// (C-32, C-38).
+func (c *Controller) claimNames(ctx context.Context, application *v1beta1.Application) (map[string]string, error) {
+	claims := make(map[string]string, len(application.Spec.Volumes))
+	for _, name := range application.Spec.Volumes {
 		claims[name] = name
+		volume, err := c.store.Get(ctx, write.Ref{
+			Group: api.Group, Version: "v1beta1", Kind: "Volume",
+			Namespace: application.Spec.Namespace, Name: name,
+		})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		bound, _, err := unstructured.NestedString(volume.Object, "status", "boundClaim")
+		if err != nil {
+			return nil, err
+		}
+		if bound != "" {
+			claims[name] = bound
+		}
 	}
-	return claims
+	return claims, nil
+}
+
+// renderInputFor is what a translation template reads for one application
+// (C-32), with the binding a migration may have written (C-40).
+func (c *Controller) renderInputFor(ctx context.Context, application *v1beta1.Application, config map[string]any) (RenderInput, error) {
+	claims, err := c.claimNames(ctx, application)
+	if err != nil {
+		return RenderInput{}, err
+	}
+	return renderInput(application, config, claims), nil
 }
 
 // stampOwner marks a rendered object with the application's UID (C-02).

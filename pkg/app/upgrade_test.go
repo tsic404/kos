@@ -119,8 +119,10 @@ func (v fixedVolumes) VolumeFacts(_ context.Context, _, name string) (VolumeFact
 // targetFor builds one rendered target from a definition and a config.
 func targetFor(t *testing.T, application *v1beta1.Application, definition *v1beta1.ApplicationDefinition, config map[string]any) *target {
 	t.Helper()
-	controller := NewController(nil, Options{})
-	next, err := controller.buildTarget(application, definition, config)
+	// The build reads the claim each declared volume is bound to; an empty
+	// store answers "no volume" and the render falls back to the volume name.
+	controller := NewController(liveStore{}, Options{})
+	next, err := controller.buildTarget(context.Background(), application, definition, config)
 	if err != nil {
 		t.Fatalf("build target: %v", err)
 	}
@@ -246,7 +248,7 @@ data:
 		Spec:       v1beta1.ApplicationSpec{DefinitionRef: "web", Namespace: "apps", Config: runtime.RawExtension{Raw: []byte(`{"mode":"a"}`)}},
 	}
 	config := map[string]any{"mode": "a"}
-	paths, err := configPaths(definition.Spec, renderInput(application, config), config)
+	paths, err := configPaths(definition.Spec, renderInput(application, config, nil), config)
 	if err != nil {
 		t.Fatalf("config paths: %v", err)
 	}

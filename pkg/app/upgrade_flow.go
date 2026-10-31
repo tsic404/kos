@@ -35,7 +35,7 @@ const (
 // downstream objects for writes made outside KOS and performs the upgrade the
 // spec requests (C-34, C-35).
 func (c *Controller) steady(ctx context.Context, application *v1beta1.Application, definition *v1beta1.ApplicationDefinition, resolved map[string]any, comparison CapabilityResult, now time.Time) (reconcile.Result, error) {
-	next, err := c.buildTarget(application, definition, resolved)
+	next, err := c.buildTarget(ctx, application, definition, resolved)
 	if err != nil {
 		return c.fail(ctx, application, ConditionInvalidPackage, err.Error())
 	}
@@ -73,6 +73,13 @@ func (c *Controller) steady(ctx context.Context, application *v1beta1.Applicatio
 	}
 	if next.applied.SpecDigest != applied.SpecDigest {
 		return c.upgrade(ctx, application, next, definition, resolved, drift, comparison, now)
+	}
+	if !sameClaims(next.applied.Claims, applied.Claims) {
+		// A migration cut a declared volume over to another claim, so the
+		// render input changed while the spec did not: the baseline is
+		// re-rendered onto the new claim instead of re-applied (C-40). The
+		// application object itself does not change.
+		return c.recordBaseline(ctx, application, next, comparison, now)
 	}
 	return c.reconcileApplied(ctx, application, definition, resolved, applied, drift, comparison, now)
 }
@@ -216,7 +223,7 @@ func (c *Controller) refuseUpgrade(ctx context.Context, application *v1beta1.App
 				return reconcile.Result{}, err
 			}
 		}
-		if err := c.driftState(application, definition, resolved, drift, false, &status); err != nil {
+		if err := c.driftState(ctx, application, definition, resolved, drift, false, &status); err != nil {
 			return reconcile.Result{}, err
 		}
 	}
@@ -228,7 +235,7 @@ func (c *Controller) refuseUpgrade(ctx context.Context, application *v1beta1.App
 // leaves them and only reports, and reconcile says whether it wrote the desired
 // values back or is still waiting for a confirmation (C-35). The record is a
 // status fact, so it does not clear the failure condition of the round.
-func (c *Controller) driftState(application *v1beta1.Application, definition *v1beta1.ApplicationDefinition, resolved map[string]any, drift []v1beta1.DriftEntry, pending bool, status *v1beta1.ApplicationStatus) error {
+func (c *Controller) driftState(ctx context.Context, application *v1beta1.Application, definition *v1beta1.ApplicationDefinition, resolved map[string]any, drift []v1beta1.DriftEntry, pending bool, status *v1beta1.ApplicationStatus) error {
 	status.Drift = nil
 	report := func(text string) {
 		status.Conditions = state.Set(status.Conditions,
@@ -236,7 +243,7 @@ func (c *Controller) driftState(application *v1beta1.Application, definition *v1
 	}
 	switch driftPolicyOf(application) {
 	case v1beta1.DriftPolicyAdopt:
-		expressible, err := configPaths(definition.Spec, renderInput(application, resolved), resolved)
+		expressible, err := c.configPaths(ctx, definition, application, resolved)
 		if err != nil {
 			return err
 		}
@@ -309,7 +316,7 @@ func (c *Controller) suspend(ctx context.Context, application *v1beta1.Applicati
 	message := "external changes await confirmation: " + describeDrift(drift)
 	status.Conditions = state.Set(status.Conditions, state.Blocked(application.Generation, ReasonExternalChangePending, message))
 	status.Conditions = withFailure(status.Conditions, application.Generation, ConditionIrreversibleUpgrade, describeIrreversible(report.Irreversible))
-	if err := c.driftState(application, definition, resolved, drift, true, &status); err != nil {
+	if err := c.driftState(ctx, application, definition, resolved, drift, true, &status); err != nil {
 		return reconcile.Result{}, err
 	}
 	return reconcile.Result{RequeueAfter: pendingResync}, c.writeStatus(ctx, application, status)
@@ -406,7 +413,7 @@ func (c *Controller) reconcileApplied(ctx context.Context, application *v1beta1.
 	if len(drift) > 0 {
 		switch driftPolicyOf(application) {
 		case v1beta1.DriftPolicyAdopt:
-			expressible, err := configPaths(definition.Spec, renderInput(application, resolved), resolved)
+			expressible, err := c.configPaths(ctx, definition, application, resolved)
 			if err != nil {
 				return reconcile.Result{}, err
 			}
@@ -560,7 +567,7 @@ func (c *Controller) currentTarget(ctx context.Context, application *v1beta1.App
 	if err != nil {
 		return nil, err
 	}
-	return c.buildTarget(application, definition, resolved)
+	return c.buildTarget(ctx, application, definition, resolved)
 }
 
 // runUpgradeHook runs the package hook the upgrade depends on (C-32, C-34).
@@ -631,12 +638,14 @@ func driftPolicyOf(application *v1beta1.Application) v1beta1.DriftPolicy {
 }
 
 // renderInput is what a translation template reads for one application (C-32).
-func renderInput(application *v1beta1.Application, config map[string]any) RenderInput {
+// claims names the claim each declared volume is bound to, as the volume status
+// records it (C-40).
+func renderInput(application *v1beta1.Application, config map[string]any, claims map[string]string) RenderInput {
 	return RenderInput{
 		Name:      application.Name,
 		Namespace: application.Spec.Namespace,
 		Config:    config,
-		Volumes:   volumeClaims(application.Spec.Volumes),
+		Volumes:   claims,
 	}
 }
 

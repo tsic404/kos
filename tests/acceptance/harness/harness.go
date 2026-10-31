@@ -442,7 +442,9 @@ func (c *Cluster) Resources() map[schema.GroupKind]string {
 	// Rendered application objects are native ones: the write path resolves
 	// their resources from discovery here, as an installed controller would
 	// (C-04, C-32).
-	for _, groupVersion := range []schema.GroupVersion{{Version: "v1"}, {Group: "apps", Version: "v1"}} {
+	for _, groupVersion := range []schema.GroupVersion{
+		{Version: "v1"}, {Group: "apps", Version: "v1"}, {Group: "batch", Version: "v1"},
+	} {
 		list, err := c.Kube.Discovery().ServerResourcesForGroupVersion(groupVersion.String())
 		if err != nil {
 			continue
@@ -611,4 +613,17 @@ func join(path, key string) string {
 		return key
 	}
 	return path + "." + key
+}
+
+// ShapeOf flattens an object without its status and its server-written
+// revision, so a case can require the spec and identity to be unchanged.
+func ShapeOf(object *unstructured.Unstructured) map[string]string {
+	shape := make(map[string]string)
+	for path, value := range Flatten(object.Object) {
+		if strings.HasPrefix(path, "status.") || path == "metadata.resourceVersion" {
+			continue
+		}
+		shape[path] = value
+	}
+	return shape
 }

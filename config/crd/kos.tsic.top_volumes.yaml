@@ -73,8 +73,9 @@ spec:
             properties:
               boundClaim:
                 description: |-
-                  BoundClaim is the claim the volume is bound to; before a migration it
-                  equals the volume name (C-38, C-40).
+                  BoundClaim is the claim the volume is bound to. The migration flow writes
+                  it when it moves the volume, so it is empty until a migration binds a
+                  claim; the volume's own claim is then the one named here (C-40).
                 type: string
               capabilities:
                 description: |-
@@ -198,6 +199,12 @@ spec:
                 description: |-
                   SnapshotConsistency is the consistency a snapshot of this volume can
                   reach; it is crash-consistent for shared-rwx (C-38).
+                type: string
+              storageClass:
+                description: |-
+                  StorageClass is the policy the bound claim actually resolved. The
+                  migration flow writes it together with BoundClaim, so the preflight of
+                  C-34 can compare it with the desired policy (C-34, C-40).
                 type: string
             type: object
         type: object
@@ -264,8 +271,9 @@ spec:
             properties:
               boundClaim:
                 description: |-
-                  BoundClaim is the claim the volume is bound to; before a migration it
-                  equals the volume name (C-38, C-40).
+                  BoundClaim is the claim the volume is bound to. The migration flow writes
+                  it when it moves the volume, so it is empty until a migration binds a
+                  claim; the volume's own claim is then the one named here (C-40).
                 type: string
               capabilities:
                 description: |-
@@ -389,6 +397,12 @@ spec:
                 description: |-
                   SnapshotConsistency is the consistency a snapshot of this volume can
                   reach; it is crash-consistent for shared-rwx (C-38).
+                type: string
+              storageClass:
+                description: |-
+                  StorageClass is the policy the bound claim actually resolved. The
+                  migration flow writes it together with BoundClaim, so the preflight of
+                  C-34 can compare it with the desired policy (C-34, C-40).
                 type: string
             type: object
         type: object

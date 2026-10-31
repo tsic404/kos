@@ -77,19 +77,22 @@ var markerClasses = map[Subject]map[markers.Class]bool{
 
 // downstreamWriters is the C-04 allocation for native objects below a KOS
 // object. The application reconciler renders inside its declared namespaces, the
-// extension controller inside its declared scope, the installer in its own and
-// the endpoint reconciler inside one entry's namespace; the volume reconciler,
-// the catalogue, discovery and the projection write none. The endpoint
-// reconciler's row is object-level (C-43): admission fixes it to the Ingress and
-// Service kinds, so it cannot use the row for another kind. The backup
-// reconciler's CronJob and the migration flow's replication Job and target
-// objects are rows (C-41, C-40) that are not implemented yet: those subjects are
-// refused rather than granted a class-wide write they were never given.
+// extension controller inside its declared scope, the installer in its own, the
+// endpoint reconciler inside one entry's namespace and the migration flow inside
+// the namespace of the volume it moves; the volume reconciler, the catalogue,
+// discovery and the projection write none. The endpoint reconciler's row is
+// object-level (C-43): admission fixes it to the Ingress and Service kinds, so it
+// cannot use the row for another kind. The migration flow's row is object-level
+// too (C-40): admission fixes it to the batch Jobs a copy or a verification runs.
+// The backup reconciler's CronJob is a row (C-41) that is not implemented yet:
+// that subject is refused rather than granted a class-wide write it was never
+// given.
 var downstreamWriters = map[Subject]map[Verb]bool{
 	SubjectInstaller:             allVerbs(),
 	SubjectApplicationReconciler: allVerbs(),
 	SubjectEndpointReconciler:    allVerbs(),
 	SubjectExtensionReconciler:   allVerbs(),
+	SubjectMigrationReconciler:   {VerbCreate: true, VerbDelete: true},
 }
 
 // forceWriters is the allocation for forced applies. A force takes a field set

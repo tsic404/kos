@@ -138,6 +138,15 @@ spec:
                   Applied is the baseline the last completed install or upgrade established
                   (C-34).
                 properties:
+                  claims:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Claims is the claim each declared volume was bound to when the baseline
+                      was rendered. A migration that cuts a volume over to another claim
+                      changes this render input, so the reconciler re-renders the baseline
+                      instead of re-applying one that names the released claim (C-40).
+                    type: object
                   config:
                     description: Config is the resolved config the baseline rendered
                       with (C-34).
@@ -792,6 +801,15 @@ spec:
                   Applied is the baseline the last completed install or upgrade established
                   (C-34).
                 properties:
+                  claims:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Claims is the claim each declared volume was bound to when the baseline
+                      was rendered. A migration that cuts a volume over to another claim
+                      changes this render input, so the reconciler re-renders the baseline
+                      instead of re-applying one that names the released claim (C-40).
+                    type: object
                   config:
                     description: Config is the resolved config the baseline rendered
                       with (C-34).

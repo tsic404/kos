@@ -424,7 +424,9 @@ func (c *Controller) clearFinalizer(ctx context.Context, volume *v1beta1.Volume)
 }
 
 // writeStatus writes the status only when it changed, so a repeat observation
-// produces no write (C-06).
+// produces no write (C-06). The binding claim and the policy it resolved are
+// written by the migration flow (ADR-015, C-40): this round reads them and
+// leaves them out of its document, so the two writers merge by field (C-05).
 func (c *Controller) writeStatus(ctx context.Context, volume *v1beta1.Volume, status v1beta1.VolumeStatus) error {
 	if sameStatus(volume.Status, status) {
 		return nil
@@ -433,6 +435,8 @@ func (c *Controller) writeStatus(ctx context.Context, volume *v1beta1.Volume, st
 	if err != nil {
 		return fmt.Errorf("encode the volume status: %w", err)
 	}
+	delete(encoded, "boundClaim")
+	delete(encoded, "storageClass")
 	document := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": api.Group + "/v1beta1",
 		"kind":       "Volume",
@@ -447,14 +451,17 @@ func (c *Controller) writeStatus(ctx context.Context, volume *v1beta1.Volume, st
 }
 
 // baseStatus carries the conditions a round starts from; every observed fact
-// is filled in by the round itself.
+// is filled in by the round itself. The binding claim and its policy are read
+// back so the round judges the claim the migration bound the volume to and does
+// not report a change it never wrote (C-40).
 func baseStatus(volume *v1beta1.Volume) v1beta1.VolumeStatus {
 	return v1beta1.VolumeStatus{
 		ObjectStatus: v1beta1.ObjectStatus{
 			Conditions: append([]metav1.Condition(nil), volume.Status.Conditions...),
 			Health:     v1beta1.Health{State: v1beta1.HealthStateUnavailable},
 		},
-		BoundClaim: volume.Status.BoundClaim,
+		BoundClaim:   volume.Status.BoundClaim,
+		StorageClass: volume.Status.StorageClass,
 	}
 }
 

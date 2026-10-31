@@ -111,6 +111,48 @@ func TestStatusWritersMatchContract(t *testing.T) {
 	}
 }
 
+// TestVolumeStatusCarveOut covers ADR-015: the migration flow writes the two
+// binding fields of a volume status and nothing else, and the volume reconciler
+// keeps the rest (C-05, C-40).
+func TestVolumeStatusCarveOut(t *testing.T) {
+	cases := []struct {
+		name    string
+		subject Subject
+		fields  []string
+		want    bool
+	}{
+		{name: "migration flow writes the binding claim", subject: SubjectMigrationReconciler, fields: []string{"status.boundClaim"}, want: true},
+		{name: "migration flow writes the actual policy", subject: SubjectMigrationReconciler, fields: []string{"status.storageClass"}, want: true},
+		{name: "migration flow writes both binding fields", subject: SubjectMigrationReconciler, fields: []string{"status.boundClaim", "status.storageClass"}, want: true},
+		{name: "migration flow writes no other volume status field", subject: SubjectMigrationReconciler, fields: []string{"status.boundClaim", "status.phase"}},
+		{name: "migration flow names at least one field", subject: SubjectMigrationReconciler},
+		{name: "volume reconciler keeps its own status", subject: SubjectVolumeReconciler, fields: []string{"status.phase"}, want: true},
+		{name: "volume reconciler does not write the binding", subject: SubjectVolumeReconciler, fields: []string{"status.boundClaim"}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			err := Admit(Request{
+				Subject: test.subject,
+				Object:  kernelRef("Volume"),
+				Verb:    VerbApply,
+				Parts:   []Part{PartStatus},
+				Fields:  test.fields,
+				Current: stored("Volume", managedLabels),
+			})
+			if test.want {
+				if err != nil {
+					t.Fatalf("write refused: %v", err)
+				}
+				return
+			}
+			var denied *Denied
+			if !errors.As(err, &denied) {
+				t.Fatalf("write was not refused: %v", err)
+			}
+		})
+	}
+}
+
 // TestSpecWritersMatchContract states C-03's spec column literally: three kinds
 // are system owned, the rest are user owned.
 func TestSpecWritersMatchContract(t *testing.T) {
@@ -671,7 +713,7 @@ func TestDownstreamAllocation(t *testing.T) {
 		{name: "extension writes only declared kinds", subject: SubjectExtensionReconciler, scope: downstreamScope([]string{"apps"}, schema.GroupKind{Kind: "ConfigMap"}), verb: VerbCreate},
 		{name: "extension without a declaration writes nothing", subject: SubjectExtensionReconciler, verb: VerbCreate},
 		{name: "backup reconciler writes no downstream object until its CronJob row lands", subject: SubjectBackupReconciler, verb: VerbCreate},
-		{name: "migration flow writes no downstream object until its Job row lands", subject: SubjectMigrationReconciler, verb: VerbCreate},
+		{name: "migration flow writes only its step Jobs", subject: SubjectMigrationReconciler, verb: VerbCreate},
 		{name: "volume reconciler writes no downstream object", subject: SubjectVolumeReconciler, verb: VerbApply},
 		{name: "user writes no downstream object", subject: SubjectUser, verb: VerbApply},
 		{name: "projection writes nothing", subject: SubjectProjection, verb: VerbApply},
@@ -697,30 +739,50 @@ func TestDownstreamAllocation(t *testing.T) {
 	}
 }
 
-// TestUnrenderedDownstreamKindsStayDenied covers the C-04 rows this change does
-// not implement: the backup reconciler's CronJob (C-41) and the migration flow's
-// replication Job and target objects (C-40) are refused, including their own
-// contract objects, rather than allowed by a class-wide row.
-func TestUnrenderedDownstreamKindsStayDenied(t *testing.T) {
+// TestMigrationJobRowIsObjectLevel covers the C-04 row the migration flow
+// landed: a Job in the namespace the flow declares is admitted for create and
+// delete only, another kind is refused, and the backup reconciler's CronJob row
+// (C-41) is still unimplemented and refused.
+func TestMigrationJobRowIsObjectLevel(t *testing.T) {
+	job := Ref{Group: "batch", Version: "v1", Kind: "Job", Namespace: "apps", Name: "copy"}
 	cases := []struct {
-		name    string
-		subject Subject
-		object  Ref
+		name      string
+		subject   Subject
+		object    Ref
+		verb      Verb
+		namespace string
+		want      bool
 	}{
-		{name: "backup reconciler writes no CronJob", subject: SubjectBackupReconciler, object: Ref{Group: "batch", Version: "v1", Kind: "CronJob", Namespace: "apps", Name: "nightly"}},
-		{name: "migration flow writes no replication Job", subject: SubjectMigrationReconciler, object: Ref{Group: "batch", Version: "v1", Kind: "Job", Namespace: "apps", Name: "copy"}},
-		{name: "migration flow writes no target object", subject: SubjectMigrationReconciler, object: Ref{Version: "v1", Kind: "Service", Namespace: "apps", Name: "target"}},
+		{name: "migration flow creates a step Job", subject: SubjectMigrationReconciler, object: job, verb: VerbCreate, namespace: "apps", want: true},
+		{name: "migration flow deletes a step Job", subject: SubjectMigrationReconciler, object: job, verb: VerbDelete, namespace: "apps", want: true},
+		{name: "migration flow does not apply a step Job", subject: SubjectMigrationReconciler, object: job, verb: VerbApply, namespace: "apps"},
+		{name: "migration flow stays inside its namespace", subject: SubjectMigrationReconciler, object: job, verb: VerbCreate, namespace: "other"},
+		{name: "migration flow writes no target object", subject: SubjectMigrationReconciler, object: Ref{Version: "v1", Kind: "Service", Namespace: "apps", Name: "target"}, verb: VerbCreate, namespace: "apps"},
+		{name: "backup reconciler writes no CronJob", subject: SubjectBackupReconciler, object: Ref{Group: "batch", Version: "v1", Kind: "CronJob", Namespace: "apps", Name: "nightly"}, verb: VerbCreate, namespace: "apps"},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
+			writes := creatorMarkers("uid-owner")
+			if test.verb == VerbDelete {
+				writes = nil
+			}
 			err := Admit(Request{
 				Subject: test.subject,
 				Object:  test.object,
-				Verb:    VerbCreate,
+				Verb:    test.verb,
 				Parts:   []Part{PartObject},
-				Markers: creatorMarkers("uid-owner"),
-				Scope:   namespaces("apps"),
+				Markers: writes,
+				Current: nativeStored(test.object.Kind, test.object.Namespace, test.object.Name, map[string]string{
+					markers.ManagedBy: ManagedByValue, markers.OwnerUID: "uid-owner",
+				}),
+				Scope: namespaces(test.namespace),
 			})
+			if test.want {
+				if err != nil {
+					t.Fatalf("write refused: %v", err)
+				}
+				return
+			}
 			var denied *Denied
 			if !errors.As(err, &denied) {
 				t.Fatalf("write was not refused: %v", err)
