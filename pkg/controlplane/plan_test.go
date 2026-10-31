@@ -21,6 +21,7 @@ import (
 type fakeSource struct {
 	objects []ObservedObject
 	listErr error
+	getErr  error
 }
 
 // List implements ObjectSource.
@@ -43,6 +44,9 @@ func (f *fakeSource) List(_ context.Context, objectType ObjectType, namespace st
 
 // Get implements ObjectSource.
 func (f *fakeSource) Get(_ context.Context, objectType ObjectType, namespace, name string) (ObservedObject, error) {
+	if f.getErr != nil {
+		return ObservedObject{}, f.getErr
+	}
 	for _, object := range f.objects {
 		if text(object.Object["kind"]) != objectType.Kind || nestedText(object.Object, "metadata", "name") != name {
 			continue

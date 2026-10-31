@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
 )
@@ -69,4 +70,21 @@ func resourceOf(client dynamic.Interface, object ObjectType, namespace string) d
 		return resource.Namespace(namespace)
 	}
 	return resource.Namespace("")
+}
+
+// clusterReadFailure maps a cluster read error to C-64's reasons. A missing
+// object is still absent, but anything else names the cluster as the cause
+// instead of answering with an empty result: an unusable credential is told
+// apart from an unreachable API because only the first needs a repair before a
+// retry can work. The cluster's own text stays in the log (C-12).
+func (s *Server) clusterReadFailure(err error, ref ObjectRef) *Error {
+	switch {
+	case apierrors.IsNotFound(err):
+		return notFound("对象 " + ref.String() + " 不存在").about(ref)
+	case apierrors.IsUnauthorized(err), apierrors.IsForbidden(err):
+		s.log.Error("cluster credential rejected", "object", ref.String(), "error", err)
+		return clusterCredentialsInvalid("访问集群的凭据无效，读取不可用").about(ref)
+	}
+	s.log.Error("cluster read failed", "object", ref.String(), "error", err)
+	return clusterUnavailable("集群 API 不可达，读取不可用").about(ref)
 }

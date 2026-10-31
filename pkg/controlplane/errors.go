@@ -84,6 +84,12 @@ const (
 	// CodeOwnershipCheckFailed marks a delete whose ownership check could not
 	// run, so the account is kept rather than stranding objects (C-60).
 	CodeOwnershipCheckFailed = "ownership_check_failed"
+	// CodeClusterUnavailable marks a read the cluster API could not answer, so
+	// an empty result would claim there was nothing to read (C-64).
+	CodeClusterUnavailable = "cluster_unavailable"
+	// CodeClusterCredentialsInvalid marks a read the cluster API refused because
+	// the control plane's credential is not usable (C-64).
+	CodeClusterCredentialsInvalid = "cluster_credentials_invalid"
 )
 
 // Error is the failure envelope every non-2xx response carries (C-12). The
@@ -140,7 +146,7 @@ func (e *Error) status() int {
 		return http.StatusUnprocessableEntity
 	case CodeObjectExists, CodeConflict, CodeAccountExists, CodeLastOwner, CodeAccountHasObjects:
 		return http.StatusConflict
-	case CodeWriteFailed:
+	case CodeWriteFailed, CodeClusterUnavailable, CodeClusterCredentialsInvalid:
 		return http.StatusBadGateway
 	case CodeDatabaseUnavailable, CodeOwnershipCheckFailed:
 		return http.StatusServiceUnavailable
@@ -210,5 +216,29 @@ func internal(stage Stage, message string) *Error {
 		Stage:       stage,
 		Retryable:   true,
 		SideEffects: SideEffectsNone,
+	}
+}
+
+// clusterUnavailable reports a cluster read the API could not answer, so a
+// caller never reads an empty result as "there is nothing" (C-64).
+func clusterUnavailable(message string) *Error {
+	return &Error{
+		Code:        CodeClusterUnavailable,
+		Message:     message,
+		Stage:       StageRead,
+		Retryable:   true,
+		SideEffects: SideEffectsNone,
+	}
+}
+
+// clusterCredentialsInvalid reports a cluster read the API refused because this
+// control plane's credential is unusable; a retry alone cannot fix it (C-64).
+func clusterCredentialsInvalid(message string) *Error {
+	return &Error{
+		Code:               CodeClusterCredentialsInvalid,
+		Message:            message,
+		Stage:              StageRead,
+		RequiresUserAction: true,
+		SideEffects:        SideEffectsNone,
 	}
 }
