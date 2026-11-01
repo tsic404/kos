@@ -48,7 +48,9 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `pkg/catalogue/` | C-24 目录来源：条目结构、摘要校验、定义同步与来源缺失的升级路径 |
 | `pkg/access/` | C-59/C-60 判定：可见性谓词、角色写权限、所有权与跨所有者引用，扩展对象按声明授权 |
 | `pkg/backup/` | C-41/C-42 数据保护：策略调和与计划触发、失败域拒绝、四类基线项的全量计算、恢复到新实例与演练比对；复制与摘要交给工作进程，调和轮只观测结果 |
-| `pkg/install/` | C-15/C-54/C-58：在已有集群安装、引导安装与外置控制面安装、清单渲染、跨集群凭据、安装窗口的写入者归属判定与审计读取、注入失败与回滚、卸载遗留清单、救援只读读取 |
+| `pkg/install/` | C-15/C-54/C-55/C-58：在已有集群安装、引导安装与外置控制面安装、清单渲染、跨集群凭据、KOS 自身升级（先升级对象定义再替换控制面，外置形态分两个集群写入）、安装窗口的写入者归属判定与审计读取、注入失败与回滚、卸载遗留清单、救援只读读取 |
+| `pkg/maintenance/` | C-65 节点维护四步：预检（受影响的 node-local 应用与卷、预计停机时长、不可判定项）、摘除、停止与驱逐、恢复；不可调度字段由 API 进程按 C-04 写入，审计记 `maintain`/`restore` 一对，驱逐只走运行内核的驱逐接口 |
+| `pkg/upgrade/` | C-55 平台升级：预检（受影响应用、停机时长、健康异常应用数、不可判定项）、摘除与驱逐的编排、以节点报告的目标版本为界恢复；无强制驱逐路径 |
 | `tests/acceptance/TC-66/` | 卷迁移六阶段完成，绑定换到新声明、应用不变 |
 | `tests/acceptance/TC-67/` | 五个阶段各注入一次失败后回滚到源卷 |
 | `tests/acceptance/TC-68/` | 清理只打释放标记，不删除源卷 |
@@ -134,6 +136,10 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `tests/acceptance/TC-92/` | 救援模式只读：可读原生资源，集群与数据库不变，无写入 |
 | `tests/acceptance/TC-93/` | 单节点控制面单副本、节点故障不迁移、文案不承诺高可用 |
 | `tests/acceptance/TC-94/` | 外置控制面：被管集群无控制面工作负载、应用经跨集群凭据调和到 Ready、改 spec 后投影与下游更新、凭据记录到期并可续期、卸载分两侧清除 |
+| `tests/acceptance/TC-95/` | 集群升级预检列出受影响应用与停机时长，升级期间应用被停止、恢复后回到 Ready；扩展升级贡献差异逐项可读 |
+| `tests/acceptance/TC-96/` | 强制驱逐路径不存在：请求被拒、应用未停止时驱逐被拒，工作负载与数据保持原状 |
+| `tests/acceptance/TC-121/` | 维护预检列出 node-local 应用与停机时长，停止先于驱逐，可迁移应用迁出，恢复后回到 Ready 且应用 spec 不变 |
+| `tests/acceptance/TC-122/` | 绕过控制面的 cordon 显示为计划外维护并列出受影响应用，人工撤销后归属消失，只驱逐不标记不产生归属，非 Owner 只读 |
 
 ## 对象模型
 
@@ -202,6 +208,10 @@ KOS 不再写它；放弃写入 `declined`，对象留在 unmanaged，不再被�
 | `POST` | `/api/v1/plan-requests` | 三类差异、摘要与警告；不写任何对象 |
 | `POST` | `/api/v1/apply-requests` | 接受期望对象集后执行；进度从对象本身读取 |
 | `POST` | `/api/v1/action-requests` | 应用动作 `retry`/`orphan`/`confirm`/`restart`/`reinstall`/`stop`/`start`/`scale`；202 已接受 + 动作记录引用 |
+| `POST` | `/api/v1/node-maintenance/preflight` | C-65 预检：受影响 node-local 应用与卷、预计停机时长、不可判定项；不写任何对象 |
+| `POST` | `/api/v1/node-maintenance` | 摘除：预检不可判定时拒绝，否则写节点不可调度字段并记 `maintain`；202 已接受 + 节点引用 |
+| `POST` | `/api/v1/node-maintenance/drain` | 停止之后驱逐：node-local 应用仍在运行时返回 409，驱逐只经运行内核的驱逐接口 |
+| `DELETE` | `/api/v1/node-maintenance/{name}` | 恢复：撤销不可调度并记 `restore`；202 已接受 |
 
 - 读投影每项带 `observedAt` 与 `stale`；陈旧阈值是 `controlplane.StaleThreshold`（2 分钟），所有来源共用。确知发现来源时，投影的 `sources` 列出全部上报的适配器标识。
 - 写请求返回 202 与对象引用，不返回已完成；工作在接受后继续，客户端断线不影响推进。
@@ -228,6 +238,10 @@ KOS 不再写它；放弃写入 `declined`，对象留在 unmanaged，不再被�
   `controlplane.Auditor` 注入（C-14）。
 - 应用资源规格在写入前校验：数量必须可解析且非负，上限小于请求返回 `invalid_field` 并指出
   `spec.resources.limits.*`；包默认值在创建时物化进 `spec.resources`，更新只覆盖提交的字段。
+- 节点维护四步由 Owner 发起与恢复，其余角色只读；维护状态落在运行内核节点对象的不可调度字段，
+  不新增对象也不新增元数据契约，进度从该字段与节点设置读取（C-65）。请求体按模型严格解码，
+  模型之外的字段一律拒绝，因此不存在强制驱逐入口；驱逐失败如实返回并列出已驱逐对象，不降级为直删。
+  node-local 应用由自身调和在观察到不可调度后停止并记录原因，恢复后回到加载路径（C-40、C-66）。
 
 ## 扩展装载
 

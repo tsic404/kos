@@ -115,11 +115,12 @@ func (s *WriterStore) RecordEvent(ctx context.Context, application *v1beta1.Appl
 	return err
 }
 
-// storeVolumes reads the volume facts the upgrade preflight needs from the
-// objects that hold them (C-34, C-38). The Volume object itself carries no size
-// and no policy: the claim the volume creates under its own name holds the size
-// and class it asks for, and the PersistentVolume it binds holds the class the
-// storage backend actually gave it.
+// storeVolumes reads the volume facts the upgrade preflight and the maintenance
+// check need from the objects that hold them (C-34, C-38, C-65). The Volume
+// object itself carries no size and no policy: the claim the volume creates
+// under its own name holds the size and class it asks for, and the
+// PersistentVolume it binds holds the class the storage backend actually gave
+// it.
 type storeVolumes struct {
 	store Store
 }
@@ -128,9 +129,12 @@ type storeVolumes struct {
 // volume. The claim it reads is the one the volume is bound to, which a
 // migration may have moved to another claim (C-40); before any migration that
 // is the claim named after the volume. A volume whose claim the cluster does
-// not have yields no facts: the volume module has not bound it yet, so no size
-// and no policy can change.
+// not have yields no size and no policy: the volume module has not bound it
+// yet. The placement facts the Volume object itself carries are read either
+// way, because an unbound claim does not move the data off its node (C-38,
+// C-65).
 func (v storeVolumes) VolumeFacts(ctx context.Context, namespace, name string) (VolumeFacts, error) {
+	facts := VolumeFacts{}
 	claimName := name
 	stored, err := v.store.Get(ctx, write.Ref{Group: api.Group, Version: "v1beta1", Kind: "Volume", Namespace: namespace, Name: name})
 	switch {
@@ -139,27 +143,27 @@ func (v storeVolumes) VolumeFacts(ctx context.Context, namespace, name string) (
 		// claim after itself, which is where the claim lives before any
 		// migration moved it (C-38).
 	case err != nil:
-		return VolumeFacts{}, err
+		return facts, err
 	default:
-		if bound, _, _ := unstructured.NestedString(stored.Object, "status", "boundClaim"); bound != "" {
+		facts.Mobility = v1beta1.VolumeMobility(nestedString(stored.Object, "spec", "mobility"))
+		facts.Node = nestedString(stored.Object, "status", "node")
+		if bound := nestedString(stored.Object, "status", "boundClaim"); bound != "" {
 			claimName = bound
 		}
 	}
 	claimRef := write.Ref{Version: "v1", Kind: "PersistentVolumeClaim", Namespace: namespace, Name: claimName}
 	claim, err := v.store.Get(ctx, claimRef)
 	if apierrors.IsNotFound(err) {
-		return VolumeFacts{}, nil
+		return facts, nil
 	}
 	if err != nil {
-		return VolumeFacts{}, err
+		return facts, err
 	}
-	facts := VolumeFacts{
-		Found:         true,
-		DesiredSize:   nestedString(claim.Object, "spec", "resources", "requests", "storage"),
-		DesiredPolicy: nestedString(claim.Object, "spec", "storageClassName"),
-		ActualSize:    nestedString(claim.Object, "status", "capacity", "storage"),
-		Bound:         nestedString(claim.Object, "status", "phase") == "Bound",
-	}
+	facts.Found = true
+	facts.DesiredSize = nestedString(claim.Object, "spec", "resources", "requests", "storage")
+	facts.DesiredPolicy = nestedString(claim.Object, "spec", "storageClassName")
+	facts.ActualSize = nestedString(claim.Object, "status", "capacity", "storage")
+	facts.Bound = nestedString(claim.Object, "status", "phase") == "Bound"
 	if !facts.Bound {
 		return facts, nil
 	}
@@ -172,7 +176,7 @@ func (v storeVolumes) VolumeFacts(ctx context.Context, namespace, name string) (
 		return facts, nil
 	}
 	if err != nil {
-		return VolumeFacts{}, err
+		return facts, err
 	}
 	facts.ActualPolicy = nestedString(persistentVolume.Object, "spec", "storageClassName")
 	return facts, nil

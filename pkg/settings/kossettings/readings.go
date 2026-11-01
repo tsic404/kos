@@ -29,6 +29,12 @@ import (
 // alone, so the node's own maintenance history is the window.
 var maintenanceVerbs = []string{controlplane.VerbMaintain, controlplane.VerbRestore}
 
+// maintenanceResults are the outcomes that decide an origin: only a write that
+// took effect moved the unschedulable field. A refused or failed attempt keeps
+// its record (C-14) but leaves the field alone, so it must not flip a node
+// between planned and unplanned maintenance (C-65).
+var maintenanceResults = []string{controlplane.ResultAccepted}
+
 // Maintenance origin values C-36 reports.
 const (
 	MaintenanceNone      = "none"
@@ -66,10 +72,11 @@ type AccountReader interface {
 }
 
 // AuditReader reads the control-plane audit records the maintenance origin
-// comes from (C-14, C-65). A read is scoped to one node's own records, so the
-// size of the rest of the trail does not decide the answer.
+// comes from (C-14, C-65). A read is scoped to one node's own records and to
+// the outcomes that took effect, so neither the size of the rest of the trail
+// nor a refused attempt decides the answer.
 type AuditReader interface {
-	RecentAuditEntriesForObject(ctx context.Context, object string, verbs []string, limit int) ([]identity.AuditEntry, error)
+	RecentAuditEntriesForObject(ctx context.Context, object string, verbs, results []string, limit int) ([]identity.AuditEntry, error)
 }
 
 // Readings resolves every item the product's pages declare (C-53): the cluster
@@ -504,8 +511,9 @@ func (r *Readings) nodeMaintenanceOrigins(ctx context.Context) (any, *controlpla
 }
 
 // originOf applies C-65's origin rule to one node. Only the newest record of
-// the node's own maintenance writes is needed, and the read is bounded by that
-// node, so no amount of unrelated audit traffic changes the answer.
+// the node's own maintenance writes that took effect is needed, and the read is
+// bounded by that node and that outcome, so neither unrelated audit traffic nor
+// a refused attempt changes the answer.
 func (r *Readings) originOf(ctx context.Context, node corev1.Node) string {
 	if !node.Spec.Unschedulable {
 		return MaintenanceNone
@@ -514,7 +522,7 @@ func (r *Readings) originOf(ctx context.Context, node corev1.Node) string {
 		return MaintenanceUnknown
 	}
 	object := api.Group + "/Node/" + node.Name
-	entries, err := r.Audit.RecentAuditEntriesForObject(ctx, object, maintenanceVerbs, 1)
+	entries, err := r.Audit.RecentAuditEntriesForObject(ctx, object, maintenanceVerbs, maintenanceResults, 1)
 	if err != nil {
 		return MaintenanceUnknown
 	}

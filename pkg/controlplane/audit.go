@@ -33,6 +33,9 @@ const (
 	VerbMaintain = "maintain"
 	// VerbRestore marks the write that lifts the cordon.
 	VerbRestore = "restore"
+	// VerbDrain marks the eviction a maintenance step performs. It is not part
+	// of the cordon pair, so it never decides a node's maintenance origin.
+	VerbDrain = "drain"
 )
 
 // Actor names the principal behind one request (C-14). The control plane

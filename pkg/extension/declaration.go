@@ -319,11 +319,14 @@ type PageItem struct {
 
 // Action is one executable action of a page (C-22). It names the control-plane
 // API write the shell offers; the browser submits it with its own session, so
-// the shell never proxies a native resource write.
+// the shell never proxies a native resource write. RequiredRole narrows the
+// action to one role, for an entry C-59 gives a single role to; empty admits
+// every role the page admits.
 type Action struct {
-	ID     string `json:"id"`
-	Method string `json:"method"`
-	Path   string `json:"path"`
+	ID           string `json:"id"`
+	Method       string `json:"method"`
+	Path         string `json:"path"`
+	RequiredRole string `json:"requiredRole,omitempty"`
 }
 
 // roleRank orders the three session roles; an unknown or empty role is
@@ -350,6 +353,15 @@ func (p Page) Allows(role write.Role) bool {
 		return false
 	}
 	return session >= minimum
+}
+
+// Allows reports whether a session role may submit this action (C-59). An empty
+// required role admits every role the page itself admits.
+func (a Action) Allows(role write.Role) bool {
+	if a.RequiredRole == "" {
+		return true
+	}
+	return a.RequiredRole == string(role)
 }
 
 // Setting is an extension-contributed setting item (C-23).
@@ -871,6 +883,9 @@ func loadPages(entries []Page) ([]Page, []string) {
 			if !isControlPlanePath(action.Path) {
 				actionProblems = append(actionProblems, "path "+action.Path+" is not a control-plane API path")
 			}
+			if !isDeclaredRole(action.RequiredRole) {
+				actionProblems = append(actionProblems, "requiredRole "+action.RequiredRole+" is not a session role")
+			}
 			entryProblems = append(entryProblems, where(fmt.Sprintf("actions[%d]", actionIndex), actionProblems)...)
 		}
 		itemIDs := map[string]bool{}
@@ -949,6 +964,17 @@ func checkItemReference(item PageItem) []string {
 func isWriteMethod(method string) bool {
 	switch method {
 	case http.MethodPost, http.MethodPut, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+// isDeclaredRole reports whether value is one of C-59's session roles; empty
+// leaves the action open to every role the page admits.
+func isDeclaredRole(value string) bool {
+	switch write.Role(value) {
+	case "", write.RoleOwner, write.RoleMember, write.RoleGuest:
 		return true
 	default:
 		return false

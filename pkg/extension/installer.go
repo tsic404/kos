@@ -105,79 +105,19 @@ func (i *Installer) Install(ctx context.Context) (*Installation, error) {
 	if err != nil {
 		return nil, err
 	}
-	held := BlockedNames(blocked)
-	resource, err := i.resource()
+	read, err := i.readComponents(ctx, BlockedNames(blocked))
 	if err != nil {
 		return nil, err
 	}
-	list, err := resource.List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("list system components: %w", err)
-	}
 
-	requests := make([]Request, 0, len(list.Items))
-	objects := make(map[string]*unstructured.Unstructured, len(list.Items))
-	live := make(map[string]bool, len(list.Items))
-	for index := range list.Items {
-		object := &list.Items[index]
-		if object.GetDeletionTimestamp() != nil && !held[object.GetName()] {
-			continue
-		}
-		// A gate-released component has left the set, so it is not live here.
-		live[object.GetName()] = true
-		attribution, err := markers.AttributionOf(object.GetLabels())
-		if err != nil {
-			return nil, fmt.Errorf("component %s: %w", object.GetName(), err)
-		}
-		if attribution == markers.AttributionUnmanaged {
-			continue
-		}
-		request := Request{
-			Name:          object.GetName(),
-			Generation:    object.GetGeneration(),
-			Created:       object.GetCreationTimestamp().Time,
-			IsAdopted:     attribution == markers.AttributionAdopted,
-			IsTerminating: object.GetDeletionTimestamp() != nil,
-		}
-		if disabled, _, err := unstructured.NestedBool(object.Object, "spec", "disable"); err != nil {
-			return nil, fmt.Errorf("component %s: read spec.disable: %w", object.GetName(), err)
-		} else {
-			request.IsDisabled = disabled
-		}
-		if phase, found, err := unstructured.NestedString(object.Object, "status", "phase"); err != nil {
-			return nil, fmt.Errorf("component %s: read status.phase: %w", object.GetName(), err)
-		} else {
-			request.WasDisabled = request.IsDisabled && found && phase == PhaseDisabled
-		}
-		if !request.IsAdopted {
-			reference, _, err := unstructured.NestedString(object.Object, "spec", "package", "reference")
-			if err != nil {
-				return nil, fmt.Errorf("component %s: read spec.package.reference: %w", object.GetName(), err)
-			}
-			digest, _, err := unstructured.NestedString(object.Object, "spec", "package", "digest")
-			if err != nil {
-				return nil, fmt.Errorf("component %s: read spec.package.digest: %w", object.GetName(), err)
-			}
-			if reference != "" {
-				content, fetchErr := i.Artifacts.Fetch(ctx, reference)
-				if fetchErr != nil {
-					request.FetchError = fetchErr
-				} else {
-					request.Package = &Package{Reference: reference, Digest: digest, Content: content}
-				}
-			}
-		}
-		requests = append(requests, request)
-		objects[request.Name] = object
-	}
-
+	requests := read.requests
 	assessment := EvaluateWith(requests, i.frameworks())
 	withdrawn := make(map[string]bool, len(requests))
 	for _, request := range requests {
 		withdrawn[request.Name] = request.IsDisabled || request.IsTerminating
 	}
 	for _, result := range assessment.Components {
-		object := objects[result.Name]
+		object := read.objects[result.Name]
 		if object == nil {
 			continue
 		}
@@ -210,8 +150,95 @@ func (i *Installer) Install(ctx context.Context) (*Installation, error) {
 	}
 	// Preference bookkeeping records what it can and never fails the pass: the
 	// control-plane database is not on the reconciliation path (C-27, C-61).
-	i.retainPreferences(ctx, assessment, live)
+	i.retainPreferences(ctx, assessment, read.live)
 	return &Installation{components: assessment.Components, registry: assessment.Registry}, nil
+}
+
+// componentRead is the live system component set one pass judges: the install
+// requests, the objects their status is written through, and the component
+// names still in the install set.
+type componentRead struct {
+	requests []Request
+	objects  map[string]*unstructured.Unstructured
+	live     map[string]bool
+}
+
+// readComponents lists the system components and builds the install requests
+// from them. A component without an attribution marker is not KOS's and is left
+// out; an adopted one joins the set with no package. held names the terminating
+// components a dependent still holds, so a gate-released deletion has already
+// left the set. The install pass and the upgrade preflight share this read so
+// neither judges a component the other cannot see (C-17, C-55). A preflight runs
+// outside an install round and holds nothing: a component being deleted has left
+// the set and is no upgrade target.
+func (i *Installer) readComponents(ctx context.Context, held map[string]bool) (componentRead, error) {
+	resource, err := i.resource()
+	if err != nil {
+		return componentRead{}, err
+	}
+	list, err := resource.List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return componentRead{}, fmt.Errorf("list system components: %w", err)
+	}
+
+	read := componentRead{
+		requests: make([]Request, 0, len(list.Items)),
+		objects:  make(map[string]*unstructured.Unstructured, len(list.Items)),
+		live:     make(map[string]bool, len(list.Items)),
+	}
+	for index := range list.Items {
+		object := &list.Items[index]
+		if object.GetDeletionTimestamp() != nil && !held[object.GetName()] {
+			continue
+		}
+		// A gate-released component has left the set, so it is not live here.
+		read.live[object.GetName()] = true
+		attribution, err := markers.AttributionOf(object.GetLabels())
+		if err != nil {
+			return componentRead{}, fmt.Errorf("component %s: %w", object.GetName(), err)
+		}
+		if attribution == markers.AttributionUnmanaged {
+			continue
+		}
+		request := Request{
+			Name:          object.GetName(),
+			Generation:    object.GetGeneration(),
+			Created:       object.GetCreationTimestamp().Time,
+			IsAdopted:     attribution == markers.AttributionAdopted,
+			IsTerminating: object.GetDeletionTimestamp() != nil,
+		}
+		if disabled, _, err := unstructured.NestedBool(object.Object, "spec", "disable"); err != nil {
+			return componentRead{}, fmt.Errorf("component %s: read spec.disable: %w", object.GetName(), err)
+		} else {
+			request.IsDisabled = disabled
+		}
+		if phase, found, err := unstructured.NestedString(object.Object, "status", "phase"); err != nil {
+			return componentRead{}, fmt.Errorf("component %s: read status.phase: %w", object.GetName(), err)
+		} else {
+			request.WasDisabled = request.IsDisabled && found && phase == PhaseDisabled
+		}
+		if !request.IsAdopted {
+			reference, _, err := unstructured.NestedString(object.Object, "spec", "package", "reference")
+			if err != nil {
+				return componentRead{}, fmt.Errorf("component %s: read spec.package.reference: %w", object.GetName(), err)
+			}
+			digest, _, err := unstructured.NestedString(object.Object, "spec", "package", "digest")
+			if err != nil {
+				return componentRead{}, fmt.Errorf("component %s: read spec.package.digest: %w", object.GetName(), err)
+			}
+			if reference != "" {
+				content, fetchErr := i.Artifacts.Fetch(ctx, reference)
+				if fetchErr != nil {
+					request.FetchError = fetchErr
+				} else {
+					request.Package = &Package{Reference: reference, Digest: digest, Content: content}
+				}
+			}
+		}
+		read.requests = append(read.requests, request)
+		read.objects[request.Name] = object
+	}
+	return read, nil
 }
 
 // retainPreferences records the declared fate of every active extension's
