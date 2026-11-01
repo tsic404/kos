@@ -110,19 +110,50 @@ type Shell struct {
 // wire the page shell's source readers before it starts.
 func (c *Cluster) StartShell(t *testing.T, configure ...func(*pages.Config)) *Shell {
 	t.Helper()
+	return c.StartShellOptions(t, ShellOptions{}, configure...)
+}
+
+// StartShellWithLogs serves the same control plane with a log source, so a case
+// that reads an application's logs through the shell serves the lines it
+// declares (C-64). A nil source leaves the log route unavailable.
+func (c *Cluster) StartShellWithLogs(t *testing.T, logSource controlplane.LogSource, configure ...func(*pages.Config)) *Shell {
+	t.Helper()
+	return c.StartShellOptions(t, ShellOptions{Logs: logSource}, configure...)
+}
+
+// ShellOptions is what a case configures on the composed control plane before it
+// starts.
+type ShellOptions struct {
+	// Logs is the log source the log route and a page's log item read; nil
+	// leaves the route unavailable.
+	Logs controlplane.LogSource
+	// ControlPlane adjusts the control plane's own configuration. A case pins
+	// the read clock here so its event fixtures and the shell's window agree.
+	ControlPlane func(*controlplane.Config)
+}
+
+// StartShellOptions serves the composed control plane over the cluster with the
+// options a case needs before it starts.
+func (c *Cluster) StartShellOptions(t *testing.T, options ShellOptions, configure ...func(*pages.Config)) *Shell {
+	t.Helper()
 	registry := &RegistrySource{}
 	surface := OpenIdentity(t, nil, func(config *identity.Config) {
 		config.Preferences = registry
 	})
 	catalogueService := catalogue.New(registry, c.Dynamic)
 	logs := &bytes.Buffer{}
-	server, err := controlplane.New(controlplane.Config{
+	controlPlaneConfig := controlplane.Config{
 		Dynamic:    c.Dynamic,
 		Extensions: registry,
 		Catalogue:  catalogueService,
 		Authorizer: identity.Authorizer{},
+		Logs:       options.Logs,
 		Log:        slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-	})
+	}
+	if options.ControlPlane != nil {
+		options.ControlPlane(&controlPlaneConfig)
+	}
+	server, err := controlplane.New(controlPlaneConfig)
 	if err != nil {
 		t.Fatalf("build control plane: %v", err)
 	}

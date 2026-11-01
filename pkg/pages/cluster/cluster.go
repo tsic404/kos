@@ -140,6 +140,21 @@ func (r *Reader) Events(ctx context.Context, session identity.Session, namespace
 	return events, nil
 }
 
+// EventsAbout returns the events of C-64's window that concern one object,
+// newest first. It is the same read the events route performs, so a page and the
+// route cannot report the same event differently.
+func (r *Reader) EventsAbout(ctx context.Context, session identity.Session, ref controlplane.ObjectRef) (controlplane.EventRead, *controlplane.Error) {
+	read, failure := (controlplane.EventReader{
+		Source:     controlplane.NewClusterSource(r.Dynamic),
+		Authorizer: r.authorizer(session),
+		Now:        r.Now,
+	}).Read(ctx, ref.Namespace, &controlplane.EventFilter{Ref: ref})
+	if failure != nil {
+		return controlplane.EventRead{}, failure
+	}
+	return read, nil
+}
+
 // Visible applies C-59 to one kernel object: an application the session may not
 // see is treated as absent, every other class is visible to a signed-in role.
 func (r *Reader) Visible(ctx context.Context, session identity.Session, kind string, object map[string]any) (bool, *controlplane.Error) {

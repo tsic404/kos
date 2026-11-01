@@ -100,14 +100,14 @@ const (
 )
 
 // Declaration returns the contribution kos-taskmanager ships (C-18): the two
-// pages C-49 puts in the panel and the lifecycle entries the application page
-// offers.
+// pages C-49 puts in the panel, the application detail page C-52 puts beside
+// them, and the lifecycle entries the application page offers.
 func Declaration() extension.Declaration {
 	return extension.Declaration{
 		Identifier: Identifier,
 		Version:    "1.0.0",
 		Contributions: extension.Contributions{
-			Pages: []extension.Page{overviewPage(), applicationsPage()},
+			Pages: []extension.Page{overviewPage(), applicationsPage(), applicationDetailPage()},
 		},
 	}
 }

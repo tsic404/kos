@@ -40,13 +40,14 @@ const (
 )
 
 // Declaration returns the contribution kos-diagnostics ships (C-18): the
-// diagnostics page and its export entry.
+// diagnostics page with its export entry, and the read-only native view C-52
+// puts beside it.
 func Declaration() extension.Declaration {
 	return extension.Declaration{
 		Identifier: Identifier,
 		Version:    "1.0.0",
 		Contributions: extension.Contributions{
-			Pages: []extension.Page{diagnosticsPage()},
+			Pages: []extension.Page{diagnosticsPage(), nativeViewPage()},
 		},
 	}
 }

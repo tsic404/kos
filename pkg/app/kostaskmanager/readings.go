@@ -53,11 +53,15 @@ type Readings struct {
 	// Usage reports resource samples; nil leaves the item stating no source is
 	// configured.
 	Usage UsageSource
+	// Logs reads one application's log lines; nil leaves the detail page's log
+	// item unreadable rather than empty.
+	Logs ApplicationLogs
 }
 
-// Read implements pages.Readings.
-func (r *Readings) Read(ctx context.Context, session identity.Session, item extension.PageItem) (pages.Reading, *controlplane.Error) {
-	value, failure := r.value(ctx, session, item)
+// Read implements pages.Readings. The application detail page shows one
+// application, so its items read the target the request names (C-52).
+func (r *Readings) Read(ctx context.Context, session identity.Session, item extension.PageItem, target pages.Target) (pages.Reading, *controlplane.Error) {
+	value, failure := r.value(ctx, session, item, target)
 	if failure != nil {
 		return pages.Reading{}, failure
 	}
@@ -65,7 +69,7 @@ func (r *Readings) Read(ctx context.Context, session identity.Session, item exte
 }
 
 // value resolves one item from the source it declares.
-func (r *Readings) value(ctx context.Context, session identity.Session, item extension.PageItem) (any, *controlplane.Error) {
+func (r *Readings) value(ctx context.Context, session identity.Session, item extension.PageItem, target pages.Target) (any, *controlplane.Error) {
 	switch item.ID {
 	case ItemNodesReady:
 		return r.nodesReady(ctx)
@@ -87,6 +91,9 @@ func (r *Readings) value(ctx context.Context, session identity.Session, item ext
 		return r.resourceUsage(ctx, session)
 	case ItemStop, ItemStart, ItemRestart, ItemScale, ItemResourceSpec, ItemUpgrade, ItemUninstall, ItemReinstall:
 		return r.entryTargets(ctx, session, item.ID)
+	case ItemDetailHealth, ItemDetailVolumes, ItemDetailEndpoints, ItemDetailBackup,
+		ItemDetailDrift, ItemDetailEvents, ItemDetailLogs:
+		return r.detailValue(ctx, session, item.ID, target)
 	default:
 		return nil, unknownItem(item.ID)
 	}

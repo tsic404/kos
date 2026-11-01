@@ -17,7 +17,7 @@ type routerReadings struct {
 }
 
 // Read implements Readings.
-func (r routerReadings) Read(_ context.Context, _ identity.Session, item extension.PageItem) (Reading, *controlplane.Error) {
+func (r routerReadings) Read(_ context.Context, _ identity.Session, item extension.PageItem, _ Target) (Reading, *controlplane.Error) {
 	return Reading{Value: r.product, ObservedAt: time.Now()}, nil
 }
 
@@ -47,7 +47,7 @@ func TestRouterDispatchesByProductReference(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			reading, failure := router.Read(context.Background(), session, extension.PageItem{
 				ID: "item", Reference: testCase.reference,
-			})
+			}, Target{})
 			if testCase.wantCode != "" {
 				if failure == nil || failure.Code != testCase.wantCode {
 					t.Fatalf("failure = %+v, want code %q", failure, testCase.wantCode)

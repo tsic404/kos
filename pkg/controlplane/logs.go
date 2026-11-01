@@ -140,30 +140,12 @@ var workloadClass = map[string]ObjectType{
 	"Pod":                   {Version: "v1", Kind: "Pod", Resource: "pods", Namespaced: true},
 }
 
-// handleApplicationLogs reads one application's logs (C-64): the read is locked
-// to the application's rendered workloads, bounded in lines and time, and
-// judged by C-59's visibility.
+// handleApplicationLogs serves one application's log read (C-64) over the same
+// read the page shell resolves, so the route and the detail page cannot report
+// different lines.
 func (s *Server) handleApplicationLogs(w http.ResponseWriter, r *http.Request) {
 	if s.logs == nil {
 		writeError(w, notFound("没有这个接口"))
-		return
-	}
-	namespace, name := r.PathValue("namespace"), r.PathValue("name")
-	objectType, failure := resolveType("Application", "", s.extensions)
-	if failure != nil {
-		writeError(w, failure)
-		return
-	}
-	ref := ObjectRef{Group: objectType.Group, Kind: objectType.Kind, Namespace: namespace, Name: name}
-	observed, err := s.source.Get(r.Context(), objectType, namespace, name)
-	if err != nil {
-		writeError(w, s.clusterReadFailure(err, ref))
-		return
-	}
-	// A session that may not see the application reads no logs of it, and is
-	// answered as if the application were absent (C-59).
-	if _, failure := s.authorize(r.Context(), VerbRead, ref, observed.Object, nil); failure != nil {
-		writeError(w, failure)
 		return
 	}
 	limit, window, failure := logBoundsFromQuery(r.URL.Query().Get("limit"), r.URL.Query().Get("window"))
@@ -171,16 +153,75 @@ func (s *Server) handleApplicationLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, failure)
 		return
 	}
-	targets, err := s.applicationLogTargets(r.Context(), observed.Object)
-	if err != nil {
-		writeError(w, s.clusterReadFailure(err, ref))
+	result, failure := s.ReadApplicationLogs(r.Context(), r.PathValue("namespace"), r.PathValue("name"),
+		LogBounds{Limit: limit, Window: window})
+	if failure != nil {
+		writeError(w, failure)
 		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// LogBounds is the line and time bound of one application log read (C-64). A
+// bound outside the model is clamped, exactly as the route clamps a query.
+type LogBounds struct {
+	// Limit is the line bound; zero reads the default.
+	Limit int
+	// Window is the time window; zero reads the default.
+	Window time.Duration
+}
+
+// clamp applies C-64's bounds to one request.
+func (b LogBounds) clamp() LogBounds {
+	limit, window := b.Limit, b.Window
+	if limit < 1 {
+		limit = defaultLogLines
+	}
+	if limit > maxLogLines {
+		limit = maxLogLines
+	}
+	if window <= 0 {
+		window = defaultLogWindow
+	}
+	if window > maxLogWindow {
+		window = maxLogWindow
+	}
+	return LogBounds{Limit: limit, Window: window}
+}
+
+// ReadApplicationLogs reads one application's logs (C-64): the read is locked to
+// the application's rendered workloads, bounded in lines and time, and judged by
+// C-59's visibility. The log route and the application detail page resolve their
+// log item through this one read, so both answer with the same lines.
+func (s *Server) ReadApplicationLogs(ctx context.Context, namespace, name string, bounds LogBounds) (LogRead, *Error) {
+	if s.logs == nil {
+		return LogRead{}, notFound("没有这个接口")
+	}
+	objectType, failure := resolveType("Application", "", s.extensions)
+	if failure != nil {
+		return LogRead{}, failure
+	}
+	ref := ObjectRef{Group: objectType.Group, Kind: objectType.Kind, Namespace: namespace, Name: name}
+	observed, err := s.source.Get(ctx, objectType, namespace, name)
+	if err != nil {
+		return LogRead{}, s.clusterReadFailure(err, ref)
+	}
+	// A session that may not see the application reads no logs of it, and is
+	// answered as if the application were absent (C-59).
+	if _, failure := s.authorize(ctx, VerbRead, ref, observed.Object, nil); failure != nil {
+		return LogRead{}, failure
+	}
+	bounds = bounds.clamp()
+	limit, window := bounds.Limit, bounds.Window
+	targets, err := s.applicationLogTargets(ctx, observed.Object)
+	if err != nil {
+		return LogRead{}, s.clusterReadFailure(err, ref)
 	}
 	now := s.now()
 	cutoff := now.Add(-window)
 	lines := make([]LogLine, 0)
 	for _, target := range targets {
-		read, err := s.logs.Lines(r.Context(), target.Namespace, target.Pod, target.Container, cutoff, limit+1)
+		read, err := s.logs.Lines(ctx, target.Namespace, target.Pod, target.Container, cutoff, limit+1)
 		if apierrors.IsNotFound(err) || apierrors.IsBadRequest(err) {
 			// A container that has not started or already rotated its log file
 			// has nothing to read; that is not the cluster being unreadable.
@@ -188,8 +229,7 @@ func (s *Server) handleApplicationLogs(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if err != nil {
-			writeError(w, s.clusterReadFailure(err, ref))
-			return
+			return LogRead{}, s.clusterReadFailure(err, ref)
 		}
 		for _, line := range read {
 			// A line the source did not timestamp cannot be placed inside the
@@ -223,7 +263,7 @@ func (s *Server) handleApplicationLogs(w http.ResponseWriter, r *http.Request) {
 	if result.Lines == nil {
 		result.Lines = []LogLine{}
 	}
-	writeJSON(w, http.StatusOK, result)
+	return result, nil
 }
 
 // applicationLogTargets locks a read to the application's own workloads (C-64):

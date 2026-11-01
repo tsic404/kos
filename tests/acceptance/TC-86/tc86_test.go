@@ -170,7 +170,7 @@ func bannerOf(t *testing.T, state *degrade.Static) *degrade.Notice {
 func assertPageBanner(t *testing.T, state *degrade.Static) {
 	t.Helper()
 	service := pages.New(staticPages{}, pages.Config{Banners: bannerSource{state: state}})
-	page, failure := service.Read(context.Background(), identity.Session{Username: "owner", Role: write.RoleOwner}, "readonly")
+	page, failure := service.Read(context.Background(), identity.Session{Username: "owner", Role: write.RoleOwner}, "readonly", pages.Target{})
 	if failure != nil {
 		t.Fatalf("read the page: %v", failure)
 	}

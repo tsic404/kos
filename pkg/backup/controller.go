@@ -288,6 +288,15 @@ func (c *Controller) nextRequeue(status *v1beta1.BackupPolicyStatus) time.Durati
 	return wait
 }
 
+// CoversOwner reports whether a policy's ownership edge reaches the object an
+// owner wrote (C-41, C-60). The selector alone decides the range; coverage
+// requires the same owner, so a policy without an owner covers only objects
+// without one. The backup controller and every page that reads coverage use
+// this one rule.
+func CoversOwner(policy *v1beta1.BackupPolicy, owner string) bool {
+	return policy.Spec.Owner == owner
+}
+
 // covered lists the applications and volumes the selector covers. The selector
 // is the only binding path (C-41): an application's volume references never
 // widen the range, and the ownership rule of C-60 keeps another account's
@@ -303,7 +312,7 @@ func (c *Controller) covered(ctx context.Context, policy *v1beta1.BackupPolicy, 
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &application); err != nil {
 			return nil, nil, fmt.Errorf("decode an application: %w", err)
 		}
-		if application.Spec.Owner != policy.Spec.Owner {
+		if !CoversOwner(policy, application.Spec.Owner) {
 			continue
 		}
 		applications = append(applications, application)
@@ -318,7 +327,7 @@ func (c *Controller) covered(ctx context.Context, policy *v1beta1.BackupPolicy, 
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &volume); err != nil {
 			return nil, nil, fmt.Errorf("decode a volume: %w", err)
 		}
-		if volume.Spec.Owner != policy.Spec.Owner {
+		if !CoversOwner(policy, volume.Spec.Owner) {
 			continue
 		}
 		volumes = append(volumes, volume)

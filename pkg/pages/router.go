@@ -29,8 +29,10 @@ type Router map[string]Readings
 
 // Read implements Readings. An item whose reference names no routed product is
 // refused exactly like a source the control plane has not loaded, so a page no
-// product backs stays unreadable rather than showing an invented value.
-func (r Router) Read(ctx context.Context, session identity.Session, item extension.PageItem) (Reading, *controlplane.Error) {
+// product backs stays unreadable rather than showing an invented value. The
+// target travels unchanged: the reader of the product in front of the item is
+// the one that knows whether its page shows one object (C-52).
+func (r Router) Read(ctx context.Context, session identity.Session, item extension.PageItem, target Target) (Reading, *controlplane.Error) {
 	product, _, ok := ReferencePrefix(item.Reference)
 	if !ok {
 		return Reading{}, unroutedItem(item.ID)
@@ -39,7 +41,7 @@ func (r Router) Read(ctx context.Context, session identity.Session, item extensi
 	if !known || reader == nil {
 		return Reading{}, unroutedItem(item.ID)
 	}
-	return reader.Read(ctx, session, item)
+	return reader.Read(ctx, session, item, target)
 }
 
 // unroutedItem marks an item no product reader answers.

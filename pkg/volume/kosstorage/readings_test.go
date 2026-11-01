@@ -6,6 +6,7 @@ import (
 
 	"github.com/tsic404/kos/pkg/extension"
 	"github.com/tsic404/kos/pkg/identity"
+	"github.com/tsic404/kos/pkg/pages"
 	"github.com/tsic404/kos/pkg/write"
 )
 
@@ -25,7 +26,7 @@ func TestUsageRendersTheSampledFill(t *testing.T) {
 	}}}
 	reading, failure := readings.Read(context.Background(),
 		identity.Session{Username: "alice", Role: write.RoleOwner},
-		extension.PageItem{ID: ItemUsage, Source: extension.PageSourceMetric})
+		extension.PageItem{ID: ItemUsage, Source: extension.PageSourceMetric}, pages.Target{})
 	if failure != nil {
 		t.Fatalf("read usage: %+v", failure)
 	}
@@ -48,7 +49,7 @@ func TestUsageStatesAnAbsentSampler(t *testing.T) {
 	readings := &Readings{}
 	reading, failure := readings.Read(context.Background(),
 		identity.Session{Username: "alice", Role: write.RoleOwner},
-		extension.PageItem{ID: ItemUsage, Source: extension.PageSourceMetric})
+		extension.PageItem{ID: ItemUsage, Source: extension.PageSourceMetric}, pages.Target{})
 	if failure != nil {
 		t.Fatalf("read usage: %+v", failure)
 	}

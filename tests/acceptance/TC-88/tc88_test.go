@@ -207,7 +207,7 @@ func applicationPage(t *testing.T, cluster *harness.Cluster) pages.Page {
 		Readings: pages.Router{kostaskmanager.Identifier: readings},
 		Now:      time.Now,
 	})
-	page, failure := service.Read(context.Background(), identity.Session{Username: "owner", Role: write.RoleOwner}, kostaskmanager.PageApplications)
+	page, failure := service.Read(context.Background(), identity.Session{Username: "owner", Role: write.RoleOwner}, kostaskmanager.PageApplications, pages.Target{})
 	if failure != nil {
 		t.Fatalf("read the application page: %v", failure)
 	}

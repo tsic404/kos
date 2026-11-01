@@ -62,9 +62,9 @@ func SpecOf(object *unstructured.Unstructured) (Spec, error) {
 // read at resolve time, so its address follows the endpoint and not the entry.
 type Launch struct {
 	// Endpoint is the endpoint object serving the application.
-	Endpoint string
+	Endpoint string `json:"endpoint"`
 	// Address is that endpoint's current address.
-	Address string
+	Address string `json:"address"`
 }
 
 // View is one desktop entry resolved against the live projection (C-30): the

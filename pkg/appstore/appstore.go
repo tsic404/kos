@@ -37,8 +37,8 @@ const (
 	// EntriesItem and UpgradesItem are the two catalogue reads the page shows.
 	EntriesItem     = "entries"
 	UpgradesItem    = "upgrades"
-	EntriesRef      = "catalogue/entries"
-	UpgradesRef     = "catalogue/upgrades"
+	EntriesRef      = Identifier + "/entries"
+	UpgradesRef     = Identifier + "/upgrades"
 	ApplicationPath = "/api/v1/resources/Application"
 )
 

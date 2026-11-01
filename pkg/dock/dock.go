@@ -29,6 +29,16 @@ const (
 	EntryVersion = "v1"
 	// PageID is the desktop page identity (C-52).
 	PageID = "desktop"
+	// ItemEntries is the desktop's entry list item (C-52).
+	ItemEntries = "entries"
+	// ItemApplications is the installed-application item (C-52).
+	ItemApplications = "applications"
+	// ItemRecent is the browser-held recent list item (C-52, C-53).
+	ItemRecent = "recent"
+	// ItemNotifications is the notification centre item (C-52).
+	ItemNotifications = "notifications"
+	// StoreRecent is the browser storage key of the recent list (C-53).
+	StoreRecent = "desktop.recent"
 	// PreferenceLayout is the dock layout preference key (C-27).
 	PreferenceLayout = "layout"
 )
@@ -111,6 +121,10 @@ func Declaration() extension.Declaration {
 	}
 }
 
+// reference is the item reference this product owns; the router dispatches an
+// item to the reader in front of it (C-22).
+func reference(item string) string { return Identifier + "/" + item }
+
 // DesktopPage is the desktop C-52 describes: the entries, the installed
 // applications, the recent list the browser holds and the notification centre's
 // recent events. Only the entries carry a modification entry.
@@ -122,23 +136,23 @@ func DesktopPage() extension.Page {
 		RequiredRole: string(write.RoleGuest),
 		Items: []extension.PageItem{
 			{
-				ID: "entries", Label: "桌面条目",
-				Source: extension.PageSourceObject, Reference: EntryKind,
+				ID: ItemEntries, Label: "桌面条目",
+				Source: extension.PageSourceObject, Reference: reference(ItemEntries),
 				Action: ActionRemoveEntry,
 			},
 			{
-				ID: "applications", Label: "已安装应用",
-				Source: extension.PageSourceObject, Reference: "Application",
+				ID: ItemApplications, Label: "已安装应用",
+				Source: extension.PageSourceObject, Reference: reference(ItemApplications),
 				Reason: "桌面只打开应用，不修改应用",
 			},
 			{
-				ID: "recent", Label: "最近使用",
-				Source: extension.PageSourceLocal, Store: "desktop.recent",
+				ID: ItemRecent, Label: "最近使用",
+				Source: extension.PageSourceLocal, Store: StoreRecent,
 				Reason: "最近使用只存在于浏览器",
 			},
 			{
-				ID: "notifications", Label: "通知中心",
-				Source: extension.PageSourceObject, Reference: "Event",
+				ID: ItemNotifications, Label: "通知中心",
+				Source: extension.PageSourceObject, Reference: reference(ItemNotifications),
 				Reason: "只读展示最近事件",
 			},
 		},

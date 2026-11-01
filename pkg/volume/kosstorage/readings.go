@@ -56,7 +56,7 @@ type Readings struct {
 }
 
 // Read implements pages.Readings.
-func (r *Readings) Read(ctx context.Context, session identity.Session, item extension.PageItem) (pages.Reading, *controlplane.Error) {
+func (r *Readings) Read(ctx context.Context, session identity.Session, item extension.PageItem, _ pages.Target) (pages.Reading, *controlplane.Error) {
 	value, failure := r.value(ctx, item)
 	if failure != nil {
 		return pages.Reading{}, failure

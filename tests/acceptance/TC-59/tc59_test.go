@@ -227,7 +227,7 @@ func TestTC59DeletingOneEntryKeepsTheApplication(t *testing.T) {
 type readingShell struct{}
 
 // Read implements pages.Readings.
-func (readingShell) Read(context.Context, identity.Session, extension.PageItem) (pages.Reading, *controlplane.Error) {
+func (readingShell) Read(context.Context, identity.Session, extension.PageItem, pages.Target) (pages.Reading, *controlplane.Error) {
 	return pages.Reading{ObservedAt: time.Now()}, nil
 }
 

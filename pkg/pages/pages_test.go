@@ -2,6 +2,7 @@ package pages
 
 import (
 	"context"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -29,11 +30,11 @@ func (d declarations) PageFor(id string, role write.Role) (extension.Page, bool)
 }
 
 // readingsFunc adapts a function to Readings.
-type readingsFunc func(context.Context, identity.Session, extension.PageItem) (Reading, *controlplane.Error)
+type readingsFunc func(context.Context, identity.Session, extension.PageItem, Target) (Reading, *controlplane.Error)
 
 // Read implements Readings.
-func (f readingsFunc) Read(ctx context.Context, session identity.Session, item extension.PageItem) (Reading, *controlplane.Error) {
-	return f(ctx, session, item)
+func (f readingsFunc) Read(ctx context.Context, session identity.Session, item extension.PageItem, target Target) (Reading, *controlplane.Error) {
+	return f(ctx, session, item, target)
 }
 
 // role is the session the cases act as.
@@ -89,8 +90,8 @@ func TestReadAnswersHiddenAndUnknownPagesIdentically(t *testing.T) {
 		Items: []extension.PageItem{localItem("value")},
 	}}, Config{})
 
-	_, hidden := service.Read(context.Background(), sessionWith(write.RoleGuest), "members")
-	_, unknown := service.Read(context.Background(), sessionWith(write.RoleGuest), "absent")
+	_, hidden := service.Read(context.Background(), sessionWith(write.RoleGuest), "members", Target{})
+	_, unknown := service.Read(context.Background(), sessionWith(write.RoleGuest), "absent", Target{})
 	if hidden == nil || unknown == nil {
 		t.Fatalf("hidden = %v, unknown = %v; both must be refused", hidden, unknown)
 	}
@@ -121,13 +122,13 @@ func TestReadRendersEverySourceType(t *testing.T) {
 		ID: "all", Title: "All", Location: "panel", Items: items,
 		Actions: []extension.Action{{ID: "apply", Method: "POST", Path: "/api/v1/apply-requests"}},
 	}}, Config{
-		Readings: readingsFunc(func(_ context.Context, _ identity.Session, item extension.PageItem) (Reading, *controlplane.Error) {
+		Readings: readingsFunc(func(_ context.Context, _ identity.Session, item extension.PageItem, _ Target) (Reading, *controlplane.Error) {
 			return Reading{Value: item.Source + ":" + item.Reference, ObservedAt: observed}, nil
 		}),
 		Now: func() time.Time { return now },
 	})
 
-	page, failure := service.Read(context.Background(), sessionWith(write.RoleOwner), "all")
+	page, failure := service.Read(context.Background(), sessionWith(write.RoleOwner), "all", Target{})
 	if failure != nil {
 		t.Fatalf("read page: %v", failure)
 	}
@@ -186,13 +187,13 @@ func TestStaleUsesOneThresholdForEveryServerSource(t *testing.T) {
 					ID: "page", Title: "Page", Location: "panel",
 					Items: []extension.PageItem{{ID: "value", Label: "Value", Source: source, Reference: "input", Reason: "只读展示"}},
 				}}, Config{
-					Readings: readingsFunc(func(context.Context, identity.Session, extension.PageItem) (Reading, *controlplane.Error) {
+					Readings: readingsFunc(func(context.Context, identity.Session, extension.PageItem, Target) (Reading, *controlplane.Error) {
 						return Reading{Value: "value", ObservedAt: observedAt}, nil
 					}),
 					Now: func() time.Time { return now },
 				})
 
-				page, failure := service.Read(context.Background(), sessionWith(write.RoleOwner), "page")
+				page, failure := service.Read(context.Background(), sessionWith(write.RoleOwner), "page", Target{})
 				if failure != nil {
 					t.Fatalf("read page: %v", failure)
 				}
@@ -213,7 +214,7 @@ func TestReadOnlyPageStatesWhyAndExposesNoModificationEntry(t *testing.T) {
 		Items:          []extension.PageItem{localItem("fields")},
 	}}, Config{})
 
-	page, failure := service.Read(context.Background(), sessionWith(write.RoleOwner), "native")
+	page, failure := service.Read(context.Background(), sessionWith(write.RoleOwner), "native", Target{})
 	if failure != nil {
 		t.Fatalf("read page: %v", failure)
 	}
@@ -242,7 +243,7 @@ func TestActionEntriesNameControlPlaneWrites(t *testing.T) {
 		},
 	}}, Config{})
 
-	page, failure := service.Read(context.Background(), sessionWith(write.RoleOwner), "apps")
+	page, failure := service.Read(context.Background(), sessionWith(write.RoleOwner), "apps", Target{})
 	if failure != nil {
 		t.Fatalf("read page: %v", failure)
 	}
@@ -265,16 +266,16 @@ func TestServerItemNeedsAReaderAndAnObservation(t *testing.T) {
 		Items: []extension.PageItem{{ID: "value", Label: "Value", Source: extension.PageSourceMetric, Reference: "cpu", Reason: "只读展示"}},
 	}}
 
-	_, failure := New(declared, Config{}).Read(context.Background(), sessionWith(write.RoleOwner), "page")
+	_, failure := New(declared, Config{}).Read(context.Background(), sessionWith(write.RoleOwner), "page", Target{})
 	if failure == nil || failure.Code != controlplane.CodeCapabilityMissing {
 		t.Fatalf("no reader failure = %+v, want capability missing", failure)
 	}
 
 	_, failure = New(declared, Config{
-		Readings: readingsFunc(func(context.Context, identity.Session, extension.PageItem) (Reading, *controlplane.Error) {
+		Readings: readingsFunc(func(context.Context, identity.Session, extension.PageItem, Target) (Reading, *controlplane.Error) {
 			return Reading{Value: 1}, nil
 		}),
-	}).Read(context.Background(), sessionWith(write.RoleOwner), "page")
+	}).Read(context.Background(), sessionWith(write.RoleOwner), "page", Target{})
 	if failure == nil || failure.Code != controlplane.CodeInternal {
 		t.Fatalf("missing observation failure = %+v, want internal", failure)
 	}
@@ -288,7 +289,7 @@ func TestLocalPageNeedsNoReader(t *testing.T) {
 		Items: []extension.PageItem{localItem("recent")},
 	}}, Config{})
 
-	page, failure := service.Read(context.Background(), sessionWith(write.RoleGuest), "desktop")
+	page, failure := service.Read(context.Background(), sessionWith(write.RoleGuest), "desktop", Target{})
 	if failure != nil {
 		t.Fatalf("read page: %v", failure)
 	}
@@ -330,7 +331,7 @@ func TestReadRejectsContradictoryItems(t *testing.T) {
 				Actions: testCase.actions,
 			}}, Config{})
 
-			_, failure := service.Read(context.Background(), sessionWith(write.RoleOwner), "page")
+			_, failure := service.Read(context.Background(), sessionWith(write.RoleOwner), "page", Target{})
 			if failure == nil || failure.Code != controlplane.CodeInternal {
 				t.Fatalf("failure = %+v, want an internal contradiction", failure)
 			}
@@ -361,4 +362,76 @@ func equalStrings(left, right []string) bool {
 		}
 	}
 	return true
+}
+
+// TestReadPassesTheTargetToTheReader checks that a page read naming an object
+// hands that object to the reader, and that a read naming part of one is refused
+// before any reader runs (C-52).
+func TestReadPassesTheTargetToTheReader(t *testing.T) {
+	var seen Target
+	service := New(declarations{{
+		ID: "detail", Title: "Detail", Location: "panel", ReadOnly: true,
+		ReadOnlyReason: "只读展示",
+		Items:          []extension.PageItem{{ID: "value", Label: "Value", Source: extension.PageSourceObject, Reference: "product/value"}},
+	}}, Config{Readings: readingsFunc(func(_ context.Context, _ identity.Session, _ extension.PageItem, target Target) (Reading, *controlplane.Error) {
+		seen = target
+		return Reading{Value: target.Name, ObservedAt: time.Now()}, nil
+	})})
+
+	target := Target{Kind: "Application", Namespace: "apps", Name: "shop"}
+	page, failure := service.Read(context.Background(), sessionWith(write.RoleOwner), "detail", target)
+	if failure != nil {
+		t.Fatalf("read with a target: %+v", failure)
+	}
+	if seen != target {
+		t.Fatalf("reader saw target %+v, want %+v", seen, target)
+	}
+	if value, _ := page.Items[0].Value.(string); value != "shop" {
+		t.Fatalf("value = %v, want the reader's answer for the named object", page.Items[0].Value)
+	}
+}
+
+// TestTargetFromQuery checks the one rule the read surface adds: naming part of
+// an object is a field failure, naming none is a panel read (C-52).
+func TestTargetFromQuery(t *testing.T) {
+	cases := []struct {
+		name   string
+		query  string
+		want   Target
+		failed bool
+	}{
+		{name: "panel read", query: "", want: Target{}},
+		{name: "one object", query: "kind=Application&namespace=apps&name=shop",
+			want: Target{Kind: "Application", Namespace: "apps", Name: "shop"}},
+		{name: "cluster scoped", query: "kind=Node&name=node-a", want: Target{Kind: "Node", Name: "node-a"}},
+		{name: "class only", query: "kind=Application", failed: true},
+		{name: "name only", query: "name=shop", failed: true},
+		{name: "namespace only", query: "namespace=apps", failed: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			target, failure := targetFromQuery(urlValues(testCase.query))
+			if testCase.failed {
+				if failure == nil || failure.Code != controlplane.CodeInvalidField {
+					t.Fatalf("failure = %+v, want an invalid field", failure)
+				}
+				return
+			}
+			if failure != nil {
+				t.Fatalf("parse %q: %+v", testCase.query, failure)
+			}
+			if target != testCase.want {
+				t.Fatalf("target = %+v, want %+v", target, testCase.want)
+			}
+		})
+	}
+}
+
+// urlValues reads one query string.
+func urlValues(query string) url.Values {
+	values, err := url.ParseQuery(query)
+	if err != nil {
+		panic(err)
+	}
+	return values
 }

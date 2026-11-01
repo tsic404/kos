@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -28,11 +29,21 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/tsic404/kos/api"
+	"github.com/tsic404/kos/pkg/app/kostaskmanager"
+	"github.com/tsic404/kos/pkg/appstore"
 	"github.com/tsic404/kos/pkg/controlplane"
+	"github.com/tsic404/kos/pkg/device/kosdevicemanager"
+	"github.com/tsic404/kos/pkg/diagnostics/kosdiagnostics"
+	"github.com/tsic404/kos/pkg/dock"
+	"github.com/tsic404/kos/pkg/endpoint/kosnetwork"
 	"github.com/tsic404/kos/pkg/extension"
+	"github.com/tsic404/kos/pkg/extension/kosupdater"
 	"github.com/tsic404/kos/pkg/filemanager"
 	"github.com/tsic404/kos/pkg/notification"
 	"github.com/tsic404/kos/pkg/reconcile"
+	"github.com/tsic404/kos/pkg/settings/kossettings"
+	"github.com/tsic404/kos/pkg/volume/kosstorage"
+	"github.com/tsic404/kos/pkg/wm"
 	"github.com/tsic404/kos/pkg/write"
 	"github.com/tsic404/kos/tests/acceptance/harness"
 )
@@ -1068,4 +1079,265 @@ func decodeWindow(t *testing.T, body []byte) filemanager.Window {
 		t.Fatalf("decode the window %q: %v", body, err)
 	}
 	return window
+}
+
+// firstPartyProduct is one package of 01-scope's first-party product list.
+type firstPartyProduct struct {
+	// name is the component name the walk installs it under.
+	name string
+	// declaration returns the package the distribution ships.
+	declaration func(t *testing.T) extension.Declaration
+}
+
+// firstPartyProducts is the product list in the order the scope document lists
+// it: twelve packages, each contributing only through declared extension points
+// (C-01, C-17, C-18).
+func firstPartyProducts() []firstPartyProduct {
+	return []firstPartyProduct{
+		{name: "dock", declaration: func(*testing.T) extension.Declaration { return dock.Declaration() }},
+		{name: "wm", declaration: func(*testing.T) extension.Declaration { return wm.Declaration() }},
+		{name: "appstore", declaration: func(t *testing.T) extension.Declaration {
+			t.Helper()
+			declaration, err := appstore.Declaration()
+			if err != nil {
+				t.Fatalf("build the app-centre declaration: %v", err)
+			}
+			return declaration
+		}},
+		{name: "settings", declaration: func(*testing.T) extension.Declaration { return kossettings.Declaration() }},
+		{name: "taskmanager", declaration: func(*testing.T) extension.Declaration { return kostaskmanager.Declaration() }},
+		{name: "storage", declaration: func(*testing.T) extension.Declaration { return kosstorage.Declaration() }},
+		{name: "network", declaration: func(*testing.T) extension.Declaration { return kosnetwork.Declaration() }},
+		{name: "devicemanager", declaration: func(*testing.T) extension.Declaration { return kosdevicemanager.Declaration() }},
+		{name: "filemanager", declaration: func(*testing.T) extension.Declaration { return filemanager.Declaration() }},
+		{name: "notification", declaration: func(*testing.T) extension.Declaration { return notification.Declaration() }},
+		{name: "updater", declaration: func(*testing.T) extension.Declaration { return kosupdater.Declaration() }},
+		{name: "diagnostics", declaration: func(*testing.T) extension.Declaration { return kosdiagnostics.Declaration() }},
+	}
+}
+
+// TestTC114EveryFirstPartyProductInstallsAndWithdraws walks the whole product
+// list: every package installs through its own declaration, every declared
+// contribution becomes visible, and every uninstall withdraws only that package's
+// contributions while the packages still installed keep serving. The kernel kind
+// set, the capability baseline and the writer table are compared after every
+// step, and the case reports one line per package instead of a sample.
+func TestTC114EveryFirstPartyProductInstallsAndWithdraws(t *testing.T) {
+	cluster := harness.Start(t)
+	cluster.InstallCRD(t, dock.APIGroup, dock.EntryVersion, dock.EntryKind, dock.EntryResource, true)
+	cluster.InstallCRD(t, notification.APIGroup, notification.ObjectVersion, notification.Kind, notification.Resource, false)
+	artifacts := extension.MemoryArtifacts{}
+
+	kindsBefore := append([]string(nil), api.Kinds()...)
+	capabilitiesBefore := extension.BaselineCapabilities()
+	ownedBefore := write.OwnedKinds()
+
+	products := firstPartyProducts()
+	declarations := make(map[string]extension.Declaration, len(products))
+	installed := make([]firstPartyProduct, 0, len(products))
+	for _, product := range products {
+		declaration := product.declaration(t)
+		declarations[product.name] = declaration
+		installation := cluster.InstallPackage(t, product.name, declaration, artifacts)
+		requireReady(t, installation, product.name)
+		requireContributions(t, installation.Registry(), product.name, declaration)
+		installed = append(installed, product)
+		// Every package installed so far keeps serving after this one arrives.
+		for _, earlier := range installed {
+			requireContributions(t, installation.Registry(), earlier.name, declarations[earlier.name])
+		}
+		requireKernelUnchanged(t, kindsBefore, capabilitiesBefore, ownedBefore, deniedKernelWrite(t, cluster), cluster)
+		t.Logf("%-14s installed: %s", product.name, contributionSummary(declarations[product.name]))
+	}
+
+	// Withdraw them in the order they arrived: the withdrawn package's
+	// contributions disappear, the packages still installed keep serving, and
+	// the kernel does not change (AC-56's "removing one product leaves the rest
+	// untouched").
+	for index, product := range products {
+		cluster.DeleteComponent(t, product.name)
+		installation := cluster.ExtensionState(t, artifacts)
+		requireWithdrawn(t, installation.Registry(), product.name, declarations[product.name])
+		for _, later := range products[index+1:] {
+			requireContributions(t, installation.Registry(), later.name, declarations[later.name])
+		}
+		requireKernelUnchanged(t, kindsBefore, capabilitiesBefore, ownedBefore, deniedKernelWrite(t, cluster), cluster)
+		t.Logf("%-14s withdrawn: %s", product.name, contributionSummary(declarations[product.name]))
+	}
+}
+
+// requireContributions checks that every contribution a package declares is
+// visible in the projection (C-18's one-to-one criterion).
+func requireContributions(t *testing.T, registry *extension.Registry, name string, declaration extension.Declaration) {
+	t.Helper()
+	loaded, err := declaration.Load()
+	if err != nil {
+		t.Fatalf("%s: load declaration: %v", name, err)
+	}
+	if len(loaded.Problems) != 0 {
+		t.Fatalf("%s: declaration problems = %+v", name, loaded.Problems)
+	}
+	for _, class := range loaded.Contributions.ObjectClasses {
+		if _, found := registry.ObjectClass(class.Group, class.Kind); !found {
+			t.Fatalf("%s: object class %s/%s is not served", name, class.Group, class.Kind)
+		}
+	}
+	for _, controller := range loaded.Contributions.Controllers {
+		if !hasController(registry.Controllers(), controller.ID) {
+			t.Fatalf("%s: controller %q is not loaded", name, controller.ID)
+		}
+	}
+	for _, capability := range loaded.Contributions.Capabilities.Items {
+		if !hasCapability(registry.ExtensionCapabilities(), capability.Name) {
+			t.Fatalf("%s: capability %q is not loaded", name, capability.Name)
+		}
+	}
+	for _, page := range loaded.Contributions.Pages {
+		if !hasPage(registry.Pages(), page.ID) {
+			t.Fatalf("%s: page %q is not loaded", name, page.ID)
+		}
+	}
+	for _, setting := range loaded.Contributions.Settings {
+		if _, found := registry.Setting(setting.ID); !found {
+			t.Fatalf("%s: setting %q is not loaded", name, setting.ID)
+		}
+	}
+	for _, source := range loaded.Contributions.CatalogueSources {
+		if !hasSource(registry.CatalogueSources(), source.ID) {
+			t.Fatalf("%s: catalogue source %q is not loaded", name, source.ID)
+		}
+	}
+	for _, adapter := range loaded.Contributions.DiscoveryAdapters {
+		if !hasDiscovery(registry.DiscoveryAdapters(), adapter.ID) {
+			t.Fatalf("%s: discovery adapter %q is not loaded", name, adapter.ID)
+		}
+	}
+	for _, adapter := range loaded.Contributions.DiagnosticAdapters {
+		if !hasDiagnostic(registry.DiagnosticAdapters(), adapter.ID) {
+			t.Fatalf("%s: diagnostic adapter %q is not loaded", name, adapter.ID)
+		}
+	}
+	for _, schema := range loaded.Contributions.Preferences {
+		keys, found := registry.PreferenceKeys(loaded.Identifier)
+		if !found || !reflect.DeepEqual(keys, schema.Keys) {
+			t.Fatalf("%s: preference keys = %v (found %v), want %v", name, keys, found, schema.Keys)
+		}
+	}
+}
+
+// requireWithdrawn checks that a package's contributions left the projection and
+// nothing else did (C-28's visibility rule).
+func requireWithdrawn(t *testing.T, registry *extension.Registry, name string, declaration extension.Declaration) {
+	t.Helper()
+	loaded, err := declaration.Load()
+	if err != nil {
+		t.Fatalf("%s: load declaration: %v", name, err)
+	}
+	for _, class := range loaded.Contributions.ObjectClasses {
+		if _, found := registry.ObjectClass(class.Group, class.Kind); found {
+			t.Fatalf("%s: object class %s/%s survived the uninstall", name, class.Group, class.Kind)
+		}
+	}
+	for _, controller := range loaded.Contributions.Controllers {
+		if hasController(registry.Controllers(), controller.ID) {
+			t.Fatalf("%s: controller %q survived the uninstall", name, controller.ID)
+		}
+	}
+	for _, capability := range loaded.Contributions.Capabilities.Items {
+		if hasCapability(registry.ExtensionCapabilities(), capability.Name) {
+			t.Fatalf("%s: capability %q survived the uninstall", name, capability.Name)
+		}
+	}
+	for _, page := range loaded.Contributions.Pages {
+		if hasPage(registry.Pages(), page.ID) {
+			t.Fatalf("%s: page %q survived the uninstall", name, page.ID)
+		}
+	}
+	for _, setting := range loaded.Contributions.Settings {
+		if _, found := registry.Setting(setting.ID); found {
+			t.Fatalf("%s: setting %q survived the uninstall", name, setting.ID)
+		}
+	}
+	for _, source := range loaded.Contributions.CatalogueSources {
+		if hasSource(registry.CatalogueSources(), source.ID) {
+			t.Fatalf("%s: catalogue source %q survived the uninstall", name, source.ID)
+		}
+	}
+	if _, found := registry.PreferenceKeys(loaded.Identifier); found {
+		t.Fatalf("%s: preference schema survived the uninstall", name)
+	}
+}
+
+// contributionSummary renders what one declaration contributes, so the case
+// reports a per-package line instead of a sample.
+func contributionSummary(declaration extension.Declaration) string {
+	loaded, err := declaration.Load()
+	if err != nil {
+		return "declaration does not load: " + err.Error()
+	}
+	contributions := loaded.Contributions
+	return fmt.Sprintf("objectClasses=%d controllers=%d capabilities=%d pages=%d settings=%d sources=%d discovery=%d diagnostics=%d preferences=%d",
+		len(contributions.ObjectClasses), len(contributions.Controllers), len(contributions.Capabilities.Items),
+		len(contributions.Pages), len(contributions.Settings), len(contributions.CatalogueSources),
+		len(contributions.DiscoveryAdapters), len(contributions.DiagnosticAdapters), len(contributions.Preferences))
+}
+
+// hasController reports whether one controller identity is loaded.
+func hasController(controllers []extension.Controller, id string) bool {
+	for _, controller := range controllers {
+		if controller.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// hasCapability reports whether one capability is loaded.
+func hasCapability(capabilities []extension.Capability, name string) bool {
+	for _, capability := range capabilities {
+		if capability.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPage reports whether one page identity is loaded.
+func hasPage(pages []extension.Page, id string) bool {
+	for _, page := range pages {
+		if page.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// hasSource reports whether one catalogue source is loaded.
+func hasSource(sources []extension.CatalogueSource, id string) bool {
+	for _, source := range sources {
+		if source.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// hasDiscovery reports whether one discovery adapter is loaded.
+func hasDiscovery(adapters []extension.DiscoveryAdapter, id string) bool {
+	for _, adapter := range adapters {
+		if adapter.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// hasDiagnostic reports whether one diagnostic adapter is loaded.
+func hasDiagnostic(adapters []extension.DiagnosticAdapter, id string) bool {
+	for _, adapter := range adapters {
+		if adapter.ID == id {
+			return true
+		}
+	}
+	return false
 }

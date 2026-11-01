@@ -18,15 +18,17 @@ func TestDeclarationLoads(t *testing.T) {
 	if len(loaded.Problems) != 0 {
 		t.Fatalf("problems = %+v, want none", loaded.Problems)
 	}
-	if len(loaded.Contributions.Pages) != 2 {
-		t.Fatalf("pages = %d, want the overview and application pages", len(loaded.Contributions.Pages))
+	if len(loaded.Contributions.Pages) != 3 {
+		t.Fatalf("pages = %d, want the overview, application and detail pages", len(loaded.Contributions.Pages))
 	}
 	ids := map[string]bool{}
 	for _, page := range loaded.Contributions.Pages {
 		ids[page.ID] = true
 	}
-	if !ids[PageOverview] || !ids[PageApplications] {
-		t.Fatalf("pages = %v, want %q and %q", ids, PageOverview, PageApplications)
+	for _, id := range []string{PageOverview, PageApplications, PageApplicationDetail} {
+		if !ids[id] {
+			t.Fatalf("pages = %v, want %q", ids, id)
+		}
 	}
 }
 
@@ -76,6 +78,24 @@ func TestApplicationPageCoversTheContractSources(t *testing.T) {
 			t.Errorf("item %q carries neither an entry nor a reason", item.ID)
 		}
 	}
+}
+
+// TestApplicationDetailCoversTheContractSources checks the detail page's items
+// and source types against C-52: six object sources and the log read source.
+func TestApplicationDetailCoversTheContractSources(t *testing.T) {
+	page := applicationDetailPage()
+	if !page.ReadOnly || page.ReadOnlyReason == "" || len(page.Actions) != 0 {
+		t.Fatalf("detail page = %+v, want a stated read-only page with no action", page)
+	}
+	assertSources(t, page, map[string]string{
+		ItemDetailHealth:    extension.PageSourceObject,
+		ItemDetailVolumes:   extension.PageSourceObject,
+		ItemDetailEndpoints: extension.PageSourceObject,
+		ItemDetailBackup:    extension.PageSourceObject,
+		ItemDetailDrift:     extension.PageSourceObject,
+		ItemDetailEvents:    extension.PageSourceObject,
+		ItemDetailLogs:      extension.PageSourceRead,
+	})
 }
 
 // assertSources checks one page's item set and source types exactly.

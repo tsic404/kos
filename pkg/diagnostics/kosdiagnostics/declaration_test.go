@@ -16,8 +16,8 @@ func TestDeclarationLoads(t *testing.T) {
 	if len(loaded.Problems) != 0 {
 		t.Fatalf("problems = %+v, want none", loaded.Problems)
 	}
-	if len(loaded.Contributions.Pages) != 1 {
-		t.Fatalf("pages = %d, want the diagnostics page", len(loaded.Contributions.Pages))
+	if len(loaded.Contributions.Pages) != 2 {
+		t.Fatalf("pages = %d, want the diagnostics page and the native view", len(loaded.Contributions.Pages))
 	}
 	page := loaded.Contributions.Pages[0]
 	if page.ID != PageDiagnostics || page.ReadOnly {
@@ -25,6 +25,28 @@ func TestDeclarationLoads(t *testing.T) {
 	}
 	if len(page.Actions) != 1 || page.Actions[0].ID != ActionExport {
 		t.Fatalf("actions = %+v, want the bundle export", page.Actions)
+	}
+	native := loaded.Contributions.Pages[1]
+	if native.ID != PageNativeView || !native.ReadOnly || native.ReadOnlyReason == "" || len(native.Actions) != 0 {
+		t.Fatalf("page = %+v, want the stated read-only native view", native)
+	}
+}
+
+// TestNativeViewCoversTheContractSources checks the native view's two object
+// items against C-52.
+func TestNativeViewCoversTheContractSources(t *testing.T) {
+	want := map[string]string{
+		ItemRawFields: extension.PageSourceObject,
+		ItemRelated:   extension.PageSourceObject,
+	}
+	page := nativeViewPage()
+	if len(page.Items) != len(want) {
+		t.Fatalf("%s declares %d items, want %d", page.ID, len(page.Items), len(want))
+	}
+	for _, item := range page.Items {
+		if source, known := want[item.ID]; !known || item.Source != source {
+			t.Errorf("item %q source = %q, want %q", item.ID, item.Source, source)
+		}
 	}
 }
 

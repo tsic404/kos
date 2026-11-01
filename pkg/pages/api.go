@@ -3,6 +3,7 @@ package pages
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 
 	"github.com/tsic404/kos/pkg/controlplane"
 	"github.com/tsic404/kos/pkg/identity"
@@ -35,19 +36,41 @@ func (a *API) list(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": a.service.List(session)})
 }
 
-// read renders one page, trimmed to the caller's role (C-22, C-53).
+// read renders one page, trimmed to the caller's role (C-22, C-53). The query
+// names the object a page that shows one object is read for (C-52).
 func (a *API) read(w http.ResponseWriter, r *http.Request) {
 	session, ok := identity.FromContext(r.Context())
 	if !ok {
 		controlplane.WriteError(w, unauthenticated())
 		return
 	}
-	page, failure := a.service.Read(r.Context(), session, r.PathValue("id"))
+	target, failure := targetFromQuery(r.URL.Query())
+	if failure != nil {
+		controlplane.WriteError(w, failure)
+		return
+	}
+	page, failure := a.service.Read(r.Context(), session, r.PathValue("id"), target)
 	if failure != nil {
 		controlplane.WriteError(w, failure)
 		return
 	}
 	writeJSON(w, http.StatusOK, page)
+}
+
+// targetFromQuery reads the object a page read is about. No class, namespace or
+// name is a panel read; naming part of one is a field failure, because the shell
+// cannot tell which object the caller meant (C-52).
+func targetFromQuery(query url.Values) (Target, *controlplane.Error) {
+	target := Target{Kind: query.Get("kind"), Namespace: query.Get("namespace"), Name: query.Get("name")}
+	if !target.Named() || target.Complete() {
+		return target, nil
+	}
+	return Target{}, &controlplane.Error{
+		Code:        controlplane.CodeInvalidField,
+		Message:     "读取单对象页面必须同时给出 kind 与 name",
+		Stage:       controlplane.StageValidate,
+		SideEffects: controlplane.SideEffectsNone,
+	}
 }
 
 // unauthenticated is the answer to a request without a session (C-63).

@@ -11,6 +11,7 @@ import (
 	"github.com/tsic404/kos/pkg/catalogue"
 	"github.com/tsic404/kos/pkg/extension"
 	"github.com/tsic404/kos/pkg/identity"
+	"github.com/tsic404/kos/pkg/pages"
 	"github.com/tsic404/kos/pkg/write"
 )
 
@@ -52,7 +53,7 @@ func definitionWith(t *testing.T, structure []v1beta1.ConfigField, requires []v1
 func entriesOf(t *testing.T, reader Readings) []map[string]any {
 	t.Helper()
 	reading, failure := reader.Read(context.Background(), identity.Session{Role: write.RoleMember},
-		extension.PageItem{ID: EntriesItem, Reference: EntriesRef})
+		extension.PageItem{ID: EntriesItem, Reference: EntriesRef}, pages.Target{})
 	if failure != nil {
 		t.Fatalf("read the entries item: %v", failure)
 	}

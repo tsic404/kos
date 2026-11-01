@@ -35,9 +35,10 @@ type Readings struct {
 	Environment diagnostics.Environment
 }
 
-// Read implements pages.Readings.
-func (r *Readings) Read(ctx context.Context, session identity.Session, item extension.PageItem) (pages.Reading, *controlplane.Error) {
-	value, failure := r.value(ctx, session, item)
+// Read implements pages.Readings. The native view shows one native resource, so
+// its items read the target the request names (C-52).
+func (r *Readings) Read(ctx context.Context, session identity.Session, item extension.PageItem, target pages.Target) (pages.Reading, *controlplane.Error) {
+	value, failure := r.value(ctx, session, item, target)
 	if failure != nil {
 		return pages.Reading{}, failure
 	}
@@ -45,7 +46,7 @@ func (r *Readings) Read(ctx context.Context, session identity.Session, item exte
 }
 
 // value resolves one item from the source it declares.
-func (r *Readings) value(ctx context.Context, session identity.Session, item extension.PageItem) (any, *controlplane.Error) {
+func (r *Readings) value(ctx context.Context, session identity.Session, item extension.PageItem, target pages.Target) (any, *controlplane.Error) {
 	switch item.ID {
 	case ItemDegradation:
 		return r.degradation(ctx, session)
@@ -55,6 +56,8 @@ func (r *Readings) value(ctx context.Context, session identity.Session, item ext
 		return r.evidence(ctx, session)
 	case ItemExport:
 		return r.exportTargets(ctx, session)
+	case ItemRawFields, ItemRelated:
+		return r.nativeValue(ctx, session, item.ID, target)
 	default:
 		return nil, unknownItem(item.ID)
 	}

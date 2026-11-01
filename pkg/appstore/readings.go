@@ -47,7 +47,7 @@ type offer struct {
 // Read resolves one declared item of the app-center page. The session is not
 // consulted: the catalogue lists what every signed-in role may read, and the
 // page itself is already trimmed to the caller's role (C-59).
-func (r Readings) Read(ctx context.Context, _ identity.Session, item extension.PageItem) (pages.Reading, *controlplane.Error) {
+func (r Readings) Read(ctx context.Context, _ identity.Session, item extension.PageItem, _ pages.Target) (pages.Reading, *controlplane.Error) {
 	observedAt := r.now()
 	switch item.Reference {
 	case EntriesRef:

@@ -39,13 +39,40 @@ type Reading struct {
 	ObservedAt time.Time
 }
 
+// Target names the object a page is read for (C-52). A page that shows one
+// object (the application detail page, the read-only native view) is read with
+// one; a panel page is read without. Kind is the object class, Namespace is
+// empty for a cluster-scoped class, and Name is the object's name.
+type Target struct {
+	// Kind is the object class the page is read for.
+	Kind string
+	// Namespace is the object's namespace; empty for a cluster-scoped class.
+	Namespace string
+	// Name is the object's name.
+	Name string
+}
+
+// Named reports whether the read names an object at all.
+func (t Target) Named() bool {
+	return t.Kind != "" || t.Namespace != "" || t.Name != ""
+}
+
+// Complete reports whether the target names one object: a class and a name.
+// Whether the class needs a namespace is the reader's rule, because only it
+// knows which classes it serves.
+func (t Target) Complete() bool {
+	return t.Kind != "" && t.Name != ""
+}
+
 // Readings resolves the current value of a server-source item. Local items
 // never reach it: browser storage is not a control-plane projection (C-53).
 // The session is the caller the page was rendered for, so a reader can judge
-// the same visibility the read path does (C-59).
+// the same visibility the read path does (C-59). The target is the object the
+// read names, empty for a panel page; a reader whose page shows one object
+// refuses a read that names none rather than guessing which object was meant.
 type Readings interface {
 	// Read returns the value of one declared item.
-	Read(ctx context.Context, session identity.Session, item extension.PageItem) (Reading, *controlplane.Error)
+	Read(ctx context.Context, session identity.Session, item extension.PageItem, target Target) (Reading, *controlplane.Error)
 }
 
 // Banners reports the shell-level notice shown above every page, such as the
@@ -217,7 +244,10 @@ func (s *Service) List(session identity.Session) []Summary {
 // Read renders one page for the session. A page the role may not see and a page
 // no active component declares answer with the same failure, so an entry the
 // caller cannot see is indistinguishable from one that does not exist (C-22).
-func (s *Service) Read(ctx context.Context, session identity.Session, id string) (Page, *controlplane.Error) {
+// A target names the object the page is read for; a page that shows one object
+// is refused without it, because rendering it for an unnamed object would mean
+// choosing one (C-52).
+func (s *Service) Read(ctx context.Context, session identity.Session, id string, target Target) (Page, *controlplane.Error) {
 	page, found := s.declared().PageFor(id, session.Role)
 	if !found {
 		return Page{}, pageNotFound()
@@ -260,7 +290,7 @@ func (s *Service) Read(ctx context.Context, session identity.Session, id string)
 			if s.readings == nil {
 				return Page{}, sourceUnavailable(item.Source)
 			}
-			reading, failure := s.readings.Read(ctx, session, item)
+			reading, failure := s.readings.Read(ctx, session, item, target)
 			if failure != nil {
 				return Page{}, failure
 			}
