@@ -8,6 +8,7 @@ package kostaskmanager
 import (
 	"net/http"
 
+	"github.com/tsic404/kos/pkg/app"
 	"github.com/tsic404/kos/pkg/extension"
 )
 
@@ -45,6 +46,7 @@ const (
 	ItemResourceSpec  = "application-resources"
 	ItemUpgrade       = "application-upgrade"
 	ItemUninstall     = "application-uninstall"
+	ItemReinstall     = "application-reinstall"
 )
 
 // OverviewReason explains the one read-only page of the pair (C-53).
@@ -60,7 +62,28 @@ const (
 	ActionResourceSpec = "set-application-resources"
 	ActionUpgrade      = "upgrade-application"
 	ActionUninstall    = "uninstall-application"
+	ActionReinstall    = "reinstall-application"
 )
+
+// ControlPlaneAction names the action value the control plane accepts for one
+// page action identity (C-22, C-56). The identity belongs to the shell, the
+// value to the API: keeping the pair here is what lets a case assert that every
+// entry the page offers is one the endpoint accepts.
+func ControlPlaneAction(id string) (string, bool) {
+	switch id {
+	case ActionStop:
+		return app.ActionStop, true
+	case ActionStart:
+		return app.ActionStart, true
+	case ActionRestart:
+		return app.ActionRestart, true
+	case ActionScale:
+		return app.ActionScale, true
+	case ActionReinstall:
+		return app.ActionReinstall, true
+	}
+	return "", false
+}
 
 // Control-plane paths the entries write through (C-12, C-22).
 const (
@@ -127,6 +150,7 @@ func applicationsPage() extension.Page {
 			{ID: ItemResourceSpec, Label: "资源规格", Source: extension.PageSourceObject, Reference: reference(ItemResourceSpec), Action: ActionResourceSpec},
 			{ID: ItemUpgrade, Label: "升级应用", Source: extension.PageSourceObject, Reference: reference(ItemUpgrade), Action: ActionUpgrade},
 			{ID: ItemUninstall, Label: "卸载应用", Source: extension.PageSourceObject, Reference: reference(ItemUninstall), Action: ActionUninstall},
+			{ID: ItemReinstall, Label: "重新安装应用", Source: extension.PageSourceObject, Reference: reference(ItemReinstall), Action: ActionReinstall},
 		},
 		Actions: []extension.Action{
 			{ID: ActionStop, Method: http.MethodPost, Path: pathActionRequests},
@@ -136,6 +160,7 @@ func applicationsPage() extension.Page {
 			{ID: ActionResourceSpec, Method: http.MethodPut, Path: pathApplications},
 			{ID: ActionUpgrade, Method: http.MethodPut, Path: pathApplications},
 			{ID: ActionUninstall, Method: http.MethodDelete, Path: pathApplications},
+			{ID: ActionReinstall, Method: http.MethodPost, Path: pathActionRequests},
 		},
 	}
 }

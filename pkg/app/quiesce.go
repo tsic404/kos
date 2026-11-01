@@ -88,7 +88,7 @@ func (c *Controller) quiesce(ctx context.Context, application *v1beta1.Applicati
 	if applied == nil {
 		// Nothing was applied yet, so there is no workload to stop: the round
 		// records the stop and waits for the migration (C-06).
-		status.Health = v1beta1.Health{State: applicationHealth(nil, comparison, true)}
+		status.Health = v1beta1.Health{State: c.applicationHealth(ctx, application, nil, comparison, true)}
 		status.Conditions = state.Set(status.Conditions, quiescedCondition(application, migrationName))
 		return reconcile.Result{RequeueAfter: readyResync}, c.writeStatus(ctx, application, status)
 	}
@@ -114,7 +114,7 @@ func (c *Controller) quiesce(ctx context.Context, application *v1beta1.Applicati
 	// does not read KOS's own stop as a write made outside KOS (C-35, C-40).
 	status.Applied = stoppedBaseline(applied)
 	status.Rendered = rendered
-	status.Health = v1beta1.Health{State: applicationHealth(observed, comparison, true)}
+	status.Health = v1beta1.Health{State: c.applicationHealth(ctx, application, observed, comparison, true)}
 	status.Resources, err = c.resourceStatus(ctx, application, resources)
 	if err != nil {
 		return reconcile.Result{}, err

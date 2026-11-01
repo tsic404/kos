@@ -9,6 +9,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/client-go/util/workqueue"
+
+	"github.com/tsic404/kos/pkg/budget"
 )
 
 // Options configures a Controller.
@@ -25,6 +27,9 @@ type Options struct {
 	// Registerer receives the round metrics. When nil the controller keeps
 	// them on a private registry that Gatherer returns.
 	Registerer prometheus.Registerer
+	// Latency records every round duration, which is the measurement the
+	// reconcile latency target of C-57 reads. Nil records nothing.
+	Latency *budget.Latency
 }
 
 // Controller drains the work queue with a fixed number of workers.
@@ -35,6 +40,7 @@ type Controller struct {
 	maxRound   time.Duration
 	metrics    *metrics
 	gatherer   prometheus.Gatherer
+	latency    *budget.Latency
 }
 
 // NewController builds a controller around one reconciler.
@@ -68,6 +74,7 @@ func NewController(reconciler Reconciler, options Options) (*Controller, error) 
 		maxRound:   maxRound,
 		metrics:    metrics,
 		gatherer:   gatherer,
+		latency:    options.Latency,
 	}, nil
 }
 
@@ -143,6 +150,7 @@ func (c *Controller) round(ctx context.Context, request Request) {
 	isOverLimit := elapsed > c.maxRound || errors.Is(roundCtx.Err(), context.DeadlineExceeded)
 
 	c.metrics.observeRound(elapsed, isOverLimit)
+	c.latency.Observe(elapsed)
 
 	switch {
 	case err != nil:

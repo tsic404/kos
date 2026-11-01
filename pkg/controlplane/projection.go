@@ -152,7 +152,7 @@ func (s *Server) attachVolumeBindings(ctx context.Context, page []Projection) *E
 		if _, failure := s.authorize(ctx, VerbRead, ref, nil, nil); failure != nil {
 			return failure
 		}
-		observed, err := s.source.List(ctx, volumeType, namespace)
+		observed, err := s.readSource.List(ctx, volumeType, namespace)
 		if err != nil {
 			s.log.Error("volume binding read failed", "namespace", namespace, "error", err)
 			return internal(StageRead, "读取 Volume 失败").about(ref)

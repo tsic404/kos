@@ -10,9 +10,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
 )
 
+// Version is the object version this package defines and serves (C-16).
+const Version = "v1beta1"
+
 var (
 	// GroupVersion is the group and version served by this package.
-	GroupVersion = schema.GroupVersion{Group: "kos.tsic.top", Version: "v1beta1"}
+	GroupVersion = schema.GroupVersion{Group: "kos.tsic.top", Version: Version}
 
 	// SchemeBuilder registers this version's types into a runtime scheme.
 	SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}

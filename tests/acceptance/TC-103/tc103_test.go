@@ -117,6 +117,7 @@ func TestTC103ProjectionsOverAnAppliedApplication(t *testing.T) {
 		kostaskmanager.ItemResourceSpec:  extension.PageSourceObject,
 		kostaskmanager.ItemUpgrade:       extension.PageSourceObject,
 		kostaskmanager.ItemUninstall:     extension.PageSourceObject,
+		kostaskmanager.ItemReinstall:     extension.PageSourceObject,
 	})
 	assertEntries(t, applications, map[string]string{
 		kostaskmanager.ItemStop:         kostaskmanager.ActionStop,
@@ -126,6 +127,7 @@ func TestTC103ProjectionsOverAnAppliedApplication(t *testing.T) {
 		kostaskmanager.ItemResourceSpec: kostaskmanager.ActionResourceSpec,
 		kostaskmanager.ItemUpgrade:      kostaskmanager.ActionUpgrade,
 		kostaskmanager.ItemUninstall:    kostaskmanager.ActionUninstall,
+		kostaskmanager.ItemReinstall:    kostaskmanager.ActionReinstall,
 	})
 	installed := itemValue(t, applications, kostaskmanager.ItemInstalled)
 	if !containsName(t, installed, "applications", application) {

@@ -52,6 +52,29 @@ type Bundle struct {
 	VersionMatrix VersionMatrix `json:"versionMatrix"`
 	// Evidence is the chain of C-26.
 	Evidence Chain `json:"evidence"`
+	// Degradation is the degradation-protection record of C-57; nil when no
+	// protection is attached.
+	Degradation *DegradationRecord `json:"degradation,omitempty"`
+}
+
+// DegradationRecord is what the degradation protection measured at export time
+// (C-56, C-57). A protection that cannot measure says so and names the reason;
+// it never reports a healthy judgement it did not make.
+type DegradationRecord struct {
+	// IsMeasurable reports a fresh measurement.
+	IsMeasurable bool `json:"measurable"`
+	// IsDegraded reports that real-time listening is off.
+	IsDegraded bool `json:"degraded"`
+	// Reason explains an active degradation.
+	Reason string `json:"reason,omitempty"`
+	// UnmeasurableReason explains why no judgement could be made.
+	UnmeasurableReason string `json:"unmeasurableReason,omitempty"`
+	// P95Bytes is the memory percentile of the sample window.
+	P95Bytes int64 `json:"p95Bytes,omitempty"`
+	// ThresholdBytes is the degradation threshold in force.
+	ThresholdBytes int64 `json:"thresholdBytes"`
+	// MeasuredAt is the newest measurement.
+	MeasuredAt time.Time `json:"measuredAt,omitempty"`
 }
 
 // Encode renders the bundle as the exported document. It is JSON so the file
@@ -197,6 +220,18 @@ func (s *Service) Bundle(ctx context.Context, namespace, name string) (Bundle, e
 	}
 	bundle.RecentEvents = s.recentEvents(ctx, assembly)
 	bundle.RenderDiff = s.renderDiff(ctx, assembly)
+	if s.Protection != nil {
+		status := s.Protection.Status()
+		bundle.Degradation = &DegradationRecord{
+			IsMeasurable:       status.IsMeasurable,
+			IsDegraded:         status.IsDegraded,
+			Reason:             status.Reason,
+			UnmeasurableReason: status.UnmeasurableReason,
+			P95Bytes:           status.P95Bytes,
+			ThresholdBytes:     status.ThresholdBytes,
+			MeasuredAt:         status.MeasuredAt,
+		}
+	}
 	return bundle, nil
 }
 

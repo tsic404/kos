@@ -85,7 +85,7 @@ func (r *Readings) value(ctx context.Context, session identity.Session, item ext
 		return r.installable(ctx)
 	case ItemResourceUsage:
 		return r.resourceUsage(ctx, session)
-	case ItemStop, ItemStart, ItemRestart, ItemScale, ItemResourceSpec, ItemUpgrade, ItemUninstall:
+	case ItemStop, ItemStart, ItemRestart, ItemScale, ItemResourceSpec, ItemUpgrade, ItemUninstall, ItemReinstall:
 		return r.entryTargets(ctx, session, item.ID)
 	default:
 		return nil, unknownItem(item.ID)

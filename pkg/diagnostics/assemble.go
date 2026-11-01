@@ -15,6 +15,7 @@ import (
 
 	"github.com/tsic404/kos/api"
 	"github.com/tsic404/kos/api/v1beta1"
+	"github.com/tsic404/kos/pkg/degrade"
 	"github.com/tsic404/kos/pkg/state"
 )
 
@@ -94,6 +95,14 @@ type Service struct {
 	// EventWindow is how far back recent events are read; defaults to one hour
 	// (C-64).
 	EventWindow time.Duration
+	// Protection reports the degradation-protection record (C-56, C-57); nil
+	// leaves the record out.
+	Protection Protection
+}
+
+// Protection reports the degradation protection's current status.
+type Protection interface {
+	Status() degrade.ProtectionStatus
 }
 
 // Chain assembles the evidence chain of one application (C-26).

@@ -29,17 +29,28 @@ const (
 	// EventExternalChangeConfirmed marks an external change accepted as the new
 	// baseline (C-35).
 	EventExternalChangeConfirmed = "ExternalChangeConfirmed"
+	// EventReinstallRequested marks a reinstall action the user asked for
+	// (C-56). The event is the observable effect of the page entry.
+	EventReinstallRequested = "ReinstallRequested"
 )
 
 // steady drives an application that already reached Ready: it watches the
 // downstream objects for writes made outside KOS and performs the upgrade the
-// spec requests (C-34, C-35).
-func (c *Controller) steady(ctx context.Context, application *v1beta1.Application, definition *v1beta1.ApplicationDefinition, resolved map[string]any, comparison CapabilityResult, now time.Time) (reconcile.Result, error) {
+// spec requests (C-34, C-35). dropBaseline makes this round re-render the spec
+// the stored baseline was taken from instead of trusting it (C-56); a spec that
+// changed since then is the upgrade request of C-34 and keeps its preflight.
+func (c *Controller) steady(ctx context.Context, application *v1beta1.Application, definition *v1beta1.ApplicationDefinition, resolved map[string]any, comparison CapabilityResult, now time.Time, dropBaseline bool) (reconcile.Result, error) {
 	next, err := c.buildTarget(ctx, application, definition, resolved)
 	if err != nil {
 		return c.fail(ctx, application, ConditionInvalidPackage, err.Error())
 	}
 	applied := application.Status.Applied
+	if dropBaseline && applied != nil && next.applied.SpecDigest == applied.SpecDigest {
+		// The reinstall re-renders the spec the baseline was taken from. A spec
+		// that changed since then is an upgrade request, not a reinstall: it
+		// keeps the preflight, the refusal and the rollback of C-34.
+		applied = nil
+	}
 	if applied == nil {
 		// An application that reached Ready before the baseline existed adopts
 		// its current render, so the next spec write still has a starting point.
@@ -102,7 +113,7 @@ func (c *Controller) recordBaseline(ctx context.Context, application *v1beta1.Ap
 	status.Upgrade = nil
 	status.ResourceDefaults = defaults
 	resetBudget(&status)
-	status.Health = v1beta1.Health{State: applicationHealth(observed, comparison, application.Spec.Paused)}
+	status.Health = v1beta1.Health{State: c.applicationHealth(ctx, application, observed, comparison, application.Spec.Paused)}
 	status.Resources, err = c.resourceStatus(ctx, application, next.resources)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -168,7 +179,7 @@ func (c *Controller) upgrade(ctx context.Context, application *v1beta1.Applicati
 	status.Upgrade = nil
 	status.Drift = nil
 	resetBudget(&status)
-	status.Health = v1beta1.Health{State: applicationHealth(observed, comparison, application.Spec.Paused)}
+	status.Health = v1beta1.Health{State: c.applicationHealth(ctx, application, observed, comparison, application.Spec.Paused)}
 	status.Resources, err = c.resourceStatus(ctx, application, next.resources)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -217,7 +228,7 @@ func (c *Controller) refuseUpgrade(ctx context.Context, application *v1beta1.App
 			}
 			status.Applied = withLifecycle(application.Status.Applied, application, resources)
 			status.Rendered = rendered
-			status.Health = v1beta1.Health{State: applicationHealth(observed, comparison, application.Spec.Paused)}
+			status.Health = v1beta1.Health{State: c.applicationHealth(ctx, application, observed, comparison, application.Spec.Paused)}
 			status.Resources, err = c.resourceStatus(ctx, application, resources)
 			if err != nil {
 				return reconcile.Result{}, err
@@ -287,7 +298,7 @@ func (c *Controller) rollback(ctx context.Context, application *v1beta1.Applicat
 	status.Rendered = rendered
 	status.Applied = withLifecycle(applied, application, resources)
 	status.Upgrade = rolledBackReport(application)
-	status.Health = v1beta1.Health{State: applicationHealth(observed, comparison, application.Spec.Paused)}
+	status.Health = v1beta1.Health{State: c.applicationHealth(ctx, application, observed, comparison, application.Spec.Paused)}
 	status.Resources, err = c.resourceStatus(ctx, application, resources)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -456,7 +467,7 @@ func (c *Controller) reconcileApplied(ctx context.Context, application *v1beta1.
 	}
 	status.Applied = withLifecycle(applied, application, resources)
 	status.Rendered = rendered
-	health := applicationHealth(observed, comparison, application.Spec.Paused)
+	health := c.applicationHealth(ctx, application, observed, comparison, application.Spec.Paused)
 	if kept {
 		health = v1beta1.HealthStateDegraded
 	}
@@ -468,6 +479,13 @@ func (c *Controller) reconcileApplied(ctx context.Context, application *v1beta1.
 	status.Phase = PhaseReady
 	settlePhase(application, &status)
 	status.Conditions = state.Set(status.Conditions, state.Applied(application.Generation, "desired state applied"))
+	if len(comparison.Unsatisfied) > 0 && !kept {
+		// An unmet guarantee stays visible on every idle round, not only on
+		// the install that first compared it (C-11, C-56). A drift condition
+		// owns the failure slot of its round, so it wins when both apply.
+		message := "guarantees not met: " + strings.Join(comparison.Unsatisfied, ", ")
+		status.Conditions = withFailure(status.Conditions, application.Generation, ConditionCapabilityUnsatisfied, message)
+	}
 	return reconcile.Result{RequeueAfter: readyResync}, c.writeStatus(ctx, application, status)
 }
 

@@ -16,6 +16,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/dynamic"
 
+	"github.com/tsic404/kos/pkg/budget"
+	"github.com/tsic404/kos/pkg/degrade"
 	"github.com/tsic404/kos/pkg/endpoint"
 )
 
@@ -154,6 +156,21 @@ type Config struct {
 	// Actor names the principal behind one request (C-14); nil or an empty
 	// name records the process subject.
 	Actor Actor
+	// Degradation reports the process-wide degradation state (C-56); nil means
+	// nothing is degraded.
+	Degradation degrade.StateSource
+	// Protection reports the degradation protection (C-57); nil makes the
+	// health endpoint report unmeasurable.
+	Protection Protection
+	// Definitions reports the object-definition versions; nil skips the
+	// startup version check.
+	Definitions Definitions
+	// StorageCapacity reports a full backing disk (C-56); nil accepts every
+	// volume.
+	StorageCapacity StorageCapacity
+	// ProjectionLatency measures the read projection path (C-57); nil records
+	// nothing.
+	ProjectionLatency *budget.Latency
 	// Log records the detail a user-facing message must not carry; defaults to
 	// discarding it.
 	Log *slog.Logger
@@ -162,25 +179,30 @@ type Config struct {
 // Server is the control plane API. It holds the cluster client and never hands
 // one to a caller (C-13, F9).
 type Server struct {
-	dynamic         dynamic.Interface
-	source          ObjectSource
-	extensions      ExtensionKinds
-	controllers     ControllerAvailability
-	discoveries     DiscoverySources
-	authorizer      Authorizer
-	auditor         Auditor
-	actor           Actor
-	endpointFacts   endpoint.Facts
-	volumeExpansion VolumeExpansion
-	diagnostics     Diagnostics
-	catalogue       CatalogueInstall
-	logs            LogSource
-	now             func() time.Time
-	timeout         time.Duration
-	log             *slog.Logger
-	operations      context.Context
-	stop            context.CancelFunc
-	mux             *http.ServeMux
+	dynamic           dynamic.Interface
+	source            ObjectSource
+	readSource        ObjectSource
+	extensions        ExtensionKinds
+	controllers       ControllerAvailability
+	discoveries       DiscoverySources
+	authorizer        Authorizer
+	auditor           Auditor
+	actor             Actor
+	endpointFacts     endpoint.Facts
+	volumeExpansion   VolumeExpansion
+	diagnostics       Diagnostics
+	catalogue         CatalogueInstall
+	logs              LogSource
+	degradation       degrade.StateSource
+	protection        Protection
+	storageCapacity   StorageCapacity
+	projectionLatency *budget.Latency
+	now               func() time.Time
+	timeout           time.Duration
+	log               *slog.Logger
+	operations        context.Context
+	stop              context.CancelFunc
+	mux               *http.ServeMux
 }
 
 // New builds the API surface.
@@ -189,31 +211,44 @@ func New(config Config) (*Server, error) {
 		return nil, errors.New("controlplane: a dynamic client is required")
 	}
 	server := &Server{
-		dynamic:         config.Dynamic,
-		source:          config.Source,
-		extensions:      config.Extensions,
-		controllers:     config.Controllers,
-		discoveries:     config.Discoveries,
-		authorizer:      config.Authorizer,
-		auditor:         config.Auditor,
-		actor:           config.Actor,
-		endpointFacts:   config.EndpointFacts,
-		volumeExpansion: config.VolumeExpansion,
-		diagnostics:     config.Diagnostics,
-		catalogue:       config.Catalogue,
-		logs:            config.Logs,
-		now:             config.Now,
-		timeout:         config.OperationTimeout,
-		log:             config.Log,
-	}
-	if server.source == nil {
-		server.source = NewClusterSource(config.Dynamic)
+		dynamic:           config.Dynamic,
+		source:            config.Source,
+		extensions:        config.Extensions,
+		controllers:       config.Controllers,
+		discoveries:       config.Discoveries,
+		authorizer:        config.Authorizer,
+		auditor:           config.Auditor,
+		actor:             config.Actor,
+		endpointFacts:     config.EndpointFacts,
+		volumeExpansion:   config.VolumeExpansion,
+		diagnostics:       config.Diagnostics,
+		catalogue:         config.Catalogue,
+		logs:              config.Logs,
+		degradation:       config.Degradation,
+		protection:        config.Protection,
+		storageCapacity:   config.StorageCapacity,
+		projectionLatency: config.ProjectionLatency,
+		now:               config.Now,
+		timeout:           config.OperationTimeout,
+		log:               config.Log,
 	}
 	if server.authorizer == nil {
 		server.authorizer = AllowAll{}
 	}
 	if server.now == nil {
 		server.now = time.Now
+	}
+	if server.source == nil {
+		server.source = NewClusterSource(config.Dynamic)
+	}
+	// The read projections keep the last successful read, so a cluster API
+	// outage still answers with the observation time the data has (C-56): the
+	// projection marks it stale instead of failing blindly. Writes keep reading
+	// the live source: a precondition judged against a cached object would
+	// accept a delete for an object that is already gone (C-05, C-12).
+	server.readSource = NewCachedSource(server.source)
+	if err := requireServedDefinitions(config.Definitions); err != nil {
+		return nil, err
 	}
 	if server.timeout <= 0 {
 		server.timeout = defaultOperationTimeout
@@ -243,6 +278,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/diagnostics/bundles", s.handleDiagnosticsExport)
 	s.mux.HandleFunc("GET /api/v1/logs/{namespace}/{name}", s.handleApplicationLogs)
 	s.mux.HandleFunc("GET /api/v1/events", s.handleEvents)
+	// The health endpoint is the probe surface: it answers before any session
+	// exists and carries only the verdict and its reason, never the internal
+	// measurement values (C-56, C-57).
+	s.mux.HandleFunc("GET /api/v1/system/health", s.handleHealth)
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, notFound("没有这个接口"))
 	})
@@ -260,6 +299,12 @@ func (s *Server) Close() {
 
 // handleList returns one page of projections with their observation time (C-13).
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	defer func() {
+		if s.projectionLatency != nil {
+			s.projectionLatency.Observe(time.Since(started))
+		}
+	}()
 	query := r.URL.Query()
 	kind := r.PathValue("kind")
 	objectType, failure := resolveType(kind, query.Get("apiVersion"), s.extensions)
@@ -303,7 +348,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	observed, err := s.source.List(r.Context(), objectType, namespace)
+	observed, err := s.readSource.List(r.Context(), objectType, namespace)
 	if err != nil {
 		s.log.Error("list failed", "kind", kind, "namespace", namespace, "error", err)
 		writeError(w, internal(StageRead, "读取 "+kind+" 失败").about(ref))
@@ -359,6 +404,12 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 
 // handleGet returns one projection (C-13).
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	defer func() {
+		if s.projectionLatency != nil {
+			s.projectionLatency.Observe(time.Since(started))
+		}
+	}()
 	kind := r.PathValue("kind")
 	name := r.PathValue("name")
 	objectType, failure := resolveType(kind, r.URL.Query().Get("apiVersion"), s.extensions)
@@ -372,7 +423,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ref := ObjectRef{Group: objectType.Group, Kind: objectType.Kind, Namespace: namespace, Name: name}
-	observed, err := s.source.Get(r.Context(), objectType, namespace, name)
+	observed, err := s.readSource.Get(r.Context(), objectType, namespace, name)
 	if err != nil {
 		writeError(w, s.readFailure(err, ref))
 		return
@@ -401,6 +452,9 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 // handleCreate writes one object idempotently: the same request submitted twice
 // produces the same object and the same answer (C-12).
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
+	if s.refuseWrite(w) {
+		return
+	}
 	kind := r.PathValue("kind")
 	raw, failure := decodeObjectBody(r)
 	if failure != nil {
@@ -437,6 +491,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
 	defer cancel()
 
+	if s.refuseFullStorage(w, ctx, object) {
+		return
+	}
 	if failure := s.validateApplicationWrite(ctx, object.Object); failure != nil {
 		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "create", failure))
 		return
@@ -499,6 +556,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 // keeps two writers from overwriting each other, and the API server is the one
 // that judges it (C-05, C-12).
 func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	if s.refuseWrite(w) {
+		return
+	}
 	kind := r.PathValue("kind")
 	name := r.PathValue("name")
 	raw, failure := decodeObjectBody(r)
@@ -599,6 +659,9 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 // handleDelete removes one object behind a version precondition.
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if s.refuseWrite(w) {
+		return
+	}
 	kind := r.PathValue("kind")
 	name := r.PathValue("name")
 	objectType, failure := resolveType(kind, r.URL.Query().Get("apiVersion"), s.extensions)
@@ -675,6 +738,9 @@ func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
 // with the plan's object references; progress is read from the objects
 // themselves and a disconnected client cannot stop the work (C-12, C-13).
 func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
+	if s.refuseWrite(w) {
+		return
+	}
 	request, failure := decodeSetRequest(r)
 	if failure != nil {
 		writeError(w, failure)
@@ -686,6 +752,11 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(s.operations, s.timeout)
 	plan, desired, grants, failure := s.buildPlan(ctx, r.Context(), VerbApply, request)
 	if failure != nil {
+		cancel()
+		writeError(w, failure)
+		return
+	}
+	if failure := s.refuseFullStorageSet(ctx, desired); failure != nil {
 		cancel()
 		writeError(w, failure)
 		return

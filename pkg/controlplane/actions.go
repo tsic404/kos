@@ -51,6 +51,9 @@ type actionResponse struct {
 // performs on the user's behalf. Neither path puts a restart or an action
 // trigger into the user spec (C-04, C-33, C-66).
 func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
+	if s.refuseWrite(w) {
+		return
+	}
 	var request actionRequest
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	decoder.DisallowUnknownFields()
@@ -69,16 +72,12 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, invalidField("动作必须给出应用的名字与命名空间"))
 		return
 	}
-	switch request.Action {
-	case app.ActionRetry, app.ActionOrphan, app.ActionRestart,
-		app.ActionStop, app.ActionStart, app.ActionScale:
-	case app.ActionConfirm:
-		if request.TargetDigest == "" {
-			writeError(w, invalidField("确认必须给出目标摘要"))
-			return
-		}
-	default:
+	if !acceptsAction(request.Action) {
 		writeError(w, invalidField("未知动作 "+request.Action))
+		return
+	}
+	if request.Action == app.ActionConfirm && request.TargetDigest == "" {
+		writeError(w, invalidField("确认必须给出目标摘要"))
 		return
 	}
 	applicationType, ok := kernelType("Application")
@@ -141,11 +140,28 @@ func (s *Server) handleAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, response)
 }
 
+// AcceptsAction reports whether the action endpoint accepts one action value
+// (C-22, C-56). A page entry names its action identity; this is the value the
+// control plane accepts, so an entry that names another one is observable here
+// before it is ever offered.
+func AcceptsAction(action string) bool { return acceptsAction(action) }
+
+// acceptsAction is the action whitelist itself: the endpoint and the exported
+// predicate cannot drift apart (C-33, C-56, C-66).
+func acceptsAction(action string) bool {
+	switch action {
+	case app.ActionRetry, app.ActionOrphan, app.ActionRestart, app.ActionReinstall,
+		app.ActionStop, app.ActionStart, app.ActionScale, app.ActionConfirm:
+		return true
+	}
+	return false
+}
+
 // recordAction reports whether an action travels as a one-shot record instead of
 // a spec write (C-33, C-66).
 func recordAction(action string) bool {
 	switch action {
-	case app.ActionRetry, app.ActionOrphan, app.ActionRestart, app.ActionConfirm:
+	case app.ActionRetry, app.ActionOrphan, app.ActionRestart, app.ActionReinstall, app.ActionConfirm:
 		return true
 	default:
 		return false
@@ -231,6 +247,16 @@ func acceptAction(request actionRequest, application *v1beta1.Application) *Erro
 	case app.ActionRestart:
 		if application.Status.Phase != app.PhaseReady && application.Status.Phase != app.PhaseUpgrading {
 			return invalidField("restart 只对已安装的应用有效")
+		}
+	case app.ActionReinstall:
+		// A crashed provider leaves a Ready application Degraded and a failed
+		// install leaves it Failed: both are reinstalled from the current spec
+		// (C-56). An upgrade in flight keeps its own flow (C-34): a reinstall
+		// would apply the new render without its preflight.
+		switch application.Status.Phase {
+		case app.PhaseReady, app.PhaseFailed:
+		default:
+			return invalidField("reinstall 只对已安装或失败的应用有效")
 		}
 	case app.ActionScale:
 		if request.Replicas == nil || *request.Replicas < 0 {
