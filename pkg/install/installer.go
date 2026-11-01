@@ -44,6 +44,18 @@ type Accounts interface {
 	BootstrapOwner(ctx context.Context, username string) (identity.Bootstrap, error)
 }
 
+// ExternalAccounts is the account service the external-control-plane form
+// needs: the first Owner is created without a password, and the claim window is
+// what delivers it once the installation finished (C-54, C-68).
+type ExternalAccounts interface {
+	// PrepareFirstOwner creates the first Owner, or reuses the one the database
+	// already holds, without revealing a password.
+	PrepareFirstOwner(ctx context.Context, username string) (identity.Bootstrap, error)
+	// OpenBootstrapWindow opens the claim window an installation gets exactly
+	// once.
+	OpenBootstrapWindow(ctx context.Context) error
+}
+
 // Ready reports whether the control plane answers. A nil check means the
 // installation does not observe readiness.
 type Ready func(ctx context.Context) error
@@ -72,6 +84,13 @@ type Config struct {
 	Definitions DefinitionSource
 	// Accounts creates the first Owner.
 	Accounts Accounts
+	// ExternalAccounts prepares the first Owner and opens the claim window; the
+	// external form requires it (C-68).
+	ExternalAccounts ExternalAccounts
+	// ControlPlaneCluster runs the control-plane workload when that is not the
+	// cluster the installation reconciles; nil means the installation's own
+	// cluster, which is the case for every other form (C-54).
+	ControlPlaneCluster *Cluster
 	// Audit reads the API server audit log; nil makes the window unmeasured.
 	Audit AuditSource
 	// Subjects are the KOS identities the invariant judges; empty selects
@@ -131,6 +150,19 @@ type Result struct {
 	RolledBack bool
 	// Window is the install-window measurement (C-15).
 	Window Verdict
+	// OwnerClaim is where the first Owner's one-time password is claimed. Only
+	// the external form sets it: that form never puts the password in the
+	// install output (C-68).
+	OwnerClaim OwnerClaim
+}
+
+// OwnerClaim is the instruction an external installation prints instead of a
+// password (C-68): the claim endpoint and what the operator does there.
+type OwnerClaim struct {
+	// URL is the claim endpoint on the control-plane host.
+	URL string
+	// Instruction tells the operator what to run.
+	Instruction string
 }
 
 // Installer runs one installation.
@@ -152,15 +184,42 @@ type Installer struct {
 	oneTime  string
 	nodes    int
 	ready    bool
+	// claimOpened reports that this run opened the first Owner's claim window,
+	// so only a completed installation prints a claim instruction (C-68).
+	claimOpened bool
 }
 
 // createdObject is one object this run created and would remove on rollback.
 type createdObject struct {
+	// cluster is the cluster the object lives in; nil means the managed one.
+	cluster     *Cluster
 	gvr         schema.GroupVersionResource
 	namespace   string
 	name        string
 	isNamespace bool
 	definition  bool
+}
+
+// managed returns the cluster the installation reconciles: the configured
+// clients, which the external form points at the managed cluster.
+func (i *Installer) managed() *Cluster {
+	return &Cluster{Dynamic: i.config.Dynamic, Kube: i.config.Kube, APIExtensions: i.config.APIExtensions}
+}
+
+// controlPlane returns the cluster that runs the control-plane workload.
+func (i *Installer) controlPlane() *Cluster {
+	if i.config.ControlPlaneCluster != nil {
+		return i.config.ControlPlaneCluster
+	}
+	return i.managed()
+}
+
+// clusterOf resolves the cluster a created object lives in.
+func (i *Installer) clusterOf(created createdObject) *Cluster {
+	if created.cluster != nil {
+		return created.cluster
+	}
+	return i.managed()
 }
 
 // New validates the wiring of one installation.
@@ -178,12 +237,18 @@ func New(config Config) (*Installer, error) {
 		return nil, errors.New("installation needs the release's object definitions")
 	case config.APIExtensions == nil:
 		return nil, errors.New("installation needs an apiextensions client")
-	case config.Accounts == nil:
+	case config.Accounts == nil && plan.Mode != ModeExternal:
 		return nil, errors.New("installation needs the account service for the first Owner")
 	case plan.Mode == ModeBootstrap && config.Provisioner == nil:
 		return nil, errors.New("bootstrap installation needs a provisioner")
 	case plan.Mode == ModeBootstrap && config.Nodes == nil:
 		return nil, errors.New("bootstrap installation needs a node source")
+	case plan.Mode == ModeExternal && config.ExternalAccounts == nil:
+		return nil, errors.New("external-control-plane installation needs the claim-window account service")
+	case plan.Mode == ModeExternal && config.ControlPlaneCluster == nil:
+		return nil, errors.New("external-control-plane installation needs the control-plane cluster's clients")
+	case plan.Mode != ModeExternal && config.ControlPlaneCluster != nil:
+		return nil, fmt.Errorf("install form %q runs its control plane in the cluster it reconciles", plan.Mode)
 	}
 	if _, err := NewInjector(config.Injections); err != nil {
 		return nil, err
@@ -218,9 +283,22 @@ func (i *Installer) Bootstrap(ctx context.Context) (Result, error) {
 	return i.run(ctx)
 }
 
-// run is the shared window of both forms. A bootstrap run has to reach an API
-// server before it can observe one: the provision and node steps run first, so
-// the window opens on a running run kernel instead of failing on a bare host.
+// InstallExternal runs the external-control-plane form (C-54): the managed
+// cluster receives the object definitions and the identity the control plane
+// acts as, while the control-plane cluster receives the workload, its service
+// and the credential to the managed cluster.
+func (i *Installer) InstallExternal(ctx context.Context) (Result, error) {
+	if i.plan.Mode != ModeExternal {
+		return Result{}, fmt.Errorf("install form %q is not an external-control-plane installation", i.plan.Mode)
+	}
+	return i.run(ctx)
+}
+
+// run is the shared window of the three forms. A bootstrap run has to reach an
+// API server before it can observe one: the provision and node steps run first,
+// so the window opens on a running run kernel instead of failing on a bare host.
+// The window always measures the managed cluster, whichever cluster runs the
+// control plane.
 func (i *Installer) run(ctx context.Context) (Result, error) {
 	result := Result{Mode: i.plan.Mode, Namespace: i.plan.Namespace, Owner: i.plan.Owner}
 	i.reset()
@@ -262,6 +340,17 @@ func (i *Installer) run(ctx context.Context) (Result, error) {
 		}
 		runErr = i.waitWindow(ctx, classes)
 	}
+	// The first Owner's claim window opens when the installation is complete,
+	// not when its last step ran: the C-15 quiet window and the settle wait
+	// above belong to the installation, and a failed run must not leave a
+	// window behind (C-68).
+	if runErr == nil && i.plan.Mode == ModeExternal {
+		if err := i.config.ExternalAccounts.OpenBootstrapWindow(ctx); err != nil {
+			runErr = fmt.Errorf("open the first-Owner claim window: %w", err)
+		} else {
+			i.claimOpened = true
+		}
+	}
 	var rollbackErr error
 	if runErr != nil {
 		rollbackErr = i.rollback(ctx)
@@ -302,6 +391,15 @@ func (i *Installer) partial(result Result) Result {
 	result.OneTimePassword = i.oneTime
 	result.Nodes = i.nodes
 	result.ControlPlaneReady = i.ready
+	// A failed run has no window to point at: printing an address that answers
+	// bootstrap_closed would only mislead the operator (C-68).
+	if i.claimOpened {
+		result.OwnerClaim = OwnerClaim{
+			URL: i.plan.Address + identity.BootstrapOwnerPath,
+			Instruction: "在控制面主机上向该地址发一次 POST 领取首个 Owner 的一次性口令；" +
+				"口令只返回一次，首次登录必须修改。",
+		}
+	}
 	return result
 }
 
@@ -317,6 +415,7 @@ func (i *Installer) reset() {
 	i.oneTime = ""
 	i.nodes = 0
 	i.ready = false
+	i.claimOpened = false
 }
 
 // runInstall executes the installation steps in order.
@@ -332,6 +431,11 @@ func (i *Installer) runInstall(ctx context.Context) error {
 	}
 	if err := i.runStep(ctx, StepPermissions, i.createPermissions); err != nil {
 		return err
+	}
+	if i.plan.Mode == ModeExternal {
+		if err := i.runStep(ctx, StepCredential, i.createCredential); err != nil {
+			return err
+		}
 	}
 	if err := i.runStep(ctx, StepControlPlane, i.createControlPlane); err != nil {
 		return err
@@ -386,9 +490,31 @@ func (i *Installer) preflight(ctx context.Context) error {
 	return nil
 }
 
-// createNamespace creates the installation's own namespace when it is missing.
+// createNamespace creates the installation's own namespace when it is missing,
+// in every cluster the installation writes to: the managed cluster keeps the
+// identity and the object definitions, the control-plane cluster keeps the
+// workload (C-54).
 func (i *Installer) createNamespace(ctx context.Context) error {
-	_, err := i.config.Kube.CoreV1().Namespaces().Get(ctx, i.plan.Namespace, metav1.GetOptions{})
+	clusters := []*Cluster{i.managed()}
+	if i.plan.Mode == ModeExternal {
+		clusters = append(clusters, i.controlPlane())
+	}
+	seen := map[*Cluster]bool{}
+	for _, cluster := range clusters {
+		if seen[cluster] {
+			continue
+		}
+		seen[cluster] = true
+		if err := i.ensureNamespaceIn(ctx, cluster); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureNamespaceIn creates the installation's namespace in one cluster.
+func (i *Installer) ensureNamespaceIn(ctx context.Context, cluster *Cluster) error {
+	_, err := cluster.Kube.CoreV1().Namespaces().Get(ctx, i.plan.Namespace, metav1.GetOptions{})
 	if err == nil {
 		return nil
 	}
@@ -403,12 +529,13 @@ func (i *Installer) createNamespace(ctx context.Context) error {
 			"labels": map[string]any{markers.ManagedBy: write.ManagedByValue},
 		},
 	}}
-	created, err := i.ensureDynamic(ctx, schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}, namespace)
+	created, err := i.ensureDynamic(ctx, cluster, schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}, namespace)
 	if err != nil {
 		return err
 	}
 	if created {
 		i.created = append(i.created, createdObject{
+			cluster:     cluster,
 			gvr:         schema.GroupVersionResource{Version: "v1", Resource: "namespaces"},
 			name:        i.plan.Namespace,
 			isNamespace: true,
@@ -511,7 +638,8 @@ func established(crd *apiextensionsv1.CustomResourceDefinition) bool {
 
 // createPermissions writes the control-plane service account, its cluster-scoped
 // role and binding, and the namespaced role and binding of the installation's
-// own namespace (C-04).
+// own namespace (C-04). They live in the cluster the control plane acts on,
+// which is the managed cluster for every form.
 func (i *Installer) createPermissions(ctx context.Context) error {
 	documents, err := Render(i.plan)
 	if err != nil {
@@ -520,7 +648,7 @@ func (i *Installer) createPermissions(ctx context.Context) error {
 	for _, document := range documents {
 		switch document.GVR.Resource {
 		case "serviceaccounts", "clusterroles", "clusterrolebindings", "roles", "rolebindings":
-			if err := i.ensureDocument(ctx, document); err != nil {
+			if err := i.ensureDocument(ctx, i.managed(), document); err != nil {
 				return err
 			}
 		}
@@ -528,16 +656,50 @@ func (i *Installer) createPermissions(ctx context.Context) error {
 	return nil
 }
 
-// createControlPlane writes the control-plane workload and service (C-04).
+// createCredential mints the managed cluster's credential for the control-plane
+// identity and stores it in the control-plane cluster (C-14, C-54).
+func (i *Installer) createCredential(ctx context.Context) error {
+	token, expiresAt, err := ManagedToken(ctx, i.config.Kube, i.plan.Namespace)
+	if err != nil {
+		return err
+	}
+	raw, err := managedKubeconfig(i.plan, token)
+	if err != nil {
+		return err
+	}
+	created, err := i.writeCredential(ctx, raw, expiresAt)
+	if err != nil {
+		return err
+	}
+	if created {
+		i.created = append(i.created, createdObject{
+			cluster:   i.controlPlane(),
+			gvr:       schema.GroupVersionResource{Version: "v1", Resource: "secrets"},
+			namespace: i.plan.Namespace,
+			name:      ManagedCredentialSecret,
+		})
+	}
+	return nil
+}
+
+// createControlPlane writes the control-plane workload and service (C-04). The
+// external form writes them into the control-plane cluster, where the
+// credential to the managed cluster already sits.
 func (i *Installer) createControlPlane(ctx context.Context) error {
-	documents, err := Render(i.plan)
+	cluster := i.managed()
+	render := Render
+	if i.plan.Mode == ModeExternal {
+		cluster = i.controlPlane()
+		render = RenderControlPlane
+	}
+	documents, err := render(i.plan)
 	if err != nil {
 		return err
 	}
 	for _, document := range documents {
 		switch document.GVR.Resource {
 		case "deployments", "services":
-			if err := i.ensureDocument(ctx, document); err != nil {
+			if err := i.ensureDocument(ctx, cluster, document); err != nil {
 				return err
 			}
 		}
@@ -545,14 +707,15 @@ func (i *Installer) createControlPlane(ctx context.Context) error {
 	return nil
 }
 
-// ensureDocument creates one rendered object when it is missing.
-func (i *Installer) ensureDocument(ctx context.Context, document Document) error {
-	created, err := i.ensureDynamic(ctx, document.GVR, document.Object)
+// ensureDocument creates one rendered object in cluster when it is missing.
+func (i *Installer) ensureDocument(ctx context.Context, cluster *Cluster, document Document) error {
+	created, err := i.ensureDynamic(ctx, cluster, document.GVR, document.Object)
 	if err != nil {
 		return err
 	}
 	if created {
 		i.created = append(i.created, createdObject{
+			cluster:   cluster,
 			gvr:       document.GVR,
 			namespace: document.Object.GetNamespace(),
 			name:      document.Object.GetName(),
@@ -561,12 +724,12 @@ func (i *Installer) ensureDocument(ctx context.Context, document Document) error
 	return nil
 }
 
-// ensureDynamic creates one object; an existing object is left as it is, so a
-// repeated installation does not roll back someone else's object.
-func (i *Installer) ensureDynamic(ctx context.Context, gvr schema.GroupVersionResource, object *unstructured.Unstructured) (bool, error) {
-	var writable dynamic.ResourceInterface = i.config.Dynamic.Resource(gvr)
+// ensureDynamic creates one object in cluster; an existing object is left as it
+// is, so a repeated installation does not roll back someone else's object.
+func (i *Installer) ensureDynamic(ctx context.Context, cluster *Cluster, gvr schema.GroupVersionResource, object *unstructured.Unstructured) (bool, error) {
+	var writable dynamic.ResourceInterface = cluster.Dynamic.Resource(gvr)
 	if namespace := object.GetNamespace(); namespace != "" {
-		writable = i.config.Dynamic.Resource(gvr).Namespace(namespace)
+		writable = cluster.Dynamic.Resource(gvr).Namespace(namespace)
 	}
 	_, err := writable.Create(ctx, object, metav1.CreateOptions{FieldManager: "kos-installer"})
 	if apierrors.IsAlreadyExists(err) {
@@ -579,8 +742,18 @@ func (i *Installer) ensureDynamic(ctx context.Context, gvr schema.GroupVersionRe
 }
 
 // createFirstOwner creates the first Owner and keeps its one-time password for
-// the run's output (C-54, C-63).
+// the run's output (C-54, C-63). The external form hands out no password: it
+// prepares the account here and opens the claim window once the installation is
+// complete (C-68), which run does after the install window passed.
 func (i *Installer) createFirstOwner(ctx context.Context) error {
+	if i.plan.Mode == ModeExternal {
+		bootstrap, err := i.config.ExternalAccounts.PrepareFirstOwner(ctx, i.plan.Owner)
+		if err != nil {
+			return fmt.Errorf("prepare the first Owner: %w", err)
+		}
+		i.owner = bootstrap.Username
+		return nil
+	}
 	bootstrap, err := i.config.Accounts.BootstrapOwner(ctx, i.plan.Owner)
 	if err != nil {
 		return fmt.Errorf("create the first Owner: %w", err)
@@ -658,22 +831,23 @@ func (i *Installer) rollback(ctx context.Context) error {
 
 // remove deletes one created object and waits until it is gone.
 func (i *Installer) remove(ctx context.Context, created createdObject) error {
+	cluster := i.clusterOf(created)
 	switch {
 	case created.definition:
-		err := i.config.APIExtensions.ApiextensionsV1().CustomResourceDefinitions().Delete(ctx, created.name, metav1.DeleteOptions{})
+		err := cluster.APIExtensions.ApiextensionsV1().CustomResourceDefinitions().Delete(ctx, created.name, metav1.DeleteOptions{})
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete object definition %s: %w", created.name, err)
 		}
 		return i.waitGone(ctx, created, func(ctx context.Context) error {
-			_, err := i.config.APIExtensions.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, created.name, metav1.GetOptions{})
+			_, err := cluster.APIExtensions.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, created.name, metav1.GetOptions{})
 			return err
 		})
 	case created.isNamespace:
-		return i.deleteNamespace(ctx, created.name)
+		return i.deleteNamespace(ctx, cluster, created.name)
 	default:
-		var writable dynamic.ResourceInterface = i.config.Dynamic.Resource(created.gvr)
+		var writable dynamic.ResourceInterface = cluster.Dynamic.Resource(created.gvr)
 		if created.namespace != "" {
-			writable = i.config.Dynamic.Resource(created.gvr).Namespace(created.namespace)
+			writable = cluster.Dynamic.Resource(created.gvr).Namespace(created.namespace)
 		}
 		err := writable.Delete(ctx, created.name, metav1.DeleteOptions{})
 		if err != nil && !apierrors.IsNotFound(err) {
@@ -689,8 +863,8 @@ func (i *Installer) remove(ctx context.Context, created createdObject) error {
 // deleteNamespace removes the installation's own namespace. The namespace
 // controller that would clear its finalizer does not run in every cluster, so
 // the installer finalizes the namespace it created itself.
-func (i *Installer) deleteNamespace(ctx context.Context, name string) error {
-	client := i.config.Kube.CoreV1().Namespaces()
+func (i *Installer) deleteNamespace(ctx context.Context, cluster *Cluster, name string) error {
+	client := cluster.Kube.CoreV1().Namespaces()
 	if err := client.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete namespace %s: %w", name, err)
 	}

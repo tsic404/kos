@@ -29,10 +29,22 @@ const (
 	// SingleNodeNotice is the availability an installation promises on one
 	// node: no high availability and no automatic migration (C-54, F13).
 	SingleNodeNotice = "单节点安装是退化形态：控制面为单副本，节点故障后工作负载不会自动迁移，不承诺高可用。"
+	// ManagedCredentialSecret is the secret the external form writes into the
+	// control-plane cluster: the credential to the managed cluster (C-14 keeps
+	// credentials on the control-plane side).
+	ManagedCredentialSecret = "kos-managed-cluster"
+	// ManagedCredentialKey is the key inside that secret holding the kubeconfig.
+	ManagedCredentialKey = "kubeconfig"
+	// ManagedCredentialExpiryKey is the key holding when the token stops
+	// authenticating, so a control plane degrades with a readable reason before
+	// it loses the managed cluster (C-14).
+	ManagedCredentialExpiryKey = "expiration"
+	// DefaultAddress is where an external-form control plane answers on its own
+	// host; the first-Owner claim is served from there (C-68).
+	DefaultAddress = "http://127.0.0.1:8080"
 )
 
-// Mode is an installation form (C-54). The external-control-plane form is
-// pending ADR-023 and is refused rather than guessed.
+// Mode is an installation form (C-54).
 type Mode string
 
 const (
@@ -40,9 +52,20 @@ const (
 	ModeExisting Mode = "existing-cluster"
 	// ModeBootstrap brings the run kernel up on bare hosts first.
 	ModeBootstrap Mode = "bootstrap"
-	// ModeExternal is the external-control-plane form, pending ADR-023.
+	// ModeExternal runs the control plane outside the cluster it reconciles:
+	// the managed cluster keeps the object definitions and the identity the
+	// control plane acts as, and the control-plane cluster keeps the workload.
 	ModeExternal Mode = "external-control-plane"
 )
+
+// ManagedEndpoint is the managed cluster as a control plane elsewhere reaches
+// it (C-54 external form).
+type ManagedEndpoint struct {
+	// Server is the managed cluster's API server address.
+	Server string
+	// Authority is the PEM bundle a client verifies that server with.
+	Authority []byte
+}
 
 // Plan is one installation. It is data: rendering and the install run both
 // read it and neither mutates it.
@@ -63,14 +86,19 @@ type Plan struct {
 	Applications []string
 	// Image is the control-plane image; empty selects DefaultImage.
 	Image string
+	// Managed is how the control plane reaches the managed cluster; the
+	// external form requires it and the other forms leave it empty.
+	Managed ManagedEndpoint
+	// Address is where the control plane answers on its own host; empty selects
+	// DefaultAddress. The external form prints it with the claim instruction
+	// (C-68).
+	Address string
 }
 
 // Normalize fills the defaults and refuses a plan the install cannot honour.
 func (p Plan) Normalize() (Plan, error) {
 	switch p.Mode {
-	case ModeExisting, ModeBootstrap:
-	case ModeExternal:
-		return Plan{}, fmt.Errorf("the external-control-plane form is pending ADR-023")
+	case ModeExisting, ModeBootstrap, ModeExternal:
 	default:
 		return Plan{}, fmt.Errorf("install mode %q is not an installation form", p.Mode)
 	}
@@ -88,6 +116,17 @@ func (p Plan) Normalize() (Plan, error) {
 	}
 	if p.Mode == ModeExisting && p.Nodes != 0 {
 		return Plan{}, fmt.Errorf("the existing-cluster form declares no nodes, got %d", p.Nodes)
+	}
+	if p.Mode == ModeExternal {
+		if p.Nodes != 0 {
+			return Plan{}, fmt.Errorf("the external-control-plane form declares no nodes, got %d", p.Nodes)
+		}
+		if strings.TrimSpace(p.Managed.Server) == "" {
+			return Plan{}, fmt.Errorf("the external-control-plane form needs the managed cluster's address")
+		}
+		if p.Address == "" {
+			p.Address = DefaultAddress
+		}
 	}
 	if p.Image == "" {
 		p.Image = DefaultImage

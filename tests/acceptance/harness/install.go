@@ -85,3 +85,24 @@ func BootstrapPlan(nodes int, overrides func(*install.Plan)) install.Plan {
 	}
 	return plan
 }
+
+// Endpoint is this cluster as a control plane in another cluster reaches it
+// (C-54 external form).
+func (c *Cluster) Endpoint() install.ManagedEndpoint {
+	return install.ManagedEndpoint{Server: c.Config.Host, Authority: c.Config.CAData}
+}
+
+// ExternalPlan is an external-control-plane plan that reconciles this cluster
+// while the control plane runs in another one (C-54).
+func (c *Cluster) ExternalPlan(overrides func(*install.Plan)) install.Plan {
+	plan := install.Plan{
+		Mode:         install.ModeExternal,
+		Owner:        "owner",
+		Applications: []string{Namespace},
+		Managed:      c.Endpoint(),
+	}
+	if overrides != nil {
+		overrides(&plan)
+	}
+	return plan
+}

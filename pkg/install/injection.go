@@ -22,6 +22,9 @@ const (
 	StepDefinitions = "definitions"
 	// StepPermissions writes the service accounts and cluster-scoped permissions.
 	StepPermissions = "permissions"
+	// StepCredential mints the managed cluster's credential and stores it in the
+	// control-plane cluster (external form only).
+	StepCredential = "credential"
 	// StepControlPlane writes the control-plane workload and service.
 	StepControlPlane = "control-plane"
 	// StepReady waits for the control plane to answer.
@@ -34,7 +37,7 @@ const (
 func Steps() []string {
 	return []string{
 		StepProvision, StepNodes, StepPreflight, StepNamespace, StepDefinitions,
-		StepPermissions, StepControlPlane, StepReady, StepFirstOwner,
+		StepPermissions, StepCredential, StepControlPlane, StepReady, StepFirstOwner,
 	}
 }
 

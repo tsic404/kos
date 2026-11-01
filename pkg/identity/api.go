@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -28,6 +29,11 @@ const (
 	passwordPath = "/api/v1/auth/password"
 )
 
+// BootstrapOwnerPath delivers the first Owner's one-time password for the
+// external control plane (C-68). It is the only other route that needs no
+// session.
+const BootstrapOwnerPath = "/api/v1/bootstrap/owner"
+
 // API serves accounts and sessions and gates the rest of the control plane
 // behind a session (C-63, C-68).
 type API struct {
@@ -40,13 +46,15 @@ func NewAPI(service *Service) *API {
 }
 
 // Handler mounts the identity routes and falls through to next for everything
-// else. Every route except login requires a session (C-63).
+// else. Every route except login and the first Owner's claim requires a session
+// (C-63, C-68).
 func (a *API) Handler(next http.Handler) http.Handler {
 	if next == nil {
 		next = http.NotFoundHandler()
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+loginPath, a.login)
+	mux.HandleFunc("POST "+BootstrapOwnerPath, a.claimFirstOwner)
 	mux.HandleFunc("POST "+logoutPath, a.logout)
 	mux.HandleFunc("GET "+sessionPath, a.session)
 	mux.HandleFunc("PUT "+passwordPath, a.changePassword)
@@ -64,7 +72,7 @@ func (a *API) Handler(next http.Handler) http.Handler {
 // and refuses requests the session cannot make.
 func (a *API) protect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.URL.Path == loginPath {
+		if r.Method == http.MethodPost && (r.URL.Path == loginPath || r.URL.Path == BootstrapOwnerPath) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -106,6 +114,58 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, loginResponse{Token: login.Token, sessionResponse: sessionOf(login.Session)})
+}
+
+// claimFirstOwner delivers the first Owner's one-time password once, inside the
+// window the installation opened (C-68). Only a request from the control
+// plane's own host is served; the transport address decides, because a header
+// is caller-supplied. The write replaces the first Owner's password and ends its
+// sessions, so every attempt reaches the audit trail (C-14).
+func (a *API) claimFirstOwner(w http.ResponseWriter, r *http.Request) {
+	actor := Operator(r.Context())
+	if actor == "" {
+		// The claim route carries no session, so the trail names the control
+		// plane acting on its own, the way every other session-less write does
+		// (C-14).
+		actor = string(write.SubjectAPIProcess)
+	}
+	if !fromLoopback(r) {
+		a.recordClaim(r.Context(), actor, a.service.FirstOwnerName(r.Context()), controlplane.ResultRejected)
+		controlplane.WriteError(w, failureFor(fmt.Errorf("%w: the claim must come from the control-plane host", ErrPermissionDenied)))
+		return
+	}
+	bootstrap, err := a.service.ClaimFirstOwner(r.Context())
+	if err != nil {
+		a.recordClaim(r.Context(), actor, a.service.FirstOwnerName(r.Context()), controlplane.ResultRejected)
+		controlplane.WriteError(w, failureFor(err))
+		return
+	}
+	a.recordClaim(r.Context(), actor, bootstrap.Username, controlplane.ResultAccepted)
+	writeJSON(w, http.StatusOK, bootstrapResponse{
+		Username:        bootstrap.Username,
+		OneTimePassword: bootstrap.OneTimePassword,
+	})
+}
+
+// recordClaim appends one claim attempt (C-14). A database that holds no first
+// Owner names no account, and the trail records no account rather than one with
+// an empty name: every record names exactly one write.
+func (a *API) recordClaim(ctx context.Context, actor, username, result string) {
+	if username == "" {
+		return
+	}
+	a.service.RecordAudit(ctx, actor, username, "update", result)
+}
+
+// fromLoopback reports whether the request arrived from the control plane's own
+// host (C-68).
+func fromLoopback(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	address := net.ParseIP(host)
+	return address != nil && address.IsLoopback()
 }
 
 // logout revokes the session that makes the request.
@@ -380,6 +440,15 @@ type sessionResponse struct {
 	AbsoluteRemainingSeconds int64 `json:"absoluteRemainingSeconds"`
 }
 
+// bootstrapResponse is the single delivery of the first Owner's password
+// (C-68): it appears once, and a second claim returns none.
+type bootstrapResponse struct {
+	// Username is the first Owner's login name.
+	Username string `json:"username"`
+	// OneTimePassword is the password the first login must replace.
+	OneTimePassword string `json:"oneTimePassword"`
+}
+
 // loginResponse adds the bearer token to the session.
 type loginResponse struct {
 	// Token is the bearer token; the caller sends it as "Bearer <token>".
@@ -535,6 +604,14 @@ func failureFor(err error) *controlplane.Error {
 		return &controlplane.Error{
 			Code:               controlplane.CodePermissionDenied,
 			Message:            "当前身份没有这个权限",
+			Stage:              controlplane.StageAuthorize,
+			RequiresUserAction: true,
+			SideEffects:        controlplane.SideEffectsNone,
+		}
+	case errors.Is(err, ErrBootstrapClosed):
+		return &controlplane.Error{
+			Code:               controlplane.CodeBootstrapClosed,
+			Message:            "首个 Owner 的领取窗口未开启、已领取或已过期",
 			Stage:              controlplane.StageAuthorize,
 			RequiresUserAction: true,
 			SideEffects:        controlplane.SideEffectsNone,

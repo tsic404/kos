@@ -36,6 +36,10 @@ var (
 	// ErrPreferenceDomain means no active extension declares the preference
 	// domain a request names (C-27).
 	ErrPreferenceDomain = errors.New("identity: no active extension declares this preference domain")
+	// ErrBootstrapClosed means the first-Owner claim window is not open: it was
+	// never opened, it already delivered its password, or its deadline passed
+	// (C-68).
+	ErrBootstrapClosed = errors.New("identity: the first-Owner claim window is closed")
 )
 
 // ValidationError rejects an input the service cannot accept. The message is

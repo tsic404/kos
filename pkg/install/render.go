@@ -1,6 +1,7 @@
 package install
 
 import (
+	"fmt"
 	"sort"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -20,10 +21,15 @@ type Document struct {
 	Object *unstructured.Unstructured
 }
 
-// Render turns a plan into the control-plane manifests an installation writes
-// (C-54). Object definitions are not rendered here: the release ships them as
-// generated CRD manifests and install applies those unchanged, so the
-// definitions cannot drift from the API types they describe.
+// Render turns a plan into the manifests an installation writes into the
+// cluster it reconciles (C-54). Object definitions are not rendered here: the
+// release ships them as generated CRD manifests and install applies those
+// unchanged, so the definitions cannot drift from the API types they describe.
+//
+// The external form renders only what the managed cluster keeps: its namespace,
+// the identity the control plane acts as and that identity's permissions. The
+// workload, its service and the credential to this cluster live on the
+// control-plane side (RenderControlPlane).
 func Render(plan Plan) ([]Document, error) {
 	plan, err := plan.Normalize()
 	if err != nil {
@@ -62,17 +68,48 @@ func Render(plan Plan) ([]Document, error) {
 			Object: namespaceRoleBinding(plan, namespace, labels),
 		})
 	}
-	documents = append(documents,
-		Document{
+	if plan.Mode != ModeExternal {
+		documents = append(documents, controlPlaneDocuments(plan, labels)...)
+	}
+	documents = sortedDocuments(documents)
+	return documents, nil
+}
+
+// RenderControlPlane turns an external-form plan into the manifests the
+// control-plane cluster holds (C-54): its own namespace, the workload and the
+// service. The credential to the managed cluster is written by the install run,
+// because only the run can mint it.
+func RenderControlPlane(plan Plan) ([]Document, error) {
+	plan, err := plan.Normalize()
+	if err != nil {
+		return nil, err
+	}
+	if plan.Mode != ModeExternal {
+		return nil, fmt.Errorf("install form %q keeps its control plane in the cluster it reconciles", plan.Mode)
+	}
+	labels := map[string]any{markers.ManagedBy: write.ManagedByValue}
+	documents := append([]Document{{
+		GVR: schema.GroupVersionResource{Version: "v1", Resource: "namespaces"},
+		Object: object("v1", "Namespace", plan.Namespace, "", map[string]any{
+			"metadata": map[string]any{"labels": labels},
+		}),
+	}}, controlPlaneDocuments(plan, labels)...)
+	return sortedDocuments(documents), nil
+}
+
+// controlPlaneDocuments renders the workload and the service that serves the
+// API, wherever the plan puts them.
+func controlPlaneDocuments(plan Plan, labels map[string]any) []Document {
+	return []Document{
+		{
 			GVR:    schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"},
 			Object: controlPlaneDeployment(plan, labels),
 		},
-		Document{
+		{
 			GVR:    schema.GroupVersionResource{Version: "v1", Resource: "services"},
 			Object: controlPlaneService(plan, labels),
-		})
-	documents = sortedDocuments(documents)
-	return documents, nil
+		},
+	}
 }
 
 // grantNamespaces lists the namespaces the installation may write namespaced
@@ -183,6 +220,7 @@ func namespaceRole(plan Plan, namespace string, labels map[string]any) *unstruct
 			rule([]string{"batch"}, []string{"jobs", "cronjobs"}, []string{"get", "list", "watch", "create", "update", "patch", "delete"}),
 			rule([]string{"networking.k8s.io"}, []string{"ingresses"}, []string{"get", "list", "watch", "create", "update", "patch", "delete"}),
 			rule([]string{"policy"}, []string{"poddisruptionbudgets"}, []string{"get", "list", "watch"}),
+			rule([]string{""}, []string{"limitranges"}, []string{"get", "list", "watch"}),
 			rule([]string{"rbac.authorization.k8s.io"}, []string{"roles", "rolebindings"}, []string{"get", "list", "watch"}),
 		},
 	})
@@ -237,9 +275,35 @@ func clusterRoleBinding(plan Plan, labels map[string]any) *unstructured.Unstruct
 }
 
 // controlPlaneDeployment renders the single control-plane replica. C-54 and
-// F13 permit no second replica, so the count is not a plan value.
+// F13 permit no second replica, so the count is not a plan value. The external
+// form mounts the credential to the managed cluster: the secret is written by
+// the install run and never leaves the control-plane cluster (C-14).
 func controlPlaneDeployment(plan Plan, labels map[string]any) *unstructured.Unstructured {
 	selector := map[string]any{"app": ControlPlaneName}
+	container := map[string]any{
+		"name":  ControlPlaneName,
+		"image": plan.Image,
+		"ports": []any{map[string]any{"containerPort": int64(8080)}},
+	}
+	podSpec := map[string]any{
+		"serviceAccountName": ControlPlaneServiceAccount,
+		"containers":         []any{container},
+	}
+	if plan.Mode == ModeExternal {
+		container["volumeMounts"] = []any{map[string]any{
+			"name":      "managed-credential",
+			"mountPath": "/etc/kos/managed",
+			"readOnly":  true,
+		}}
+		container["env"] = []any{map[string]any{
+			"name":  "KUBECONFIG",
+			"value": "/etc/kos/managed/" + ManagedCredentialKey,
+		}}
+		podSpec["volumes"] = []any{map[string]any{
+			"name":   "managed-credential",
+			"secret": map[string]any{"secretName": ManagedCredentialSecret},
+		}}
+	}
 	return object("apps/v1", "Deployment", ControlPlaneName, plan.Namespace, map[string]any{
 		"metadata": map[string]any{"labels": labels},
 		"spec": map[string]any{
@@ -248,14 +312,7 @@ func controlPlaneDeployment(plan Plan, labels map[string]any) *unstructured.Unst
 			"strategy": map[string]any{"type": "Recreate"},
 			"template": map[string]any{
 				"metadata": map[string]any{"labels": selector},
-				"spec": map[string]any{
-					"serviceAccountName": ControlPlaneServiceAccount,
-					"containers": []any{map[string]any{
-						"name":  ControlPlaneName,
-						"image": plan.Image,
-						"ports": []any{map[string]any{"containerPort": int64(8080)}},
-					}},
-				},
+				"spec":     podSpec,
 			},
 		},
 	})
