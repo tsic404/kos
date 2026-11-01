@@ -784,12 +784,42 @@ func (s *Store) AppendAudit(ctx context.Context, entry AuditEntry) error {
 
 // AuditEntries reads audit records oldest first, at most limit of them.
 func (s *Store) AuditEntries(ctx context.Context, limit int) ([]AuditEntry, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT actor, object, verb, result, source, extension, occurred_at
-		FROM audit ORDER BY id LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, auditColumns+` ORDER BY id LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("identity: read audit: %w", err)
 	}
 	defer rows.Close()
+	return scanAuditEntries(rows, limit)
+}
+
+// RecentAuditEntriesForObject reads the newest audit records that name one
+// object and carry one of the given verbs, newest first, at most limit of them.
+// The window is over that object's own records, so writes to other objects
+// cannot push the record a reader needs out of reach (C-14, C-65).
+func (s *Store) RecentAuditEntriesForObject(ctx context.Context, object string, verbs []string, limit int) ([]AuditEntry, error) {
+	if len(verbs) == 0 || limit <= 0 {
+		return []AuditEntry{}, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(verbs)), ",")
+	arguments := make([]any, 0, len(verbs)+2)
+	arguments = append(arguments, object)
+	for _, verb := range verbs {
+		arguments = append(arguments, verb)
+	}
+	arguments = append(arguments, limit)
+	rows, err := s.db.QueryContext(ctx, auditColumns+` WHERE object = ? AND verb IN (`+placeholders+`) ORDER BY id DESC LIMIT ?`, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("identity: read audit: %w", err)
+	}
+	defer rows.Close()
+	return scanAuditEntries(rows, limit)
+}
+
+// auditColumns is the column order scanAuditEntry expects.
+const auditColumns = `SELECT actor, object, verb, result, source, extension, occurred_at FROM audit`
+
+// scanAuditEntries reads one audit result set in the order its query returned.
+func scanAuditEntries(rows *sql.Rows, limit int) ([]AuditEntry, error) {
 	entries := make([]AuditEntry, 0, limit)
 	for rows.Next() {
 		var (

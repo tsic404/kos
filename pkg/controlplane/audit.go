@@ -24,6 +24,17 @@ const (
 // SourceAPI names the control-plane API as where a write came from.
 const SourceAPI = "api"
 
+// Verbs of a node maintenance write (C-65): the write that takes a node out of
+// scheduling and the write that restores it. The maintenance flow and the
+// settings projection that judges a node's origin share this pair, so the two
+// sides cannot drift apart.
+const (
+	// VerbMaintain marks the write that cordons a node.
+	VerbMaintain = "maintain"
+	// VerbRestore marks the write that lifts the cordon.
+	VerbRestore = "restore"
+)
+
 // Actor names the principal behind one request (C-14). The control plane
 // carries no session itself: the surface that mounts it resolves the session
 // and puts it on the request context, and this hook reads it. An empty name
