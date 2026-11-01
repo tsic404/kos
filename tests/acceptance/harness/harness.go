@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	"github.com/tsic404/kos/api"
@@ -47,16 +48,58 @@ type Cluster struct {
 	APIExtensions apiextensionsclientset.Interface
 	// Plurals maps a kind to the resource name the API server serves.
 	Plurals map[string]string
+	// Config is the admin rest configuration the API server handed out.
+	Config *rest.Config
+	// AuditLogPath is where the API server writes its audit log; empty when
+	// the cluster was started without audit.
+	AuditLogPath string
 }
+
+// auditPolicy records object references and requesters: the install invariant
+// reads who wrote which object, never the object bodies (C-15).
+const auditPolicy = `apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages:
+  - RequestReceived
+rules:
+  - level: Metadata
+`
 
 // Start boots etcd and kube-apiserver, installs the generated CRDs and returns
 // clients pointed at the server. KUBEBUILDER_ASSETS must name the envtest
 // binaries; `make test` downloads and exports them.
 func Start(t *testing.T) *Cluster {
 	t.Helper()
+	return start(t, false)
+}
+
+// StartAudited is Start with the API server audit log enabled, which the
+// install invariant needs as its measurement condition (C-15).
+func StartAudited(t *testing.T) *Cluster {
+	t.Helper()
+	return start(t, true)
+}
+
+// start boots the control plane, optionally with audit logging.
+func start(t *testing.T, audited bool) *Cluster {
+	t.Helper()
 	environment := &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join(RepoRoot(t), "config", "crd")},
 		ErrorIfCRDPathMissing: true,
+	}
+	auditLogPath := ""
+	if audited {
+		directory := t.TempDir()
+		policyPath := filepath.Join(directory, "audit-policy.yaml")
+		if err := os.WriteFile(policyPath, []byte(auditPolicy), 0o600); err != nil {
+			t.Fatalf("write audit policy: %v", err)
+		}
+		auditLogPath = filepath.Join(directory, "audit.log")
+		apiServer := environment.ControlPlane.GetAPIServer()
+		apiServer.Configure().Set("audit-policy-file", policyPath)
+		apiServer.Configure().Set("audit-log-path", auditLogPath)
+		apiServer.Configure().Set("audit-log-format", "json")
+		apiServer.Configure().Set("audit-log-mode", "blocking")
 	}
 	config, err := environment.Start()
 	if err != nil {
@@ -85,6 +128,8 @@ func Start(t *testing.T) *Cluster {
 		Dynamic:       dynamicClient,
 		Kube:          kubeClient,
 		APIExtensions: extensionsClient,
+		Config:        config,
+		AuditLogPath:  auditLogPath,
 	}
 	cluster.Plurals = cluster.discoverPlurals(t)
 	return cluster
@@ -512,6 +557,19 @@ func (c *Cluster) EnsureNamespace(t *testing.T, name string) {
 // installs them when the component is provisioned.
 func (c *Cluster) InstallCRD(t *testing.T, group, version, kind, plural string, namespaced bool) {
 	t.Helper()
+	c.installCRD(t, c.APIExtensions, group, version, kind, plural, namespaced)
+}
+
+// InstallCRDAs installs one extension object class definition as username, so
+// the install window sees the definition written by a KOS subject (C-15).
+func (c *Cluster) InstallCRDAs(t *testing.T, username, group, version, kind, plural string, namespaced bool) {
+	t.Helper()
+	c.installCRD(t, c.ExtensionsAs(t, username), group, version, kind, plural, namespaced)
+}
+
+// installCRD writes one definition and waits until it is served.
+func (c *Cluster) installCRD(t *testing.T, client apiextensionsclientset.Interface, group, version, kind, plural string, namespaced bool) {
+	t.Helper()
 	scope := apiextensionsv1.ClusterScoped
 	if namespaced {
 		scope = apiextensionsv1.NamespaceScoped
@@ -543,11 +601,11 @@ func (c *Cluster) InstallCRD(t *testing.T, group, version, kind, plural string, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
 	defer cancel()
-	if _, err := c.APIExtensions.ApiextensionsV1().CustomResourceDefinitions().Create(ctx, crd, metav1.CreateOptions{}); err != nil {
+	if _, err := client.ApiextensionsV1().CustomResourceDefinitions().Create(ctx, crd, metav1.CreateOptions{}); err != nil {
 		t.Fatalf("install CRD %s: %v", crd.Name, err)
 	}
 	Eventually(t, 15*time.Second, "CRD "+crd.Name+" to be established", func() bool {
-		stored, err := c.APIExtensions.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, crd.Name, metav1.GetOptions{})
+		stored, err := client.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, crd.Name, metav1.GetOptions{})
 		if err != nil {
 			return false
 		}

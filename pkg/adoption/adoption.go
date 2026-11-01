@@ -38,6 +38,14 @@ const (
 	namePrefix    = "adoption-snapshot-"
 )
 
+// RecordLabel and RecordValue identify the snapshot records on a ConfigMap, so
+// the uninstall leftover list can find them without knowing the key by hand
+// (C-02, C-54).
+const (
+	RecordLabel = recordKey
+	RecordValue = recordValue
+)
+
 // Snapshot is the pre-adoption record of one object. It is written once and
 // never modified.
 type Snapshot struct {
