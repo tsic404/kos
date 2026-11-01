@@ -206,6 +206,9 @@ type Options struct {
 	// reconciler, so the two timelines cannot diverge; zero selects
 	// nodehealth.DefaultGrace.
 	NodeGrace time.Duration
+	// Nodes reports whether the run kernel took a node out of scheduling; nil
+	// reads the Node objects through the store.
+	Nodes NodeSource
 	// Clock supplies the round time; defaults to time.Now.
 	Clock func() time.Time
 }
@@ -218,12 +221,21 @@ type Controller struct {
 	volumes      VolumeSource
 	providers    ProviderSource
 	nodeGrace    time.Duration
+	nodes        NodeSource
 	clock        func() time.Time
 }
 
 // NewController builds a controller over one store.
 func NewController(store Store, options Options) *Controller {
-	controller := &Controller{store: store, capabilities: options.Capabilities, volumes: options.Volumes, providers: options.Providers, nodeGrace: options.NodeGrace, clock: options.Clock}
+	controller := &Controller{
+		store:        store,
+		capabilities: options.Capabilities,
+		volumes:      options.Volumes,
+		providers:    options.Providers,
+		nodeGrace:    options.NodeGrace,
+		nodes:        options.Nodes,
+		clock:        options.Clock,
+	}
 	if controller.capabilities == nil {
 		controller.capabilities = StaticCapabilities(nil)
 	}
@@ -232,6 +244,9 @@ func NewController(store Store, options Options) *Controller {
 	}
 	if controller.providers == nil {
 		controller.providers = storeProviders{store: store}
+	}
+	if controller.nodes == nil {
+		controller.nodes = storeNodes{store: store}
 	}
 	if controller.clock == nil {
 		controller.clock = time.Now
@@ -346,6 +361,15 @@ func (c *Controller) install(ctx context.Context, application *v1beta1.Applicati
 	}
 	if message := c.storageFailure(ctx, application); message != "" {
 		return c.fail(ctx, application, ConditionStorageFull, message)
+	}
+
+	// A node the run kernel took out of scheduling stops the workloads whose
+	// data sits on it, before a migration gets the same chance: the data cannot
+	// move off a node that takes no workload (C-65).
+	if node, err := c.maintenanceNode(ctx, application); err != nil {
+		return reconcile.Result{}, err
+	} else if node != "" {
+		return c.stopForMaintenance(ctx, application, node, comparison, now)
 	}
 
 	// A migration moving one of the volumes the application mounts stops its
@@ -891,7 +915,8 @@ func sameStatus(left, right v1beta1.ApplicationStatus) bool {
 // the retry count and schedule, and the rendered objects an uninstall later
 // deletes. Only a user retry or a completed install resets the budget (C-33).
 // The quiesce condition is dropped here, so a round that finds no migration
-// running clears the stop it recorded before (C-40).
+// running and no node in maintenance clears the stop it recorded before (C-40,
+// C-65).
 func baseStatus(application *v1beta1.Application) v1beta1.ApplicationStatus {
 	conditions := append([]metav1.Condition(nil), application.Status.Conditions...)
 	meta.RemoveStatusCondition(&conditions, ConditionQuiesced)

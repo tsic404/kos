@@ -204,7 +204,7 @@ func (s *Service) List(session identity.Session) []Summary {
 			continue
 		}
 		seen[page.ID] = true
-		summary := summaryOf(page)
+		summary := summaryOf(page, session.Role)
 		summary.Banner = s.banner()
 		summaries = append(summaries, summary)
 	}
@@ -233,9 +233,9 @@ func (s *Service) Read(ctx context.Context, session identity.Session, id string)
 	}
 	entries := map[string]Entry{}
 	if !page.ReadOnly {
-		rendered.Actions = actionsOf(page.Actions)
-		for _, action := range page.Actions {
-			entries[action.ID] = Entry{Method: action.Method, Path: action.Path}
+		rendered.Actions = actionsOf(page.Actions, session.Role)
+		for _, action := range rendered.Actions {
+			entries[action.ID] = action.Entry
 		}
 	}
 	now := s.now()
@@ -315,7 +315,7 @@ func (emptyDeclarations) PageFor(string, write.Role) (extension.Page, bool) {
 }
 
 // summaryOf describes one declared page without resolving item values.
-func summaryOf(page extension.Page) Summary {
+func summaryOf(page extension.Page, role write.Role) Summary {
 	summary := Summary{
 		ID:             page.ID,
 		Title:          page.Title,
@@ -336,15 +336,21 @@ func summaryOf(page extension.Page) Summary {
 		})
 	}
 	if !page.ReadOnly {
-		summary.Actions = actionsOf(page.Actions)
+		summary.Actions = actionsOf(page.Actions, role)
 	}
 	return summary
 }
 
-// actionsOf renders the control-plane write entry of every action.
-func actionsOf(declared []extension.Action) []Action {
+// actionsOf renders the control-plane write entry of every action the session
+// role may submit (C-22, C-59). An action narrowed to one role does not appear
+// for the others, so an entry a role cannot use is indistinguishable from one
+// that does not exist.
+func actionsOf(declared []extension.Action, role write.Role) []Action {
 	actions := make([]Action, 0, len(declared))
 	for _, action := range declared {
+		if !action.Allows(role) {
+			continue
+		}
 		actions = append(actions, Action{
 			ID:    action.ID,
 			Entry: Entry{Method: action.Method, Path: action.Path},

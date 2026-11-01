@@ -793,26 +793,39 @@ func (s *Store) AuditEntries(ctx context.Context, limit int) ([]AuditEntry, erro
 }
 
 // RecentAuditEntriesForObject reads the newest audit records that name one
-// object and carry one of the given verbs, newest first, at most limit of them.
-// The window is over that object's own records, so writes to other objects
-// cannot push the record a reader needs out of reach (C-14, C-65).
-func (s *Store) RecentAuditEntriesForObject(ctx context.Context, object string, verbs []string, limit int) ([]AuditEntry, error) {
+// object, carry one of the given verbs and one of the given results, newest
+// first, at most limit of them. An empty result set matches every outcome. The
+// window is over that object's own records, so writes to other objects cannot
+// push the record a reader needs out of reach (C-14, C-65).
+func (s *Store) RecentAuditEntriesForObject(ctx context.Context, object string, verbs, results []string, limit int) ([]AuditEntry, error) {
 	if len(verbs) == 0 || limit <= 0 {
 		return []AuditEntry{}, nil
 	}
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(verbs)), ",")
-	arguments := make([]any, 0, len(verbs)+2)
+	query := auditColumns + ` WHERE object = ? AND verb IN (` + placeholdersFor(verbs) + `)`
+	arguments := make([]any, 0, len(verbs)+len(results)+2)
 	arguments = append(arguments, object)
 	for _, verb := range verbs {
 		arguments = append(arguments, verb)
 	}
+	if len(results) > 0 {
+		query += ` AND result IN (` + placeholdersFor(results) + `)`
+		for _, result := range results {
+			arguments = append(arguments, result)
+		}
+	}
+	query += ` ORDER BY id DESC LIMIT ?`
 	arguments = append(arguments, limit)
-	rows, err := s.db.QueryContext(ctx, auditColumns+` WHERE object = ? AND verb IN (`+placeholders+`) ORDER BY id DESC LIMIT ?`, arguments...)
+	rows, err := s.db.QueryContext(ctx, query, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("identity: read audit: %w", err)
 	}
 	defer rows.Close()
 	return scanAuditEntries(rows, limit)
+}
+
+// placeholdersFor renders one IN list of n bound values.
+func placeholdersFor(values []string) string {
+	return strings.TrimSuffix(strings.Repeat("?,", len(values)), ",")
 }
 
 // auditColumns is the column order scanAuditEntry expects.

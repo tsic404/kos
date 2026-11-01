@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	"github.com/tsic404/kos/pkg/extension"
+	"github.com/tsic404/kos/pkg/write"
 )
 
 // Identifier is the product's extension identity across versions (C-17).
@@ -55,10 +56,13 @@ const (
 
 // Action identities of the settings page. A node-scoped write needs the node it
 // applies to, so its path carries the "{node}" placeholder the browser fills
-// with the node chosen in the panel.
+// with the node chosen in the panel. A maintenance start also needs the declared
+// downtime estimate, which is what makes the preflight judgeable (C-55, C-65).
 const (
 	ActionSetMaintenanceWindow = "set-cluster-maintenance-window"
 	ActionSetReservedResources = "set-node-reserved-resources"
+	ActionStartMaintenance     = "start-node-maintenance"
+	ActionRestoreMaintenance   = "restore-node-maintenance"
 )
 
 // ObservedReason is the reason a fact item carries: the product reads it from
@@ -127,6 +131,10 @@ func settingsPage() extension.Page {
 		Actions: []extension.Action{
 			{ID: ActionSetMaintenanceWindow, Method: http.MethodPut, Path: "/api/v1/settings/" + ClusterMaintenanceWindow},
 			{ID: ActionSetReservedResources, Method: http.MethodPut, Path: "/api/v1/settings/" + NodeReservedResources + "?node={node}"},
+			// Node maintenance is the Owner's action alone (C-59, C-65): the
+			// entries appear for that role and for no other.
+			{ID: ActionStartMaintenance, Method: http.MethodPost, Path: "/api/v1/node-maintenance?node={node}&downtime={downtime}", RequiredRole: string(write.RoleOwner)},
+			{ID: ActionRestoreMaintenance, Method: http.MethodDelete, Path: "/api/v1/node-maintenance/{node}", RequiredRole: string(write.RoleOwner)},
 		},
 	}
 }

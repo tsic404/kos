@@ -147,6 +147,9 @@ type Config struct {
 	// Logs reads the log lines of one pod container (C-64); nil leaves the log
 	// route unserved.
 	Logs LogSource
+	// Maintenance drives the node maintenance steps of C-65; nil leaves the
+	// maintenance routes unserved.
+	Maintenance NodeMaintenance
 	// Now supplies the read clock; defaults to time.Now.
 	Now func() time.Time
 	// OperationTimeout bounds one accepted write; defaults to two minutes.
@@ -197,6 +200,7 @@ type Server struct {
 	protection        Protection
 	storageCapacity   StorageCapacity
 	projectionLatency *budget.Latency
+	maintenance       NodeMaintenance
 	now               func() time.Time
 	timeout           time.Duration
 	log               *slog.Logger
@@ -228,6 +232,7 @@ func New(config Config) (*Server, error) {
 		protection:        config.Protection,
 		storageCapacity:   config.StorageCapacity,
 		projectionLatency: config.ProjectionLatency,
+		maintenance:       config.Maintenance,
 		now:               config.Now,
 		timeout:           config.OperationTimeout,
 		log:               config.Log,
@@ -282,6 +287,10 @@ func (s *Server) routes() {
 	// exists and carries only the verdict and its reason, never the internal
 	// measurement values (C-56, C-57).
 	s.mux.HandleFunc("GET /api/v1/system/health", s.handleHealth)
+	s.mux.HandleFunc("POST /api/v1/node-maintenance/preflight", s.handleMaintenancePreflight)
+	s.mux.HandleFunc("POST /api/v1/node-maintenance", s.handleMaintenanceStart)
+	s.mux.HandleFunc("POST /api/v1/node-maintenance/drain", s.handleMaintenanceDrain)
+	s.mux.HandleFunc("DELETE /api/v1/node-maintenance/{name}", s.handleMaintenanceRestore)
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, notFound("没有这个接口"))
 	})

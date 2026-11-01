@@ -201,10 +201,16 @@ type VolumeFacts struct {
 	// Bound reports that the claim is bound, so it has a size and a policy the
 	// upgrade can be judged against (C-38).
 	Bound bool
+	// Mobility is the volume's declared mobility (C-38).
+	Mobility v1beta1.VolumeMobility
+	// Node is the node the volume's data sits on; empty when the volume module
+	// has not bound it (C-38).
+	Node string
 }
 
-// VolumeSource reads the facts a preflight needs about a declared volume. The
-// volume module owns those fields; the application only asks (C-34).
+// VolumeSource reads the facts a preflight and the maintenance check need about
+// a declared volume. The volume module owns those fields; the application only
+// asks (C-34, C-38, C-65).
 type VolumeSource interface {
 	VolumeFacts(ctx context.Context, namespace, name string) (VolumeFacts, error)
 }

@@ -76,22 +76,27 @@ func TestSettingsPageCoversBothDomains(t *testing.T) {
 }
 
 // trailReader answers the per-object maintenance read from one fixed trail,
-// newest first, applying the object, verb and limit bounds the store applies.
+// newest first, applying the object, verb, result and limit bounds the store
+// applies.
 type trailReader struct {
 	entries []identity.AuditEntry
 	err     error
 }
 
 // RecentAuditEntriesForObject implements AuditReader.
-func (t trailReader) RecentAuditEntriesForObject(ctx context.Context, object string, verbs []string, limit int) ([]identity.AuditEntry, error) {
+func (t trailReader) RecentAuditEntriesForObject(ctx context.Context, object string, verbs, results []string, limit int) ([]identity.AuditEntry, error) {
 	if t.err != nil {
 		return nil, t.err
 	}
 	matched := make([]identity.AuditEntry, 0, len(t.entries))
 	for _, entry := range t.entries {
-		if entry.Object == object && slices.Contains(verbs, entry.Verb) {
-			matched = append(matched, entry)
+		if entry.Object != object || !slices.Contains(verbs, entry.Verb) {
+			continue
 		}
+		if len(results) > 0 && !slices.Contains(results, entry.Result) {
+			continue
+		}
+		matched = append(matched, entry)
 	}
 	if len(matched) > limit {
 		matched = matched[:limit]
@@ -102,7 +107,8 @@ func (t trailReader) RecentAuditEntriesForObject(ctx context.Context, object str
 // TestOriginFollowsTheAuditTrail checks C-65's origin rule as the settings page
 // applies it: a start newer than the last restore is planned, an unschedulable
 // node with no maintenance record is unplanned, an unreadable trail is unknown,
-// and a schedulable node has no maintenance.
+// a schedulable node has no maintenance, and an attempt that wrote nothing never
+// decides the answer.
 func TestOriginFollowsTheAuditTrail(t *testing.T) {
 	node := corev1.Node{}
 	node.Name = "node-a"
@@ -115,18 +121,29 @@ func TestOriginFollowsTheAuditTrail(t *testing.T) {
 		wantOrigin string
 	}{
 		{"planned", node, trailReader{entries: []identity.AuditEntry{
-			{Object: object, Verb: controlplane.VerbMaintain},
-			{Object: api.Group + "/Node/node-b", Verb: controlplane.VerbRestore},
+			{Object: object, Verb: controlplane.VerbMaintain, Result: controlplane.ResultAccepted},
+			{Object: api.Group + "/Node/node-b", Verb: controlplane.VerbRestore, Result: controlplane.ResultAccepted},
 		}}, MaintenancePlanned},
 		{"unplanned", node, trailReader{}, MaintenanceUnplanned},
 		{"restored then cordoned outside KOS", node, trailReader{entries: []identity.AuditEntry{
-			{Object: object, Verb: controlplane.VerbRestore},
-			{Object: object, Verb: controlplane.VerbMaintain},
+			{Object: object, Verb: controlplane.VerbRestore, Result: controlplane.ResultAccepted},
+			{Object: object, Verb: controlplane.VerbMaintain, Result: controlplane.ResultAccepted},
 		}}, MaintenanceUnplanned},
+		// A refused start writes nothing, so the cordon it left in place stays
+		// unplanned.
+		{"refused start after an outside cordon", node, trailReader{entries: []identity.AuditEntry{
+			{Object: object, Verb: controlplane.VerbMaintain, Result: controlplane.ResultRejected},
+		}}, MaintenanceUnplanned},
+		// A restore that failed wrote nothing either: the accepted start is still
+		// the newest write that moved the field.
+		{"failed restore after a planned start", node, trailReader{entries: []identity.AuditEntry{
+			{Object: object, Verb: controlplane.VerbRestore, Result: controlplane.ResultFailed},
+			{Object: object, Verb: controlplane.VerbMaintain, Result: controlplane.ResultAccepted},
+		}}, MaintenancePlanned},
 		{"audit unavailable", node, trailReader{err: errors.New("audit down")}, MaintenanceUnknown},
 		{"no audit reader", node, nil, MaintenanceUnknown},
 		{"schedulable", corev1.Node{}, trailReader{entries: []identity.AuditEntry{
-			{Object: object, Verb: controlplane.VerbMaintain},
+			{Object: object, Verb: controlplane.VerbMaintain, Result: controlplane.ResultAccepted},
 		}}, MaintenanceNone},
 	}
 	for _, testCase := range cases {

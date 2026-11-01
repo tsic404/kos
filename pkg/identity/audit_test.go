@@ -43,26 +43,38 @@ func TestRecentAuditEntriesForObject(t *testing.T) {
 	appendRecord(AuditEntry{Object: object, Verb: "set"})
 	appendRecord(AuditEntry{Object: object, Verb: "restore"})
 	appendRecord(AuditEntry{Object: api.Group + "/Node/node-b", Verb: "maintain"})
+	// Attempts that wrote nothing: they stay in the trail but never become the
+	// accepted answer the origin rule reads.
+	appendRecord(AuditEntry{Object: object, Verb: "restore", Result: controlplane.ResultFailed})
+	appendRecord(AuditEntry{Object: object, Verb: "maintain", Result: controlplane.ResultRejected})
 	// More unrelated writes than one global window would ever hold: they must
 	// not affect the answer for node-a.
 	for index := range 600 {
 		appendRecord(AuditEntry{Object: api.Group + "/Setting/user-" + strconv.Itoa(index), Verb: "set"})
 	}
 
-	maintenance, err := store.RecentAuditEntriesForObject(ctx, object, []string{"maintain", "restore"}, 1)
+	maintenance, err := store.RecentAuditEntriesForObject(ctx, object, []string{"maintain", "restore"}, nil, 1)
 	if err != nil {
 		t.Fatalf("read node-a maintenance records: %v", err)
 	}
-	if len(maintenance) != 1 || maintenance[0].Verb != "restore" {
-		t.Fatalf("node-a maintenance records = %+v, want the newest restore", maintenance)
+	if len(maintenance) != 1 || maintenance[0].Verb != "maintain" {
+		t.Fatalf("node-a maintenance records = %+v, want the newest attempt", maintenance)
 	}
 
-	all, err := store.RecentAuditEntriesForObject(ctx, object, []string{"maintain", "restore"}, 8)
+	accepted, err := store.RecentAuditEntriesForObject(ctx, object, []string{"maintain", "restore"}, []string{controlplane.ResultAccepted}, 1)
 	if err != nil {
-		t.Fatalf("read every node-a maintenance record: %v", err)
+		t.Fatalf("read the accepted node-a maintenance records: %v", err)
+	}
+	if len(accepted) != 1 || accepted[0].Verb != "restore" || accepted[0].Result != controlplane.ResultAccepted {
+		t.Fatalf("accepted node-a maintenance records = %+v, want the newest accepted restore", accepted)
+	}
+
+	all, err := store.RecentAuditEntriesForObject(ctx, object, []string{"maintain", "restore"}, []string{controlplane.ResultAccepted}, 8)
+	if err != nil {
+		t.Fatalf("read every accepted node-a maintenance record: %v", err)
 	}
 	if len(all) != 2 || all[0].Verb != "restore" || all[1].Verb != "maintain" {
-		t.Fatalf("node-a maintenance records = %+v, want restore then maintain", all)
+		t.Fatalf("accepted node-a maintenance records = %+v, want restore then maintain", all)
 	}
 
 	// The oldest-first read the export path uses keeps its order.
