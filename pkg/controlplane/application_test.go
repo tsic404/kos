@@ -681,3 +681,117 @@ func TestCreateOfAnExistingAttributedObjectStaysIdempotent(t *testing.T) {
 		t.Fatal("a repeated create wrote the object again")
 	}
 }
+
+// refusingCatalogue judges one definition uninstallable, whatever the write.
+type refusingCatalogue struct {
+	definition string
+	verdict    CatalogueVerdict
+}
+
+// JudgeInstall implements CatalogueInstall.
+func (c refusingCatalogue) JudgeInstall(definition string) (CatalogueVerdict, bool) {
+	if definition != c.definition {
+		return CatalogueVerdict{}, false
+	}
+	return c.verdict, true
+}
+
+// installServer serves the stored application and its definition over a
+// catalogue that judges the entry uninstallable.
+func installServer(t *testing.T) *Server {
+	t.Helper()
+	server, err := New(Config{
+		Dynamic: &writeRecorder{current: sensitiveDefinition()},
+		Source:  &fakeSource{objects: []ObservedObject{observe(storedApplication())}},
+		Catalogue: refusingCatalogue{
+			definition: "db",
+			verdict: CatalogueVerdict{
+				Cause:   CatalogueRefusalCapability,
+				Reason:  "缺少依赖：compute.gpu",
+				Missing: []string{"compute.gpu"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build control plane: %v", err)
+	}
+	return server
+}
+
+// applicationBody encodes one application write the stored definition accepts.
+func applicationBody(t *testing.T, name, password, user string) []byte {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"apiVersion": api.Group + "/v1beta1",
+		"kind":       "Application",
+		"metadata":   map[string]any{"name": name, "namespace": "default"},
+		"spec": map[string]any{
+			"definitionRef": "db",
+			"namespace":     "apps",
+			"config":        map[string]any{"password": password, "user": user},
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode the body: %v", err)
+	}
+	return body
+}
+
+// TestInstallJudgementAppliesOnlyToCreates checks that an entry judged
+// uninstallable refuses a create and leaves an existing application writable: an
+// installed object follows C-33's pending rule, and C-34's preflight refuses only
+// irreversible upgrades (C-24, C-31).
+func TestInstallJudgementAppliesOnlyToCreates(t *testing.T) {
+	server := installServer(t)
+
+	create := httptest.NewRequest(http.MethodPost, "/api/v1/resources/Application?namespace=default",
+		bytes.NewReader(applicationBody(t, "two", "hunter2", "app")))
+	refused := httptest.NewRecorder()
+	server.Handler().ServeHTTP(refused, create)
+	if refused.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("create = %d, want %d; body %s", refused.Code, http.StatusUnprocessableEntity, refused.Body)
+	}
+	envelope := struct {
+		Error *Error `json:"error"`
+	}{}
+	if err := json.Unmarshal(refused.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode the refusal: %v", err)
+	}
+	if envelope.Error == nil || envelope.Error.Code != CodeCapabilityMissing || envelope.Error.Stage != StageCapability {
+		t.Fatalf("refusal = %+v, want the missing capability", envelope.Error)
+	}
+
+	update := httptest.NewRequest(http.MethodPut, "/api/v1/resources/Application/one?namespace=default",
+		bytes.NewReader(applicationBody(t, "one", "next", "app2")))
+	update.Header.Set("If-Match", "7")
+	accepted := httptest.NewRecorder()
+	server.Handler().ServeHTTP(accepted, update)
+	if accepted.Code != http.StatusAccepted {
+		t.Fatalf("update = %d, want %d; body %s: an existing application is not an install",
+			accepted.Code, http.StatusAccepted, accepted.Body)
+	}
+}
+
+// TestPlanJudgesOnlyTheCreatesOfAnUninstallableEntry checks the same rule on the
+// desired-set path: a plan that rewrites the stored application is not refused,
+// and a plan that creates a new one is (C-24, C-62).
+func TestPlanJudgesOnlyTheCreatesOfAnUninstallableEntry(t *testing.T) {
+	server := installServer(t)
+
+	existing := storedApplication()
+	existing["spec"].(map[string]any)["config"] = map[string]any{"password": "next", "user": "app2"}
+	if _, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
+		Objects: []map[string]any{existing},
+	}); failure != nil {
+		t.Fatalf("plan of an existing application = %v, want it accepted: an update is not an install", failure)
+	}
+
+	created := storedApplication()
+	delete(created["metadata"].(map[string]any), "resourceVersion")
+	created["metadata"].(map[string]any)["name"] = "two"
+	if _, _, _, failure := server.buildPlan(context.Background(), context.Background(), VerbPlan, SetRequest{
+		Objects: []map[string]any{created},
+	}); failure == nil || failure.Code != CodeCapabilityMissing {
+		t.Fatalf("plan of a new application = %v, want %s", failure, CodeCapabilityMissing)
+	}
+}

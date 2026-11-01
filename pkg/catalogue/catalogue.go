@@ -85,6 +85,9 @@ type Entry struct {
 	Installable bool `json:"installable"`
 	// Reason explains why the entry cannot be installed.
 	Reason string `json:"reason,omitempty"`
+	// Missing lists the required capabilities no active registration satisfies
+	// (C-11); an entry with any missing capability cannot be installed (C-24).
+	Missing []string `json:"missing,omitempty"`
 }
 
 // Upgrade is the upgrade path of one installed application (C-24, C-31).
@@ -119,7 +122,8 @@ func (s *Service) Entries() []Entry {
 	entries := []Entry{}
 	for _, source := range s.declarations.CatalogueSources() {
 		for _, offer := range source.Entries {
-			entries = append(entries, judgeEntry(source.ID, offer, available))
+			entry, _ := judgeEntry(source.ID, offer, available)
+			entries = append(entries, entry)
 		}
 	}
 	sort.Slice(entries, func(left, right int) bool {
@@ -131,8 +135,11 @@ func (s *Service) Entries() []Entry {
 	return entries
 }
 
-// judgeEntry validates one offer and renders it as the catalogue reads it.
-func judgeEntry(sourceID string, offer extension.CatalogueEntry, available []app.Capability) Entry {
+// judgeEntry validates one offer and renders it as the catalogue reads it. The
+// second result is why the entry cannot be installed: a caller that answers a
+// write routes the failure by it, so a broken package is not reported as a
+// missing extension (C-24, C-12).
+func judgeEntry(sourceID string, offer extension.CatalogueEntry, available []app.Capability) (Entry, controlplane.CatalogueRefusal) {
 	entry := Entry{
 		Source:       sourceID,
 		ID:           offer.ID,
@@ -149,19 +156,47 @@ func judgeEntry(sourceID string, offer extension.CatalogueEntry, available []app
 	if err := app.ValidateDefinition(offer.Definition); err != nil {
 		entry.Installable = false
 		entry.Reason = "包内容与摘要不一致或定义不合法：" + err.Error()
-		return entry
+		return entry, controlplane.CatalogueRefusalPackage
 	}
 	comparison, err := app.Compare(offer.Definition.Requires, available)
 	if err != nil {
 		entry.Installable = false
 		entry.Reason = "依赖声明无法判定：" + err.Error()
-		return entry
+		return entry, controlplane.CatalogueRefusalRequirement
 	}
 	if len(comparison.Missing) > 0 {
 		entry.Installable = false
+		entry.Missing = append([]string(nil), comparison.Missing...)
 		entry.Reason = "缺少依赖：" + strings.Join(comparison.Missing, ", ")
+		return entry, controlplane.CatalogueRefusalCapability
 	}
-	return entry
+	return entry, ""
+}
+
+// JudgeInstall reports what the catalogue judges about the entry behind one
+// definition (C-24, C-31). A write naming an offered definition is an install
+// from the app center, so an entry that cannot be installed is refused: the
+// verdict carries the cause, the reason and the missing capabilities, so the
+// caller answers with the code the cause names (C-12). A definition no active
+// source offers returns false, which leaves the write to the C-33 rules of a
+// directly installed application.
+func (s *Service) JudgeInstall(definition string) (controlplane.CatalogueVerdict, bool) {
+	available := catalogueCapabilities(s.declarations.Capabilities())
+	for _, source := range s.declarations.CatalogueSources() {
+		for _, offer := range source.Entries {
+			if offer.ID != definition {
+				continue
+			}
+			entry, cause := judgeEntry(source.ID, offer, available)
+			return controlplane.CatalogueVerdict{
+				Installable: entry.Installable,
+				Cause:       cause,
+				Reason:      entry.Reason,
+				Missing:     entry.Missing,
+			}, true
+		}
+	}
+	return controlplane.CatalogueVerdict{}, false
 }
 
 // Sync writes the definitions the active sources offer (C-24). An entry is
@@ -317,11 +352,15 @@ func (s *Service) Upgrades(ctx context.Context) ([]Upgrade, *controlplane.Error)
 }
 
 // catalogueCapabilities renders the registry capability list for the C-11
-// comparison.
+// comparison. The scope travels with each registration: a cluster-wide
+// requirement is not served by a node-scoped capability, so dropping it would
+// report a satisfied dependency as missing.
 func catalogueCapabilities(capabilities []extension.Capability) []app.Capability {
 	available := make([]app.Capability, 0, len(capabilities))
 	for _, capability := range capabilities {
-		available = append(available, app.Capability{Name: capability.Name, Version: capability.Version})
+		available = append(available, app.Capability{
+			Name: capability.Name, Version: capability.Version, Scope: capability.Scope,
+		})
 	}
 	return available
 }

@@ -66,6 +66,26 @@ func (s *Server) validateApplicationWrite(ctx context.Context, object *unstructu
 	return nil
 }
 
+// validateApplicationInstall refuses an install of a catalogue entry that cannot
+// be installed now (C-24, C-31). Only a write that creates the object is an
+// install: an application that already exists follows C-33's pending rule and
+// C-34's preflight, so a capability withdrawn after installation does not freeze
+// the object.
+func (s *Server) validateApplicationInstall(object *unstructured.Unstructured) *Error {
+	if s.catalogue == nil || object.GetKind() != "Application" {
+		return nil
+	}
+	definitionRef := nestedText(object.Object, "spec", "definitionRef")
+	if definitionRef == "" {
+		return nil
+	}
+	verdict, offered := s.catalogue.JudgeInstall(definitionRef)
+	if !offered || verdict.Installable {
+		return nil
+	}
+	return installRefused(definitionRef, verdict)
+}
+
 // applicationDefinition reads one definition; a missing one is nil.
 func (s *Server) applicationDefinition(ctx context.Context, name string) (*v1beta1.ApplicationDefinition, error) {
 	objectType, ok := kernelType("ApplicationDefinition")
@@ -84,6 +104,26 @@ func (s *Server) applicationDefinition(ctx context.Context, name string) (*v1bet
 		return nil, fmt.Errorf("decode definition %q: %w", name, err)
 	}
 	return definition, nil
+}
+
+// installRefused is the answer to installing a catalogue entry that cannot be
+// installed now: the entry is not an application, so nothing is written (C-24,
+// C-31). The code follows the cause, so a stable code keeps its meaning (C-12):
+// a broken package or an unjudgeable requirement is a rejected value, while a
+// missing capability is the class's extension not being loaded (C-21).
+func installRefused(definition string, verdict CatalogueVerdict) *Error {
+	failure := &Error{
+		Code:               CodeInvalidField,
+		Message:            "目录条目 " + definition + " 不可安装：" + verdict.Reason,
+		Stage:              StageValidate,
+		RequiresUserAction: true,
+		SideEffects:        SideEffectsNone,
+	}
+	if verdict.Cause == CatalogueRefusalCapability {
+		failure.Code = CodeCapabilityMissing
+		failure.Stage = StageCapability
+	}
+	return failure.about(kernelRef("ApplicationDefinition", "", definition))
 }
 
 // invalidApplication renders a config refusal as the field-level failure C-12

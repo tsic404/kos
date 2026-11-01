@@ -138,6 +138,10 @@ type Config struct {
 	// Diagnostics answers the evidence chain and the diagnostic bundle (C-26);
 	// nil leaves both routes unserved.
 	Diagnostics Diagnostics
+	// Catalogue judges the entry an application write installs (C-24, C-31);
+	// nil admits every definition and leaves the C-33 pending rule to the
+	// reconciler.
+	Catalogue CatalogueInstall
 	// Logs reads the log lines of one pod container (C-64); nil leaves the log
 	// route unserved.
 	Logs LogSource
@@ -169,6 +173,7 @@ type Server struct {
 	endpointFacts   endpoint.Facts
 	volumeExpansion VolumeExpansion
 	diagnostics     Diagnostics
+	catalogue       CatalogueInstall
 	logs            LogSource
 	now             func() time.Time
 	timeout         time.Duration
@@ -195,6 +200,7 @@ func New(config Config) (*Server, error) {
 		endpointFacts:   config.EndpointFacts,
 		volumeExpansion: config.VolumeExpansion,
 		diagnostics:     config.Diagnostics,
+		catalogue:       config.Catalogue,
 		logs:            config.Logs,
 		now:             config.Now,
 		timeout:         config.OperationTimeout,
@@ -465,6 +471,16 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	case !apierrors.IsNotFound(err):
 		writeError(w, s.readFailure(err, object.Ref))
+		return
+	}
+
+	// The object does not exist, so this request is an install: an entry the
+	// catalogue judges uninstallable is refused before anything is written
+	// (C-24, C-31). A repeat create of an existing application and every update
+	// stay outside this judgement, so a withdrawn capability does not freeze an
+	// installed object (C-33, C-34).
+	if failure := s.validateApplicationInstall(object.Object); failure != nil {
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "create", failure))
 		return
 	}
 
