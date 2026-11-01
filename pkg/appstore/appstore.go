@@ -119,8 +119,8 @@ func catalogueSource() (extension.CatalogueSource, error) {
 
 // Page returns the app-center page (C-31): the catalogue entries with the
 // install entry and the upgrade paths with the upgrade entry. The install
-// parameters are not a fixed item: the field structure travels inside each
-// entry, which is what the shell generates the form from (C-32).
+// parameters are not a fixed item: the config structure travels inside each
+// entry, and the page read lays the form fields out from it (C-32).
 func Page() extension.Page {
 	return extension.Page{
 		ID:           PageID,
