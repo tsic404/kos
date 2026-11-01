@@ -90,6 +90,10 @@ const (
 	// CodeClusterCredentialsInvalid marks a read the cluster API refused because
 	// the control plane's credential is not usable (C-64).
 	CodeClusterCredentialsInvalid = "cluster_credentials_invalid"
+	// CodeBootstrapClosed marks a first-Owner claim the window does not serve:
+	// none was opened, the password was already delivered, or the deadline
+	// passed (C-68).
+	CodeBootstrapClosed = "bootstrap_closed"
 )
 
 // Error is the failure envelope every non-2xx response carries (C-12). The
@@ -138,7 +142,7 @@ func (e *Error) status() int {
 		return http.StatusUnauthorized
 	case CodeNotFound:
 		return http.StatusNotFound
-	case CodePermissionDenied, CodePasswordChangeRequired:
+	case CodePermissionDenied, CodePasswordChangeRequired, CodeBootstrapClosed:
 		return http.StatusForbidden
 	case CodeAccountLocked:
 		return http.StatusLocked

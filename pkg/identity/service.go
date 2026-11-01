@@ -515,9 +515,17 @@ func (s *Service) DeleteAccount(ctx context.Context, actor Session, username str
 	return nil
 }
 
-// BootstrapOwner creates the first Owner when the database holds none. An
-// existing Owner is reused, never duplicated (C-54, C-63).
+// BootstrapOwner creates the first Owner when the database holds none and
+// returns its one-time password for the install output. An existing Owner is
+// reused, never duplicated (C-54, C-63).
 func (s *Service) BootstrapOwner(ctx context.Context, username string) (Bootstrap, error) {
+	return s.bootstrapOwner(ctx, username, true)
+}
+
+// bootstrapOwner creates the first Owner. reveal decides whether this call hands
+// out the one-time password: the external-control-plane form withholds it and
+// delivers it through the claim window instead (C-54, C-68).
+func (s *Service) bootstrapOwner(ctx context.Context, username string, reveal bool) (Bootstrap, error) {
 	existing, err := s.store.FirstOwner(ctx)
 	if err == nil {
 		return Bootstrap{Username: existing.Username}, nil
@@ -555,6 +563,11 @@ func (s *Service) BootstrapOwner(ctx context.Context, username string) (Bootstra
 	}
 	if err := s.store.CreateUser(ctx, user); err != nil {
 		return Bootstrap{}, err
+	}
+	if !reveal {
+		// The generated password stays unknown to everyone, so the account
+		// cannot log in until the claim window delivers one (C-68).
+		return Bootstrap{Created: true, Username: username}, nil
 	}
 	return Bootstrap{Created: true, Username: username, OneTimePassword: oneTime}, nil
 }

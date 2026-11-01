@@ -226,15 +226,17 @@ func TestQuietWindowIsTheContractValue(t *testing.T) {
 }
 
 // TestPlanNormalizeRefusesFormsItCannotHonour pins the installation forms of
-// C-54: the external-control-plane form is pending ADR-023, an existing
-// cluster declares no nodes, and a bootstrap install declares at least one.
+// C-54: the external-control-plane form needs the managed cluster's address, an
+// existing cluster declares no nodes, and a bootstrap install declares at least
+// one.
 func TestPlanNormalizeRefusesFormsItCannotHonour(t *testing.T) {
 	cases := []struct {
 		name    string
 		plan    Plan
 		wantErr string
 	}{
-		{name: "external form", plan: Plan{Mode: ModeExternal, Owner: "owner"}, wantErr: "ADR-023"},
+		{name: "external form without address", plan: Plan{Mode: ModeExternal, Owner: "owner"}, wantErr: "managed cluster's address"},
+		{name: "external form with nodes", plan: Plan{Mode: ModeExternal, Owner: "owner", Nodes: 2, Managed: ManagedEndpoint{Server: "https://managed.test"}}, wantErr: "declares no nodes"},
 		{name: "missing owner", plan: Plan{Mode: ModeExisting}, wantErr: "first Owner"},
 		{name: "existing with nodes", plan: Plan{Mode: ModeExisting, Owner: "owner", Nodes: 3}, wantErr: "declares no nodes"},
 		{name: "bootstrap without nodes", plan: Plan{Mode: ModeBootstrap, Owner: "owner"}, wantErr: "nodes"},
@@ -437,5 +439,21 @@ func TestInjectionListStopsTwiceAtTheSameStep(t *testing.T) {
 		if _, err := ParseInjections(text); err == nil {
 			t.Fatalf("injections %q were accepted", text)
 		}
+	}
+}
+
+// TestClaimInstructionFollowsTheWindow pins the result contract of the external
+// form: a run that never opened the claim window prints no claim instruction, so
+// a failed installation cannot hand out an address that answers bootstrap_closed
+// (C-68).
+func TestClaimInstructionFollowsTheWindow(t *testing.T) {
+	installer := &Installer{plan: Plan{Mode: ModeExternal, Owner: "owner"}}
+	if claim := installer.partial(Result{}).OwnerClaim; claim != (OwnerClaim{}) {
+		t.Fatalf("claim of a run without a window = %+v, want none", claim)
+	}
+	installer.claimOpened = true
+	claim := installer.partial(Result{}).OwnerClaim
+	if claim.URL == "" || claim.Instruction == "" {
+		t.Fatalf("claim of a run that opened the window = %+v, want an address and an instruction", claim)
 	}
 }

@@ -70,22 +70,38 @@ rules:
 // binaries; `make test` downloads and exports them.
 func Start(t *testing.T) *Cluster {
 	t.Helper()
-	return start(t, false)
+	return start(t, false, false)
 }
 
 // StartAudited is Start with the API server audit log enabled, which the
 // install invariant needs as its measurement condition (C-15).
 func StartAudited(t *testing.T) *Cluster {
 	t.Helper()
-	return start(t, true)
+	return start(t, true, false)
 }
 
-// start boots the control plane, optionally with audit logging.
-func start(t *testing.T, audited bool) *Cluster {
+// StartBare boots an API server without the KOS object model, which is what a
+// cluster looks like before an installation reaches it (C-54).
+func StartBare(t *testing.T) *Cluster {
 	t.Helper()
-	environment := &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join(RepoRoot(t), "config", "crd")},
-		ErrorIfCRDPathMissing: true,
+	return start(t, false, true)
+}
+
+// StartBareAudited is StartBare with the API server audit log enabled, so the
+// installation that fills the cluster can be judged (C-15).
+func StartBareAudited(t *testing.T) *Cluster {
+	t.Helper()
+	return start(t, true, true)
+}
+
+// start boots the control plane, optionally with audit logging, optionally
+// without the KOS object model.
+func start(t *testing.T, audited, bare bool) *Cluster {
+	t.Helper()
+	environment := &envtest.Environment{}
+	if !bare {
+		environment.CRDDirectoryPaths = []string{filepath.Join(RepoRoot(t), "config", "crd")}
+		environment.ErrorIfCRDPathMissing = true
 	}
 	auditLogPath := ""
 	if audited {
@@ -537,6 +553,14 @@ func (c *Cluster) Resources() map[schema.GroupKind]string {
 // Writer returns the write path over this cluster.
 func (c *Cluster) Writer() *write.Writer {
 	return &write.Writer{Dynamic: c.Dynamic, Resources: c.Resources()}
+}
+
+// Refresh rediscovers the resource names this cluster serves. An installation
+// fills a bare cluster with the object model, so a case reads the names again
+// afterwards.
+func (c *Cluster) Refresh(t *testing.T) {
+	t.Helper()
+	c.Plurals = c.discoverPlurals(t)
 }
 
 // EnsureNamespace creates name unless the cluster already has it.

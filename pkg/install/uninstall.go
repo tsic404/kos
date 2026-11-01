@@ -100,6 +100,9 @@ type DataDisposer interface {
 
 // UninstallConfig wires one uninstallation.
 type UninstallConfig struct {
+	// Mode is the installation form being uninstalled; empty selects
+	// ModeExisting.
+	Mode Mode
 	// Namespace is the installation's own namespace; empty selects
 	// DefaultNamespace.
 	Namespace string
@@ -108,6 +111,10 @@ type UninstallConfig struct {
 	RetainData bool
 	// Dispose removes the data when RetainData is false.
 	Dispose DataDisposer
+	// ControlPlaneCluster runs the control-plane workload when the installation
+	// put it outside the cluster being uninstalled (external form, C-54); nil
+	// means the same cluster, which is the case for every other form.
+	ControlPlaneCluster *Cluster
 	// Dynamic executes the uninstall deletions as the installer identity.
 	Dynamic dynamic.Interface
 	// Kube reads claims, volumes, permissions and namespace-scoped records.
@@ -144,6 +151,14 @@ func NewUninstaller(config UninstallConfig) (*Uninstaller, error) {
 	if config.Namespace == "" {
 		config.Namespace = DefaultNamespace
 	}
+	if config.Mode == "" {
+		config.Mode = ModeExisting
+	}
+	switch config.Mode {
+	case ModeExisting, ModeBootstrap, ModeExternal:
+	default:
+		return nil, fmt.Errorf("uninstall mode %q is not an installation form", config.Mode)
+	}
 	switch {
 	case config.Dynamic == nil:
 		return nil, errors.New("uninstall needs a dynamic client")
@@ -155,6 +170,10 @@ func NewUninstaller(config UninstallConfig) (*Uninstaller, error) {
 		return nil, errors.New("uninstall needs discovery")
 	case !config.RetainData && config.Dispose == nil:
 		return nil, errors.New("an uninstall that removes data needs a data disposer")
+	case config.Mode == ModeExternal && config.ControlPlaneCluster == nil:
+		return nil, errors.New("external-control-plane uninstall needs the control-plane cluster's clients")
+	case config.Mode != ModeExternal && config.ControlPlaneCluster != nil:
+		return nil, fmt.Errorf("install form %q uninstalls its control plane from the cluster itself", config.Mode)
 	}
 	return &Uninstaller{config: config}, nil
 }
@@ -328,30 +347,54 @@ func sortEntries(entries []Leftover) {
 }
 
 // stopControlPlane removes the control-plane workload so nothing reconciles
-// while the uninstall changes objects (C-54).
+// while the uninstall changes objects (C-54). The external form keeps that
+// workload, its service and the credential to the managed cluster in the
+// control-plane cluster, so those are removed there; the identity the control
+// plane acted as belongs to the cluster it acted on. A token that outlives the
+// control plane reaching into another cluster is exactly what C-14 forbids.
 func (u *Uninstaller) stopControlPlane(ctx context.Context) error {
+	workload := u.controlPlane()
 	objects := []struct {
 		gvr  schema.GroupVersionResource
 		name string
 	}{
 		{schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}, ControlPlaneName},
 		{schema.GroupVersionResource{Version: "v1", Resource: "services"}, ControlPlaneName},
-		{schema.GroupVersionResource{Version: "v1", Resource: "serviceaccounts"}, ControlPlaneServiceAccount},
+		{schema.GroupVersionResource{Version: "v1", Resource: "secrets"}, ManagedCredentialSecret},
 	}
 	for _, object := range objects {
-		writable := u.config.Dynamic.Resource(object.gvr).Namespace(u.config.Namespace)
+		writable := workload.Dynamic.Resource(object.gvr).Namespace(u.config.Namespace)
 		err := writable.Delete(ctx, object.name, metav1.DeleteOptions{})
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("stop %s %s: %w", object.gvr.Resource, object.name, err)
 		}
 	}
-	return u.waitDeploymentGone(ctx)
+	if err := u.waitDeploymentGone(ctx); err != nil {
+		return err
+	}
+	// The identity lives where the control plane wrote objects, which is the
+	// cluster being uninstalled for every form.
+	serviceAccounts := u.config.Dynamic.Resource(
+		schema.GroupVersionResource{Version: "v1", Resource: "serviceaccounts"}).Namespace(u.config.Namespace)
+	if err := serviceAccounts.Delete(ctx, ControlPlaneServiceAccount, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("stop serviceaccount %s: %w", ControlPlaneServiceAccount, err)
+	}
+	return nil
+}
+
+// controlPlane is the cluster that runs the control-plane workload: another
+// cluster for the external form, the one being uninstalled for the other forms.
+func (u *Uninstaller) controlPlane() *Cluster {
+	if u.config.ControlPlaneCluster != nil {
+		return u.config.ControlPlaneCluster
+	}
+	return &Cluster{Dynamic: u.config.Dynamic, Kube: u.config.Kube, APIExtensions: u.config.APIExtensions}
 }
 
 // waitDeploymentGone waits until the control-plane deployment is gone.
 func (u *Uninstaller) waitDeploymentGone(ctx context.Context) error {
 	resource := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
-	writable := u.config.Dynamic.Resource(resource).Namespace(u.config.Namespace)
+	writable := u.controlPlane().Dynamic.Resource(resource).Namespace(u.config.Namespace)
 	deadline := time.Now().Add(operationTimeout)
 	for {
 		_, err := writable.Get(ctx, ControlPlaneName, metav1.GetOptions{})

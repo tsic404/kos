@@ -12,7 +12,8 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 状态机与回滚、日志与事件读取（按应用隔离、行数与时间窗上限、不可达与凭据失效的错误语义），
 以及设置域、用户偏好与目录来源三类贡献的自身语义；第一方功能包中的通知与文件两个产品以扩展包落地
 （前者的投递记录、投递控制器与渠道/订阅设置项，后者的暴露卷设置项、窗口偏好与自有数据面），
-以及在已有集群上的安装、引导安装、卸载与救援：安装窗口按写入者归属判定、注入失败可回滚、
+以及在已有集群上的安装、引导安装、外置控制面安装、卸载与救援：安装窗口按写入者归属判定、
+注入失败可回滚、跨集群凭据只存在控制面一侧、首个 Owner 的口令经一次性领取窗口交付、
 卸载输出六类遗留清单、救援只读；不含其余贡献类的语义与 Provider 能力验证。
 
 ## 布局
@@ -47,7 +48,7 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `pkg/catalogue/` | C-24 目录来源：条目结构、摘要校验、定义同步与来源缺失的升级路径 |
 | `pkg/access/` | C-59/C-60 判定：可见性谓词、角色写权限、所有权与跨所有者引用，扩展对象按声明授权 |
 | `pkg/backup/` | C-41/C-42 数据保护：策略调和与计划触发、失败域拒绝、四类基线项的全量计算、恢复到新实例与演练比对；复制与摘要交给工作进程，调和轮只观测结果 |
-| `pkg/install/` | C-15/C-54/C-58：在已有集群安装与引导安装、清单渲染、安装窗口的写入者归属判定与审计读取、注入失败与回滚、卸载遗留清单、救援只读读取 |
+| `pkg/install/` | C-15/C-54/C-58：在已有集群安装、引导安装与外置控制面安装、清单渲染、跨集群凭据、安装窗口的写入者归属判定与审计读取、注入失败与回滚、卸载遗留清单、救援只读读取 |
 | `tests/acceptance/TC-66/` | 卷迁移六阶段完成，绑定换到新声明、应用不变 |
 | `tests/acceptance/TC-67/` | 五个阶段各注入一次失败后回滚到源卷 |
 | `tests/acceptance/TC-68/` | 清理只打释放标记，不删除源卷 |
@@ -132,6 +133,7 @@ KOS 是运行在 Kubernetes 上的 homelab 操作系统。本仓是 **kos-shell*
 | `tests/acceptance/TC-91/` | 卸载输出六类遗留清单，控制面与对象定义删除，数据按保留选项处理 |
 | `tests/acceptance/TC-92/` | 救援模式只读：可读原生资源，集群与数据库不变，无写入 |
 | `tests/acceptance/TC-93/` | 单节点控制面单副本、节点故障不迁移、文案不承诺高可用 |
+| `tests/acceptance/TC-94/` | 外置控制面：被管集群无控制面工作负载、应用经跨集群凭据调和到 Ready、改 spec 后投影与下游更新、凭据记录到期并可续期、卸载分两侧清除 |
 
 ## 对象模型
 
@@ -424,6 +426,10 @@ Kubernetes 凭据不进入浏览器。
   （`password_change_required`），此前只放行改口令、退出与会话读取。最后一个可用 Owner 不能被停用、
   降级或删除；删除前必须转移其拥有的应用、卷、备份策略、恢复作业与卷迁移，未转移时返回
   `account_has_objects` 与 `ownedObjects`。
+- 首个 Owner 的口令按安装形态交付：已有集群与引导安装由安装输出给出；外置控制面形态只经领取窗口
+  交付一次——安装完成时开窗、固定三十分钟后关闭，只接受控制面主机回环地址的请求，首次领取时生成并
+  返回口令，随即关窗，同一安装的第二次领取被拒绝。窗口的开窗时刻与截止时点记在自身数据库里，
+  控制面重启不推迟截止时点；保留数据库的重装不重新开窗，也不新建首个 Owner。
 - 口令只保存 argon2id 单向摘要，会话只保存令牌摘要；日志、响应与投影响应都不含口令。
 - 审计是追加流：每个写操作（含被拒绝的尝试）写一条记录，字段为操作者、对象、动词、结果、时间、来源
   与扩展标识；对象写与账号写（建号、改角色或停用、删除、改口令）同流。集合 apply 按对象取各自的
@@ -447,13 +453,45 @@ Kubernetes 凭据不进入浏览器。
 | `POST` | `/api/v1/accounts` | 创建账号并返回一次性口令（Owner） |
 | `PUT` | `/api/v1/accounts/{name}` | 改角色或停用/启用（Owner） |
 | `DELETE` | `/api/v1/accounts/{name}` | 删除账号；仍有归属时拒绝（Owner） |
+| `POST` | `/api/v1/bootstrap/owner` | 外置控制面形态下领取首个 Owner 的一次性口令（免会话，仅控制面主机） |
 
-除登录外，所有路由都要求 `Authorization: Bearer <token>`。`identity.Authorizer` 把 `pkg/access`
+除登录与首个 Owner 的领取外，所有路由都要求 `Authorization: Bearer <token>`。`identity.Authorizer` 把 `pkg/access`
 的 C-59/C-60 规则接到控制面 API：Guest 只读；Member 只写自己拥有的应用、入口、卷、备份策略、
 恢复作业与卷迁移；Owner 写全部。可见性谓词（`Application.spec.visibility`）只过滤面板读取，
 不改变入口可达性；`spec.owner` 由 API 以会话身份写入且不可变，只有全局 Owner 能转移；跨所有者
 卷引用与备份策略选择器在写入时被拒绝。扩展对象的写角色取声明的 `objectWriters`，未声明时只由
 Owner 写。每类写操作同时向 `identity.Audits` 追加一条审计记录（C-14）。
+
+## 安装形态
+
+C-54 的三种形态共用一条流程（`pkg/install`）：预检、命名空间、对象定义、权限、控制面工作负载、
+就绪、首个 Owner；安装窗口在前后两个快照之间按写入者归属判定（C-15）。
+
+| 形态 | 入口 | 控制面工作负载 |
+|---|---|---|
+| `existing-cluster` | `Installer.Install` | 被安装的集群内 |
+| `bootstrap` | `Installer.Bootstrap` | 引导出来的集群内，节点数由声明给出 |
+| `external-control-plane` | `Installer.InstallExternal` | 另一个集群内 |
+
+外置形态把一次安装分成两侧：
+
+- 被管集群（`Config.Dynamic`/`Kube`/`APIExtensions`）：内核十类对象定义、控制面身份
+  `kos-control-plane` 的 ServiceAccount 与集群作用域权限，以及声明命名空间的命名空间级权限。
+  没有控制面 Deployment 与 Service。
+- 控制面集群（`Config.ControlPlaneCluster`）：自己的命名空间、控制面工作负载与 Service，以及
+  `kos-managed-cluster` Secret——被管集群的地址、CA、控制面身份的令牌与令牌的到期时刻
+  （`credential` 步骤铸造，只写入控制面一侧，C-14）；工作负载以 `KUBECONFIG` 读取它。
+  到期时刻取集群返回的 `expirationTimestamp` 而不是请求的有效期，因为集群会自行裁剪。
+- 运行侧用 `install.ManagedClients` 从该 Secret 建出被管集群的客户端，控制面 API 的投影与调和都经它
+  读写被管集群；令牌的身份是被管集群里的 `kos-control-plane`，不是执行安装的调用方。
+  凭据带可读的生命周期：到期前三十天内 `Credential.Notice` 给出续期提示，过期后 `ManagedClients`
+  在读任何对象之前就以 `ExpiryError` 拒绝；`install.RenewManagedCredential` 用两侧集群重铸令牌并替换
+  Secret，地址与 CA 保持不变，且只接受与 Secret 中地址同源的被管集群（不一致时返回配对错误）。
+- 安装窗口判定被管集群；控制面集群只接收本次安装自己的命名空间与上述对象。
+- 卸载按形态分两侧：控制面集群删除工作负载、Service 与该 Secret，被管集群删除控制面身份的
+  ServiceAccount、权限与对象定义（`UninstallConfig.ControlPlaneCluster`）。
+- 首个 Owner 在 `first-owner` 步骤创建但不给出口令；开窗发生在安装窗口判定通过之后，即安装完成时。
+  口令只经 `POST /api/v1/bootstrap/owner` 领取一次（C-68），安装输出只给出该地址与操作说明。
 
 ## 构建与测试
 
