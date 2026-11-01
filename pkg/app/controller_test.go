@@ -12,7 +12,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/tsic404/kos/api"
 	"github.com/tsic404/kos/api/v1beta1"
+	"github.com/tsic404/kos/pkg/nodehealth"
+	"github.com/tsic404/kos/pkg/reconcile"
 	"github.com/tsic404/kos/pkg/state"
 	"github.com/tsic404/kos/pkg/write"
 )
@@ -70,7 +73,7 @@ func TestApplicationHealthReadsObservedStatus(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			if got := applicationHealth(test.objects, test.comparison, false); got != test.want {
+			if got := workloadHealth(test.objects, test.comparison, false); got != test.want {
 				t.Fatalf("health = %q, want %q", got, test.want)
 			}
 		})
@@ -346,7 +349,7 @@ func TestApplicationHealthReadsJobConditions(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			if got := applicationHealth(test.objects, test.comparison, false); got != test.want {
+			if got := workloadHealth(test.objects, test.comparison, false); got != test.want {
 				t.Fatalf("health = %q, want %q", got, test.want)
 			}
 		})
@@ -370,6 +373,305 @@ func TestPermanentCoversUnservedResources(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := permanent(test.err); got != test.want {
 				t.Fatalf("permanent = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+// objectStore serves a fixed object set by kind and name.
+type objectStore struct {
+	Store
+	objects map[string]*unstructured.Unstructured
+}
+
+// Get returns one stored object; a missing one is NotFound.
+func (s objectStore) Get(_ context.Context, ref write.Ref) (*unstructured.Unstructured, error) {
+	object, found := s.objects[ref.Kind+"/"+ref.Name]
+	if !found {
+		return nil, apierrors.NewNotFound(schema.GroupResource{Resource: ref.Kind}, ref.Name)
+	}
+	return object.DeepCopy(), nil
+}
+
+// TestVolumeBindingsUsesTheConfiguredGrace covers C-38: the application dates a
+// node-local loss with the same heartbeat grace the volume reconciler is wired
+// with, so a deployment that configures another grace keeps one timeline instead
+// of judging the same binding Lost while the volume is still Bound.
+func TestVolumeBindingsUsesTheConfiguredGrace(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	since := now.Add(-(nodehealth.DefaultGrace + nodehealth.ConfirmationWindow + time.Minute))
+	grace := 4 * time.Minute
+	store := objectStore{objects: map[string]*unstructured.Unstructured{
+		"Volume/data": {Object: map[string]any{
+			"apiVersion": "kos.tsic.top/v1beta1",
+			"kind":       "Volume",
+			"metadata":   map[string]any{"name": "data", "namespace": "default"},
+			"spec":       map[string]any{"mobility": "node-local"},
+			"status":     map[string]any{"phase": "Bound", "node": "node-a"},
+		}},
+		"Node/node-a": {Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Node",
+			"metadata":   map[string]any{"name": "node-a"},
+			"status": map[string]any{"conditions": []any{map[string]any{
+				"type":              "Ready",
+				"status":            "False",
+				"lastHeartbeatTime": since.Format(time.RFC3339),
+			}}},
+		}},
+	}}
+	application := &v1beta1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default"},
+		Spec:       v1beta1.ApplicationSpec{Namespace: "default", Volumes: []string{"data"}},
+	}
+	clock := func() time.Time { return now }
+
+	configured := NewController(store, Options{Clock: clock, NodeGrace: grace}).volumeBindings(context.Background(), application)
+	if configured.isLost || !configured.isUnobservable {
+		t.Fatalf("bindings = %+v, want a binding still inside the configured window", configured)
+	}
+	def := NewController(store, Options{Clock: clock}).volumeBindings(context.Background(), application)
+	if !def.isLost {
+		t.Fatalf("bindings = %+v with the default grace, want a lost binding", def)
+	}
+}
+
+// roundStore serves the application, its action records and the objects a round
+// reads, and keeps the status the round writes.
+type roundStore struct {
+	Store
+	objects map[string]*unstructured.Unstructured
+	records []unstructured.Unstructured
+	status  *v1beta1.ApplicationStatus
+}
+
+// roundKey is the identity a stored object is served under.
+func roundKey(ref write.Ref) string { return ref.Kind + "|" + ref.Namespace + "|" + ref.Name }
+
+// Get serves one stored object.
+func (s *roundStore) Get(_ context.Context, ref write.Ref) (*unstructured.Unstructured, error) {
+	object, found := s.objects[roundKey(ref)]
+	if !found {
+		return nil, apierrors.NewNotFound(schema.GroupResource{Resource: ref.Kind}, ref.Name)
+	}
+	return object.DeepCopy(), nil
+}
+
+// List serves the action records the round may consume.
+func (s *roundStore) List(context.Context, schema.GroupVersionResource, string, string) ([]unstructured.Unstructured, error) {
+	return s.records, nil
+}
+
+// Delete drops a consumed record.
+func (s *roundStore) Delete(_ context.Context, _ string, _ write.Ref) error { return nil }
+
+// Apply accepts a rendered object.
+func (s *roundStore) Apply(_ context.Context, _ string, document *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	return document, nil
+}
+
+// ApplyStatus keeps the status the round wrote.
+func (s *roundStore) ApplyStatus(_ context.Context, document *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	application := &v1beta1.Application{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(document.Object, application); err != nil {
+		return nil, err
+	}
+	status := application.Status
+	s.status = &status
+	return document, nil
+}
+
+// RecordEvent accepts the event a round writes.
+func (s *roundStore) RecordEvent(context.Context, *v1beta1.Application, string, string, string, time.Time) error {
+	return nil
+}
+
+// TestReinstallKeepsTheBaselineWhenTheRoundBlocks covers C-56 and C-35: a
+// reinstall that stops before the apply keeps the stored baseline, so the
+// following round judges downstream writes against it instead of recording a
+// fresh baseline and clearing the retry budget.
+func TestReinstallKeepsTheBaselineWhenTheRoundBlocks(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	template := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+data:
+  mode: fixed
+`
+	definition := definitionWith(t, "web", "", template, nil)
+	application := &v1beta1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default", UID: "uid-1", Generation: 1, Finalizers: []string{Finalizer}},
+		Spec:       v1beta1.ApplicationSpec{DefinitionRef: "web", Namespace: "apps"},
+	}
+	baseline := targetFor(t, application, definition, map[string]any{}).applied
+	application.Status = v1beta1.ApplicationStatus{
+		ObjectStatus: v1beta1.ObjectStatus{Phase: PhaseReady},
+		RetryCount:   3,
+		Applied:      baseline,
+	}
+	stored, err := runtime.DefaultUnstructuredConverter.ToUnstructured(application)
+	if err != nil {
+		t.Fatalf("encode the application: %v", err)
+	}
+	store := &roundStore{
+		objects: map[string]*unstructured.Unstructured{
+			roundKey(write.Ref{Kind: "Application", Namespace: "default", Name: "web"}): {Object: stored},
+		},
+		records: []unstructured.Unstructured{{Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]any{
+				"name":      ActionRecordName("uid-1", ActionReinstall),
+				"namespace": api.SystemNamespace,
+				"labels":    map[string]any{ActionLabel: ActionReinstall, ActionOwnerLabel: "uid-1"},
+			},
+			"data": map[string]any{ActionDataKey: "default/web"},
+		}}},
+	}
+	controller := NewController(store, Options{Clock: func() time.Time { return now }})
+	request := reconcile.Request{Kind: "Application", Namespace: "default", Name: "web"}
+
+	// The definition is gone, so the reinstall round blocks before the apply.
+	if _, err := controller.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("blocked reinstall round: %v", err)
+	}
+	blocked := store.status
+	if blocked == nil {
+		t.Fatal("the blocked round wrote no status")
+	}
+	if blocked.Applied == nil || blocked.Applied.SpecDigest != baseline.SpecDigest {
+		t.Fatalf("applied = %+v after a blocked reinstall, want the stored baseline", blocked.Applied)
+	}
+	if blocked.RetryCount != 3 || blocked.Phase != PhaseReady {
+		t.Fatalf("status = %+v after a blocked reinstall, want Ready with the retry budget intact", blocked)
+	}
+	if _, found := state.Find(blocked.Conditions, ConditionDefinitionMissing); !found {
+		t.Fatalf("conditions = %v, want the missing definition", blocked.Conditions)
+	}
+
+	// The definition returns: the next round judges the stored baseline and
+	// keeps it, instead of recording a fresh one and clearing the budget.
+	store.records = nil
+	definitionObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(definition)
+	if err != nil {
+		t.Fatalf("encode the definition: %v", err)
+	}
+	store.objects[roundKey(write.Ref{Kind: "ApplicationDefinition", Name: "web"})] = &unstructured.Unstructured{Object: definitionObject}
+	store.objects[roundKey(write.Ref{Kind: "Namespace", Name: "apps"})] = &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": "apps"},
+	}}
+	rendered, err := decodeManifests(baseline.Render)
+	if err != nil {
+		t.Fatalf("decode the baseline render: %v", err)
+	}
+	for _, object := range rendered {
+		store.objects[roundKey(referenceOf(objectRefOf(object)))] = object
+	}
+	if _, err := controller.Reconcile(context.Background(), request); err != nil {
+		t.Fatalf("unblocked round: %v", err)
+	}
+	settled := store.status
+	if settled == nil {
+		t.Fatal("the unblocked round wrote no status")
+	}
+	if settled.Applied == nil || settled.Applied.SpecDigest != baseline.SpecDigest {
+		t.Fatalf("applied = %+v after the block cleared, want the stored baseline", settled.Applied)
+	}
+	if settled.RetryCount != 3 {
+		t.Fatalf("retryCount = %d after the block cleared, want the budget untouched", settled.RetryCount)
+	}
+	if settled.Phase != PhaseReady {
+		t.Fatalf("phase = %s after the block cleared, want Ready", settled.Phase)
+	}
+}
+
+// TestReinstallDoesNotSkipTheUpgradePreflight covers C-34 and C-56: a spec that
+// changed after the baseline was taken makes the round an upgrade request, so
+// consuming a reinstall record still runs the preflight and refuses an
+// irreversible change instead of recording the new render as a baseline. The
+// phase the last round wrote does not matter: a record consumed while it reads
+// Upgrading takes the same gate.
+func TestReinstallDoesNotSkipTheUpgradePreflight(t *testing.T) {
+	now := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	template := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Name }}
+  namespace: {{ .Namespace }}
+data:
+  mode: fixed
+`
+	definition := definitionWith(t, "web", "", template, nil)
+	for _, phase := range []string{PhaseReady, PhaseUpgrading} {
+		t.Run(phase, func(t *testing.T) {
+			application := &v1beta1.Application{
+				ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: "default", UID: "uid-1", Generation: 2, Finalizers: []string{Finalizer}},
+				Spec:       v1beta1.ApplicationSpec{DefinitionRef: "web", Namespace: "apps", Volumes: []string{"cache", "logs"}},
+			}
+			baseline := targetFor(t, application, definition, map[string]any{}).applied
+			// The user's PUT dropped one volume declaration; the stored phase is
+			// still the one the last round wrote.
+			application.Spec.Volumes = []string{"logs"}
+			application.Status = v1beta1.ApplicationStatus{
+				ObjectStatus: v1beta1.ObjectStatus{Phase: phase},
+				Applied:      baseline,
+			}
+			stored, err := runtime.DefaultUnstructuredConverter.ToUnstructured(application)
+			if err != nil {
+				t.Fatalf("encode the application: %v", err)
+			}
+			store := &roundStore{
+				objects: map[string]*unstructured.Unstructured{
+					roundKey(write.Ref{Kind: "Application", Namespace: "default", Name: "web"}): {Object: stored},
+					roundKey(write.Ref{Kind: "Namespace", Name: "apps"}): {Object: map[string]any{
+						"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]any{"name": "apps"},
+					}},
+				},
+				records: []unstructured.Unstructured{{Object: map[string]any{
+					"apiVersion": "v1",
+					"kind":       "ConfigMap",
+					"metadata": map[string]any{
+						"name":      ActionRecordName("uid-1", ActionReinstall),
+						"namespace": api.SystemNamespace,
+						"labels":    map[string]any{ActionLabel: ActionReinstall, ActionOwnerLabel: "uid-1"},
+					},
+					"data": map[string]any{ActionDataKey: "default/web"},
+				}}},
+			}
+			definitionObject, err := runtime.DefaultUnstructuredConverter.ToUnstructured(definition)
+			if err != nil {
+				t.Fatalf("encode the definition: %v", err)
+			}
+			store.objects[roundKey(write.Ref{Kind: "ApplicationDefinition", Name: "web"})] = &unstructured.Unstructured{Object: definitionObject}
+			rendered, err := decodeManifests(baseline.Render)
+			if err != nil {
+				t.Fatalf("decode the baseline render: %v", err)
+			}
+			for _, object := range rendered {
+				store.objects[roundKey(referenceOf(objectRefOf(object)))] = object
+			}
+
+			controller := NewController(store, Options{Clock: func() time.Time { return now }})
+			if _, err := controller.Reconcile(context.Background(), reconcile.Request{Kind: "Application", Namespace: "default", Name: "web"}); err != nil {
+				t.Fatalf("reinstall round: %v", err)
+			}
+			status := store.status
+			if status == nil {
+				t.Fatal("the round wrote no status")
+			}
+			if _, found := state.Find(status.Conditions, ConditionIrreversibleUpgrade); !found {
+				t.Fatalf("conditions = %v, want the irreversible upgrade refusal", status.Conditions)
+			}
+			if status.Applied == nil || status.Applied.SpecDigest != baseline.SpecDigest {
+				t.Fatalf("applied = %+v after the refusal, want the stored baseline", status.Applied)
+			}
+			if status.Upgrade == nil || len(status.Upgrade.Irreversible) == 0 {
+				t.Fatalf("upgrade = %+v after the refusal, want the preflight report", status.Upgrade)
+			}
+			if status.Phase != PhaseReady {
+				t.Fatalf("phase = %s after the refusal, want Ready", status.Phase)
 			}
 		})
 	}

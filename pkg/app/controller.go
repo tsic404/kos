@@ -20,8 +20,10 @@ import (
 	"github.com/tsic404/kos/api"
 	"github.com/tsic404/kos/api/v1beta1"
 	"github.com/tsic404/kos/pkg/markers"
+	"github.com/tsic404/kos/pkg/nodehealth"
 	"github.com/tsic404/kos/pkg/reconcile"
 	"github.com/tsic404/kos/pkg/state"
+	"github.com/tsic404/kos/pkg/volume"
 	"github.com/tsic404/kos/pkg/write"
 )
 
@@ -51,6 +53,9 @@ const (
 	ConditionMigrationRequired     = "MigrationRequired"
 	ConditionDrifted               = "Drifted"
 	ConditionUpgradeFailed         = "UpgradeFailed"
+	// ConditionStorageFull reports an application whose declared volume the
+	// backing disk could not take (C-56).
+	ConditionStorageFull = "StorageFull"
 )
 
 // Reasons of the Reconciled condition the application controller writes itself
@@ -90,6 +95,7 @@ var failureConditions = []string{
 	ConditionMigrationRequired,
 	ConditionDrifted,
 	ConditionUpgradeFailed,
+	ConditionStorageFull,
 }
 
 // Store is the object access one application round needs. NewWriterStore is the
@@ -127,6 +133,64 @@ type StaticCapabilities []Capability
 // Capabilities implements CapabilitySource.
 func (s StaticCapabilities) Capabilities(context.Context) ([]Capability, error) { return s, nil }
 
+// ProviderSource reports the capabilities whose provider is unavailable
+// (C-56). A crashed provider leaves its declaration in place, so the dependent
+// application keeps running and reports Degraded instead of being reinstalled.
+type ProviderSource interface {
+	UnavailableCapabilities(ctx context.Context) ([]string, error)
+}
+
+// storeProviders reads provider health from the Provider objects of the cluster
+// (C-47). A provider whose own health is Unavailable has crashed.
+type storeProviders struct {
+	store Store
+}
+
+// UnavailableCapabilities implements ProviderSource.
+func (p storeProviders) UnavailableCapabilities(ctx context.Context) ([]string, error) {
+	stored, err := p.store.List(ctx, providerResource, "", "")
+	if err != nil {
+		return nil, err
+	}
+	var unavailable []string
+	for index := range stored {
+		health, _, _ := unstructured.NestedString(stored[index].Object, "status", "health", "state")
+		if health != string(v1beta1.HealthStateUnavailable) {
+			continue
+		}
+		capabilities, _, _ := unstructured.NestedSlice(stored[index].Object, "spec", "capabilities")
+		for _, raw := range capabilities {
+			capability, _ := raw.(map[string]any)
+			name, _ := capability["name"].(string)
+			if name == "" {
+				continue
+			}
+			unavailable = appendUnique(unavailable, name)
+		}
+	}
+	return unavailable, nil
+}
+
+// providerResource is the kernel's Provider class (C-47).
+var providerResource = schema.GroupVersionResource{Group: api.Group, Version: "v1beta1", Resource: "providers"}
+
+// markUnavailableProviders turns a crashed provider into an unsatisfied
+// guarantee of every requirement it serves: the application installs and stays
+// observable, but its health is Degraded (C-56).
+func markUnavailableProviders(comparison *CapabilityResult, unavailable []string, requirements []v1beta1.CapabilityRequirement) {
+	if len(unavailable) == 0 {
+		return
+	}
+	for _, requirement := range requirements {
+		for _, name := range unavailable {
+			if requirement.Name != name {
+				continue
+			}
+			comparison.Unsatisfied = appendUnique(comparison.Unsatisfied, name+".provider-available")
+		}
+	}
+}
+
 // Options configures a Controller.
 type Options struct {
 	// Capabilities supplies the registered capabilities; nil registers none.
@@ -134,6 +198,14 @@ type Options struct {
 	// Volumes answers the volume facts the upgrade preflight reads; nil reads
 	// the Volume objects the application declares.
 	Volumes VolumeSource
+	// Providers answers which capabilities lost their provider (C-56); nil
+	// reads the Provider objects.
+	Providers ProviderSource
+	// NodeGrace is the heartbeat grace period the confirmation window adds
+	// five minutes to (C-38). A deployment wires the same value as the volume
+	// reconciler, so the two timelines cannot diverge; zero selects
+	// nodehealth.DefaultGrace.
+	NodeGrace time.Duration
 	// Clock supplies the round time; defaults to time.Now.
 	Clock func() time.Time
 }
@@ -144,20 +216,28 @@ type Controller struct {
 	store        Store
 	capabilities CapabilitySource
 	volumes      VolumeSource
+	providers    ProviderSource
+	nodeGrace    time.Duration
 	clock        func() time.Time
 }
 
 // NewController builds a controller over one store.
 func NewController(store Store, options Options) *Controller {
-	controller := &Controller{store: store, capabilities: options.Capabilities, volumes: options.Volumes, clock: options.Clock}
+	controller := &Controller{store: store, capabilities: options.Capabilities, volumes: options.Volumes, providers: options.Providers, nodeGrace: options.NodeGrace, clock: options.Clock}
 	if controller.capabilities == nil {
 		controller.capabilities = StaticCapabilities(nil)
 	}
 	if controller.volumes == nil {
 		controller.volumes = storeVolumes{store: store}
 	}
+	if controller.providers == nil {
+		controller.providers = storeProviders{store: store}
+	}
 	if controller.clock == nil {
 		controller.clock = time.Now
+	}
+	if controller.nodeGrace <= 0 {
+		controller.nodeGrace = nodehealth.DefaultGrace
 	}
 	return controller
 }
@@ -203,6 +283,9 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	if action == ActionRestart {
 		return c.restart(ctx, application, record, now)
 	}
+	if action == ActionReinstall {
+		return c.reinstall(ctx, application, record, now)
+	}
 	if record != nil {
 		// An orphan without an uninstall has nothing to abandon; drop it so it
 		// cannot fire later.
@@ -213,12 +296,15 @@ func (c *Controller) Reconcile(ctx context.Context, request reconcile.Request) (
 	if application.Status.Phase == PhaseFailed {
 		return reconcile.Result{}, nil
 	}
-	return c.install(ctx, application, now)
+	return c.install(ctx, application, now, false)
 }
 
 // install moves one application towards Ready: prerequisites, then render and
-// apply, then the phase and retry rules of C-33.
-func (c *Controller) install(ctx context.Context, application *v1beta1.Application, now time.Time) (reconcile.Result, error) {
+// apply, then the phase and retry rules of C-33. dropBaseline renders the
+// current spec instead of the stored baseline for this round only; the round's
+// early exits write the status through baseStatus, so the stored baseline is
+// never cleared by a round that stops before the apply.
+func (c *Controller) install(ctx context.Context, application *v1beta1.Application, now time.Time, dropBaseline bool) (reconcile.Result, error) {
 	definition, err := c.definition(ctx, application.Spec.DefinitionRef)
 	if err != nil {
 		return reconcile.Result{}, err
@@ -241,6 +327,11 @@ func (c *Controller) install(ctx context.Context, application *v1beta1.Applicati
 	if err != nil {
 		return c.fail(ctx, application, ConditionInvalidPackage, err.Error())
 	}
+	unavailable, err := c.providers.UnavailableCapabilities(ctx)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	markUnavailableProviders(&comparison, unavailable, definition.Spec.Requires)
 	if len(comparison.Missing) > 0 {
 		return c.block(ctx, application, ConditionCapabilityMissing,
 			"missing required capabilities: "+strings.Join(comparison.Missing, ", "))
@@ -252,6 +343,9 @@ func (c *Controller) install(ctx context.Context, application *v1beta1.Applicati
 	if !exists {
 		return c.block(ctx, application, ConditionNamespaceMissing,
 			fmt.Sprintf("namespace %q does not exist", application.Spec.Namespace))
+	}
+	if message := c.storageFailure(ctx, application); message != "" {
+		return c.fail(ctx, application, ConditionStorageFull, message)
 	}
 
 	// A migration moving one of the volumes the application mounts stops its
@@ -291,7 +385,7 @@ func (c *Controller) install(ctx context.Context, application *v1beta1.Applicati
 	// render: a catalogue update alone never changes installed objects, and a
 	// spec write is the upgrade request of C-34.
 	if application.Status.Phase == PhaseReady || application.Status.Phase == PhaseUpgrading {
-		return c.steady(ctx, application, definition, resolved, comparison, now)
+		return c.steady(ctx, application, definition, resolved, comparison, now, dropBaseline)
 	}
 
 	next, err := c.buildTarget(ctx, application, definition, resolved)
@@ -426,6 +520,24 @@ func (c *Controller) retry(ctx context.Context, application *v1beta1.Application
 	return reconcile.Result{RequeueAfter: InitialBackoff}, nil
 }
 
+// reinstall consumes a reinstall action: the record is consumed, the request is
+// recorded as an event, and the current spec is rendered and applied again
+// instead of trusting the stored baseline (C-56). The user spec is never
+// written, and a provider that is still down leaves the application Degraded
+// again on the following rounds.
+func (c *Controller) reinstall(ctx context.Context, application *v1beta1.Application, record *unstructured.Unstructured, now time.Time) (reconcile.Result, error) {
+	if err := c.deleteRecord(ctx, record); err != nil {
+		return reconcile.Result{}, err
+	}
+	c.recordEvent(ctx, application, "Normal", EventReinstallRequested,
+		"the application was asked to reinstall from its current spec", now)
+	// The baseline is dropped for this round only, as an argument rather than
+	// by clearing the object: a round that stops before the apply keeps the
+	// stored baseline, so the fact C-35 judges against survives a blocked
+	// reinstall.
+	return c.install(ctx, application, now, true)
+}
+
 // restart consumes a restart action: the rendered workloads are deleted and
 // rebuilt once from the baseline, while the user spec, volumes and routes stay
 // untouched (C-66). The round deletes them itself, so their absence is not an
@@ -456,7 +568,7 @@ func (c *Controller) restart(ctx context.Context, application *v1beta1.Applicati
 	if err := c.deleteRecord(ctx, record); err != nil {
 		return reconcile.Result{}, err
 	}
-	return c.install(ctx, application, now)
+	return c.install(ctx, application, now, false)
 }
 
 // rebuildWorkloads writes the workload objects of the baseline back after a
@@ -837,13 +949,30 @@ func withFailure(conditions []metav1.Condition, generation int64, conditionType,
 	return state.Set(conditions, state.Failure(conditionType, generation, conditionType, message))
 }
 
-// applicationHealth derives the availability axis from the stored workloads
+// applicationHealth derives the availability axis. Node-local bindings are
+// judged first (C-08, C-38): one that cannot be observed is Unknown and one
+// whose node is lost is Unavailable, because the workloads a node hosts say
+// nothing about the data they cannot reach. Everything else is workload health.
+func (c *Controller) applicationHealth(ctx context.Context, application *v1beta1.Application, objects []*unstructured.Unstructured, comparison CapabilityResult, paused bool) v1beta1.HealthState {
+	bindings := c.volumeBindings(ctx, application)
+	// C-08 ranks Unknown above Unavailable: an unobservable binding leaves the
+	// aggregate unknown even when another binding is confirmed lost.
+	if bindings.isUnobservable {
+		return v1beta1.HealthStateUnknown
+	}
+	if bindings.isLost {
+		return v1beta1.HealthStateUnavailable
+	}
+	return workloadHealth(objects, comparison, paused)
+}
+
+// workloadHealth derives the availability axis from the stored workloads alone
 // (C-08). A workload whose status the server has not filled in yet is not an
 // unready workload: health is Unknown until its status exists. An application
 // whose only workloads are Jobs is judged by the Job conditions (C-11). A paused
 // application has zero effective desired replicas and is Healthy when observed
 // (C-66).
-func applicationHealth(objects []*unstructured.Unstructured, comparison CapabilityResult, paused bool) v1beta1.HealthState {
+func workloadHealth(objects []*unstructured.Unstructured, comparison CapabilityResult, paused bool) v1beta1.HealthState {
 	if jobs := jobObjects(objects); len(jobs) > 0 && !hasReplicaWorkload(objects) {
 		jobState := jobHealth(jobs)
 		if jobState == v1beta1.HealthStateHealthy && len(comparison.Unsatisfied) > 0 {
@@ -859,6 +988,69 @@ func applicationHealth(objects []*unstructured.Unstructured, comparison Capabili
 		IsStopped:                 paused,
 		HasInsufficientCapability: len(comparison.Unsatisfied) > 0,
 	})
+}
+
+// volumeBindings is what the application's node-local volumes say about its
+// availability (C-08, C-38). A binding whose node is unready inside the
+// confirmation window cannot be observed; one whose node is unready beyond it,
+// gone, or whose volume is already Lost is a lost required volume.
+type volumeBindings struct {
+	isUnobservable bool
+	isLost         bool
+}
+
+// volumeBindings reads every declared volume. A volume the cluster does not
+// have yet is not a binding fact: the install has not created it. A read
+// failure makes the application unobservable rather than healthy.
+func (c *Controller) volumeBindings(ctx context.Context, application *v1beta1.Application) volumeBindings {
+	namespace := application.Spec.Namespace
+	if namespace == "" {
+		namespace = application.Namespace
+	}
+	var bindings volumeBindings
+	for _, name := range application.Spec.Volumes {
+		stored, err := c.store.Get(ctx, write.Ref{
+			Group: api.Group, Version: "v1beta1", Kind: "Volume", Namespace: namespace, Name: name,
+		})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			bindings.isUnobservable = true
+			continue
+		}
+		mobility, _, _ := unstructured.NestedString(stored.Object, "spec", "mobility")
+		if mobility != string(v1beta1.VolumeMobilityNodeLocal) {
+			continue
+		}
+		if phase, _, _ := unstructured.NestedString(stored.Object, "status", "phase"); phase == "Lost" {
+			bindings.isLost = true
+			continue
+		}
+		nodeName, _, _ := unstructured.NestedString(stored.Object, "status", "node")
+		if nodeName == "" {
+			// The binding node is not resolved yet, so there is no loss
+			// timeline to judge (C-38).
+			continue
+		}
+		node, err := c.store.Get(ctx, write.Ref{Version: "v1", Kind: "Node", Name: nodeName})
+		if apierrors.IsNotFound(err) {
+			bindings.isLost = true
+			continue
+		}
+		if err != nil {
+			bindings.isUnobservable = true
+			continue
+		}
+		observation := nodehealth.Observe(node, c.clock(), c.nodeGrace)
+		switch {
+		case observation.IsLost:
+			bindings.isLost = true
+		case observation.IsUnobservable:
+			bindings.isUnobservable = true
+		}
+	}
+	return bindings
 }
 
 // jobObjects returns the rendered batch Jobs.
@@ -971,6 +1163,38 @@ func permanent(err error) bool {
 	// A 404 on an apply means the served resource or namespace is gone; the same
 	// package cannot make it succeed by retrying (C-33).
 	return apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) || apierrors.IsForbidden(err) || apierrors.IsNotFound(err)
+}
+
+// storageFailure names the first declared volume the backing disk could not
+// take. The volume reconciler records the failure on the volume; the
+// application fails with the same reason instead of retrying a full disk
+// (C-56).
+func (c *Controller) storageFailure(ctx context.Context, application *v1beta1.Application) string {
+	namespace := application.Spec.Namespace
+	if namespace == "" {
+		namespace = application.Namespace
+	}
+	for _, name := range application.Spec.Volumes {
+		stored, err := c.store.Get(ctx, write.Ref{
+			Group: api.Group, Version: "v1beta1", Kind: "Volume", Namespace: namespace, Name: name,
+		})
+		if err != nil {
+			continue
+		}
+		conditions, _, _ := unstructured.NestedSlice(stored.Object, "status", "conditions")
+		for _, raw := range conditions {
+			condition, _ := raw.(map[string]any)
+			if condition["type"] != volume.ConditionStorageFull || condition["status"] != "True" {
+				continue
+			}
+			message, _ := condition["message"].(string)
+			if message == "" {
+				message = "the backing disk is full"
+			}
+			return fmt.Sprintf("volume %q cannot be provisioned: %s", name, message)
+		}
+	}
+	return ""
 }
 
 // decodeConfig reads the submitted config values of C-32.

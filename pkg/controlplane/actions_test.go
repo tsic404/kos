@@ -65,3 +65,28 @@ func TestAcceptActionRetriesARolledBackUpgrade(t *testing.T) {
 		t.Fatal("a ready application with no reverted upgrade accepted the retry")
 	}
 }
+
+// TestAcceptActionReinstall covers C-56's reinstall entry: a ready application
+// whose provider crashed and a failed install are reinstalled from the current
+// spec, while an application that never installed is refused.
+func TestAcceptActionReinstall(t *testing.T) {
+	if !recordAction(app.ActionReinstall) {
+		t.Fatal("reinstall is a one-shot action, not a spec write")
+	}
+	for _, phase := range []string{app.PhaseReady, app.PhaseFailed} {
+		application := &v1beta1.Application{
+			Status: v1beta1.ApplicationStatus{ObjectStatus: v1beta1.ObjectStatus{Phase: phase}},
+		}
+		if failure := acceptAction(actionRequest{Action: app.ActionReinstall}, application); failure != nil {
+			t.Fatalf("a %s application refused the reinstall: %+v", phase, failure)
+		}
+	}
+	for _, phase := range []string{"", app.PhasePending, app.PhaseInstalling, app.PhaseUninstalling} {
+		application := &v1beta1.Application{
+			Status: v1beta1.ApplicationStatus{ObjectStatus: v1beta1.ObjectStatus{Phase: phase}},
+		}
+		if failure := acceptAction(actionRequest{Action: app.ActionReinstall}, application); failure == nil || failure.Code != CodeInvalidField {
+			t.Fatalf("a %q application accepted the reinstall: %+v", phase, failure)
+		}
+	}
+}

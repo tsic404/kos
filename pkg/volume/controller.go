@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"syscall"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -18,6 +19,7 @@ import (
 	"github.com/tsic404/kos/api"
 	"github.com/tsic404/kos/api/v1beta1"
 	"github.com/tsic404/kos/pkg/markers"
+	"github.com/tsic404/kos/pkg/nodehealth"
 	"github.com/tsic404/kos/pkg/reconcile"
 	"github.com/tsic404/kos/pkg/state"
 	"github.com/tsic404/kos/pkg/write"
@@ -42,6 +44,9 @@ const (
 	// ConditionDeletionBlocked reports an extension object reference that
 	// holds a deleting volume in place (C-19).
 	ConditionDeletionBlocked = "DeletionBlocked"
+	// ConditionStorageFull reports a claim the backing disk could not take
+	// (C-56).
+	ConditionStorageFull = "StorageFull"
 )
 
 // Capability names a volume backend resolves (C-09, C-38). The baseline names
@@ -64,11 +69,11 @@ const ReleasedValue = "true"
 // DefaultNodeGrace is the kubelet heartbeat grace period the confirmation
 // window adds five minutes to (C-38). It matches the kernel's node monitor
 // default; a cluster with another value passes it in Options.
-const DefaultNodeGrace = 40 * time.Second
+const DefaultNodeGrace = nodehealth.DefaultGrace
 
 // ConfirmationWindow is how long a node-local binding may be unobservable
 // before the volume is Lost (C-38).
-const ConfirmationWindow = 5 * time.Minute
+const ConfirmationWindow = nodehealth.ConfirmationWindow
 
 // Resync intervals. The kernel has no watch source yet, so a settled object is
 // re-observed by its own bounded requeue (C-06).
@@ -210,6 +215,13 @@ func (c *Controller) converge(ctx context.Context, volume *v1beta1.Volume) (reco
 			// loss (C-38).
 			status := lostStatus(volume, volume.Status.Node, lost.message)
 			return reconcile.Result{RequeueAfter: boundResync}, c.writeStatus(ctx, volume, status)
+		}
+		if isStorageFull(err) {
+			// A full disk is a named failure, not an anonymous retry: the
+			// application that declares the volume fails with this reason and
+			// the API refuses new volumes (C-56).
+			return c.block(ctx, volume, ConditionStorageFull,
+				fmt.Sprintf("claim %q cannot be created: the disk is full", claimName))
 		}
 		if permanent(err) {
 			return c.blockClaim(ctx, volume, fmt.Sprintf("claim %q cannot be maintained: %v", claimName, err))
@@ -513,8 +525,12 @@ func baseStatus(volume *v1beta1.Volume) v1beta1.VolumeStatus {
 			Conditions: append([]metav1.Condition(nil), volume.Status.Conditions...),
 			Health:     v1beta1.Health{State: v1beta1.HealthStateUnavailable},
 		},
-		BoundClaim:   volume.Status.BoundClaim,
-		StorageClass: volume.Status.StorageClass,
+		BoundClaim:          volume.Status.BoundClaim,
+		StorageClass:        volume.Status.StorageClass,
+		Provider:            volume.Status.Provider,
+		ReclaimPolicy:       volume.Status.ReclaimPolicy,
+		Capabilities:        append([]v1beta1.VolumeCapability(nil), volume.Status.Capabilities...),
+		SnapshotConsistency: volume.Status.SnapshotConsistency,
 	}
 }
 
@@ -555,6 +571,17 @@ func sameStatus(left, right v1beta1.VolumeStatus) bool {
 	leftJSON, leftErr := json.Marshal(left)
 	rightJSON, rightErr := json.Marshal(right)
 	return leftErr == nil && rightErr == nil && string(leftJSON) == string(rightJSON)
+}
+
+// isStorageFull reports the storage backend refusing a claim because the disk
+// is full (C-56). The kernel reports ENOSPC; a backend in front of it may wrap
+// the same text.
+func isStorageFull(err error) bool {
+	if errors.Is(err, syscall.ENOSPC) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "no space left on device") || strings.Contains(message, "disk is full") || strings.Contains(message, "disk full")
 }
 
 // permanent reports a write the same spec cannot make succeed by retrying.

@@ -94,6 +94,12 @@ const (
 	// none was opened, the password was already delivered, or the deadline
 	// passed (C-68).
 	CodeBootstrapClosed = "bootstrap_closed"
+	// CodeReadOnly marks a write refused because the cluster lost its write
+	// quorum and serves read-only (C-56).
+	CodeReadOnly = "read_only"
+	// CodeStorageFull marks a volume refused because the backing disk is full
+	// (C-56).
+	CodeStorageFull = "storage_full"
 )
 
 // Error is the failure envelope every non-2xx response carries (C-12). The
@@ -152,7 +158,7 @@ func (e *Error) status() int {
 		return http.StatusConflict
 	case CodeWriteFailed, CodeClusterUnavailable, CodeClusterCredentialsInvalid:
 		return http.StatusBadGateway
-	case CodeDatabaseUnavailable, CodeOwnershipCheckFailed:
+	case CodeDatabaseUnavailable, CodeOwnershipCheckFailed, CodeReadOnly, CodeStorageFull:
 		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
@@ -232,6 +238,39 @@ func clusterUnavailable(message string) *Error {
 		Stage:       StageRead,
 		Retryable:   true,
 		SideEffects: SideEffectsNone,
+	}
+}
+
+// readOnlyFailure reports a write refused because the cluster lost its write
+// quorum: reads continue from cache, writes wait (C-56).
+func readOnlyFailure(reason string) *Error {
+	message := "集群处于只读状态，写操作被拒绝"
+	if reason != "" {
+		message += "：" + reason
+	}
+	return &Error{
+		Code:              CodeReadOnly,
+		Message:           message,
+		Stage:             StageApply,
+		Retryable:         true,
+		RetryAfterSeconds: 30,
+		SideEffects:       SideEffectsNone,
+	}
+}
+
+// storageFullFailure reports a volume refused because the backing disk is full;
+// a retry alone cannot fix it (C-56).
+func storageFullFailure(reason string) *Error {
+	message := "磁盘已满，不能新建卷"
+	if reason != "" {
+		message += "：" + reason
+	}
+	return &Error{
+		Code:               CodeStorageFull,
+		Message:            message,
+		Stage:              StageValidate,
+		RequiresUserAction: true,
+		SideEffects:        SideEffectsNone,
 	}
 }
 

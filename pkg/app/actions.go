@@ -24,6 +24,10 @@ const (
 	// ActionRestart rebuilds the rendered workloads once without writing the
 	// user spec (C-66).
 	ActionRestart = "restart"
+	// ActionReinstall applies the current spec again from scratch, which is the
+	// reinstall entry a crashed provider leaves to the user (C-56). It is not a
+	// rollback: the user spec is read, never written.
+	ActionReinstall = "reinstall"
 )
 
 // Application actions the control plane performs as a spec write (C-66). They

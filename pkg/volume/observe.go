@@ -3,13 +3,13 @@ package volume
 import (
 	"context"
 	"fmt"
-	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/tsic404/kos/api/v1beta1"
+	"github.com/tsic404/kos/pkg/nodehealth"
 	"github.com/tsic404/kos/pkg/reconcile"
 	"github.com/tsic404/kos/pkg/state"
 )
@@ -165,47 +165,7 @@ func (c *Controller) nodeLost(ctx context.Context, name string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	ready, since, found := nodeReady(node)
-	if !found || ready || since.IsZero() {
-		return false, nil
-	}
-	return c.clock().Sub(since) > c.nodeGrace+ConfirmationWindow, nil
-}
-
-// nodeReady reads the Ready condition and the last sign of life of a node. A
-// node without the condition has not been observed at all, so its loss cannot
-// be dated.
-func nodeReady(node *unstructured.Unstructured) (ready bool, since time.Time, found bool) {
-	conditions, _, _ := unstructured.NestedSlice(node.Object, "status", "conditions")
-	for _, raw := range conditions {
-		condition, _ := raw.(map[string]any)
-		if condition["type"] != "Ready" {
-			continue
-		}
-		found = true
-		if condition["status"] == "True" {
-			return true, time.Time{}, true
-		}
-		since = timestampOf(condition["lastHeartbeatTime"])
-		if since.IsZero() {
-			since = timestampOf(condition["lastTransitionTime"])
-		}
-		return false, since, true
-	}
-	return false, time.Time{}, false
-}
-
-// timestampOf parses one RFC3339 node condition timestamp.
-func timestampOf(value any) time.Time {
-	text, _ := value.(string)
-	if text == "" {
-		return time.Time{}
-	}
-	parsed, err := time.Parse(time.RFC3339, text)
-	if err != nil {
-		return time.Time{}
-	}
-	return parsed
+	return nodehealth.Observe(node, c.clock(), c.nodeGrace).IsLost, nil
 }
 
 // bindingNodeOf resolves the node a node-local volume is pinned to from the

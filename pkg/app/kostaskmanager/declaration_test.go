@@ -1,8 +1,10 @@
 package kostaskmanager
 
 import (
+	"net/http"
 	"testing"
 
+	"github.com/tsic404/kos/pkg/controlplane"
 	"github.com/tsic404/kos/pkg/extension"
 )
 
@@ -57,13 +59,14 @@ func TestApplicationPageCoversTheContractSources(t *testing.T) {
 		ItemResourceSpec:  extension.PageSourceObject,
 		ItemUpgrade:       extension.PageSourceObject,
 		ItemUninstall:     extension.PageSourceObject,
+		ItemReinstall:     extension.PageSourceObject,
 	}
 	assertSources(t, page, want)
 	actions := map[string]bool{}
 	for _, action := range page.Actions {
 		actions[action.ID] = true
 	}
-	for _, id := range []string{ActionStop, ActionStart, ActionRestart, ActionScale, ActionResourceSpec, ActionUpgrade, ActionUninstall} {
+	for _, id := range []string{ActionStop, ActionStart, ActionRestart, ActionScale, ActionResourceSpec, ActionUpgrade, ActionUninstall, ActionReinstall} {
 		if !actions[id] {
 			t.Errorf("action %q is not declared", id)
 		}
@@ -89,6 +92,32 @@ func assertSources(t *testing.T, page extension.Page, want map[string]string) {
 		}
 		if item.Source != source {
 			t.Errorf("item %q source = %q, want %q", item.ID, item.Source, source)
+		}
+	}
+}
+
+// TestControlPlaneActionsAreAccepted covers C-22 and C-56: every lifecycle entry
+// that posts to the action endpoint resolves to a value the API accepts, so an
+// entry pointing at an action the control plane does not know cannot ship.
+func TestControlPlaneActionsAreAccepted(t *testing.T) {
+	posted := map[string]bool{}
+	for _, action := range applicationsPage().Actions {
+		if action.Method != http.MethodPost || action.Path != pathActionRequests {
+			continue
+		}
+		value, known := ControlPlaneAction(action.ID)
+		if !known {
+			t.Errorf("page action %q has no control-plane action", action.ID)
+			continue
+		}
+		if !controlplane.AcceptsAction(value) {
+			t.Errorf("page action %q submits %q, which the API rejects", action.ID, value)
+		}
+		posted[action.ID] = true
+	}
+	for _, id := range []string{ActionStop, ActionStart, ActionRestart, ActionScale, ActionReinstall} {
+		if !posted[id] {
+			t.Errorf("the page does not offer %q through the action endpoint", id)
 		}
 	}
 }

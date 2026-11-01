@@ -201,7 +201,7 @@ KOS 不再写它；放弃写入 `declined`，对象留在 unmanaged，不再被�
 | `DELETE` | `/api/v1/resources/{kind}/{name}` | 删除；需 `If-Match` |
 | `POST` | `/api/v1/plan-requests` | 三类差异、摘要与警告；不写任何对象 |
 | `POST` | `/api/v1/apply-requests` | 接受期望对象集后执行；进度从对象本身读取 |
-| `POST` | `/api/v1/action-requests` | 应用动作 `retry`/`orphan`/`confirm`/`restart`/`stop`/`start`/`scale`；202 已接受 + 动作记录引用 |
+| `POST` | `/api/v1/action-requests` | 应用动作 `retry`/`orphan`/`confirm`/`restart`/`reinstall`/`stop`/`start`/`scale`；202 已接受 + 动作记录引用 |
 
 - 读投影每项带 `observedAt` 与 `stale`；陈旧阈值是 `controlplane.StaleThreshold`（2 分钟），所有来源共用。确知发现来源时，投影的 `sources` 列出全部上报的适配器标识。
 - 写请求返回 202 与对象引用，不返回已完成；工作在接受后继续，客户端断线不影响推进。

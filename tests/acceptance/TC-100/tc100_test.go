@@ -223,9 +223,10 @@ func assertApplications(t *testing.T, shell *harness.Shell, token string) {
 		kostaskmanager.ItemResourceSpec:  extension.PageSourceObject,
 		kostaskmanager.ItemUpgrade:       extension.PageSourceObject,
 		kostaskmanager.ItemUninstall:     extension.PageSourceObject,
+		kostaskmanager.ItemReinstall:     extension.PageSourceObject,
 	})
-	if len(actionsOf(t, page)) != 7 {
-		t.Fatalf("actions = %v, want the seven lifecycle entries", actionsOf(t, page))
+	if len(actionsOf(t, page)) != 8 {
+		t.Fatalf("actions = %v, want the eight lifecycle entries", actionsOf(t, page))
 	}
 	for id, action := range map[string]string{
 		kostaskmanager.ItemStop:         kostaskmanager.ActionStop,
@@ -235,6 +236,7 @@ func assertApplications(t *testing.T, shell *harness.Shell, token string) {
 		kostaskmanager.ItemResourceSpec: kostaskmanager.ActionResourceSpec,
 		kostaskmanager.ItemUpgrade:      kostaskmanager.ActionUpgrade,
 		kostaskmanager.ItemUninstall:    kostaskmanager.ActionUninstall,
+		kostaskmanager.ItemReinstall:    kostaskmanager.ActionReinstall,
 	} {
 		assertEntry(t, page, id, action)
 	}

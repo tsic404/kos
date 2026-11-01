@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/tsic404/kos/pkg/controlplane"
+	"github.com/tsic404/kos/pkg/degrade"
 	"github.com/tsic404/kos/pkg/extension"
 	"github.com/tsic404/kos/pkg/identity"
 	"github.com/tsic404/kos/pkg/write"
@@ -47,6 +48,12 @@ type Readings interface {
 	Read(ctx context.Context, session identity.Session, item extension.PageItem) (Reading, *controlplane.Error)
 }
 
+// Banners reports the shell-level notice shown above every page, such as the
+// global read-only banner of C-56. Nil shows no banner.
+type Banners interface {
+	Banner() *degrade.Notice
+}
+
 // Config carries what the page shell needs besides its declarations.
 type Config struct {
 	// Readings resolves server-source items. A nil value serves pages made of
@@ -56,18 +63,21 @@ type Config struct {
 	// Now supplies the read clock the stale marker compares against; defaults
 	// to time.Now.
 	Now func() time.Time
+	// Banners supplies the shell-level notice; nil shows none.
+	Banners Banners
 }
 
 // Service renders the declared pages over a contribution projection.
 type Service struct {
 	declarations Declarations
 	readings     Readings
+	banners      Banners
 	now          func() time.Time
 }
 
 // New builds the page shell.
 func New(declarations Declarations, config Config) *Service {
-	service := &Service{declarations: declarations, readings: config.Readings, now: config.Now}
+	service := &Service{declarations: declarations, readings: config.Readings, banners: config.Banners, now: config.Now}
 	if service.now == nil {
 		service.now = time.Now
 	}
@@ -124,6 +134,8 @@ type Summary struct {
 	Items []ItemSummary `json:"items"`
 	// Actions are the executable actions; a read-only page has none.
 	Actions []Action `json:"actions,omitempty"`
+	// Banner is the shell-level notice shown above the page (C-56).
+	Banner *degrade.Notice `json:"banner,omitempty"`
 }
 
 // Item is one display item with its current value (C-53).
@@ -144,6 +156,10 @@ type Item struct {
 	ObservedAt *time.Time `json:"observedAt,omitempty"`
 	// Stale marks a server value observed beyond StaleThreshold (C-13).
 	Stale bool `json:"stale"`
+	// Action is the page action identity the item declares (C-22). The entry
+	// names the write; the action names which one it is, so a caller can build
+	// the request body instead of guessing it from a shared path.
+	Action string `json:"action,omitempty"`
 	// Entry is the modification entry; a read-only page and an item without an
 	// action have none.
 	Entry *Entry `json:"entry,omitempty"`
@@ -172,6 +188,8 @@ type Page struct {
 	Items []Item `json:"items"`
 	// Actions are the executable actions; a read-only page has none.
 	Actions []Action `json:"actions,omitempty"`
+	// Banner is the shell-level notice shown above the page (C-56).
+	Banner *degrade.Notice `json:"banner,omitempty"`
 }
 
 // List returns the pages the session role may see, ordered by identity. A page
@@ -186,7 +204,9 @@ func (s *Service) List(session identity.Session) []Summary {
 			continue
 		}
 		seen[page.ID] = true
-		summaries = append(summaries, summaryOf(page))
+		summary := summaryOf(page)
+		summary.Banner = s.banner()
+		summaries = append(summaries, summary)
 	}
 	sort.Slice(summaries, func(left, right int) bool {
 		return summaries[left].ID < summaries[right].ID
@@ -209,6 +229,7 @@ func (s *Service) Read(ctx context.Context, session identity.Session, id string)
 		RequiredRole:   page.RequiredRole,
 		ReadOnly:       page.ReadOnly,
 		ReadOnlyReason: page.ReadOnlyReason,
+		Banner:         s.banner(),
 	}
 	entries := map[string]Entry{}
 	if !page.ReadOnly {
@@ -224,7 +245,7 @@ func (s *Service) Read(ctx context.Context, session identity.Session, id string)
 			sources[item.Source] = true
 			rendered.Sources = append(rendered.Sources, item.Source)
 		}
-		renderedItem := Item{ID: item.ID, Label: item.Label, Source: item.Source, Reason: item.Reason}
+		renderedItem := Item{ID: item.ID, Label: item.Label, Source: item.Source, Action: item.Action, Reason: item.Reason}
 		if !page.ReadOnly {
 			switch {
 			case item.Action != "" && item.Reason != "":
@@ -257,6 +278,20 @@ func (s *Service) Read(ctx context.Context, session identity.Session, id string)
 		rendered.Items = append(rendered.Items, renderedItem)
 	}
 	return rendered, nil
+}
+
+// banner reads the current shell notice. The value is copied so a caller
+// cannot change the shared state (C-56).
+func (s *Service) banner() *degrade.Notice {
+	if s.banners == nil {
+		return nil
+	}
+	notice := s.banners.Banner()
+	if notice == nil {
+		return nil
+	}
+	copied := *notice
+	return &copied
 }
 
 // declared reads the current projection; a shell without declarations serves no
