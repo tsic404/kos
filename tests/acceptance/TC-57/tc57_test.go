@@ -1,8 +1,11 @@
 // Package tc57 verifies the install and upgrade write paths of AC-28: a
 // catalogue entry whose definition declares a capability nothing provides is
-// refused and the missing capability is listed, a config that misses a required
-// field or leaves an enum is refused with the field and its constraint named,
-// and no application object is produced (AC-28, TC-57).
+// refused and the missing capability is listed, a package that no longer matches
+// its digest is refused as a rejected value rather than a missing extension, a
+// config that misses a required field or leaves an enum is refused with the
+// field and its constraint named, and no application object is produced. Only a
+// write that creates the object is an install: an application whose entry became
+// uninstallable stays updatable (AC-28, TC-57).
 package tc57
 
 import (
@@ -24,8 +27,10 @@ const (
 	sourceID    = "acceptance-catalogue"
 	absentEntry = "needs-absent"
 	offerEntry  = "wiki"
-	ownerName   = "owner"
-	ownerPass   = "owner-password"
+	// tamperedEntry offers a package whose content no longer matches its digest.
+	tamperedEntry = "tampered"
+	ownerName     = "owner"
+	ownerPass     = "owner-password"
 	// absentCapability names a capability no declaration or baseline provides.
 	absentCapability = "acceptance.absent"
 )
@@ -151,9 +156,14 @@ func TestTC57MissingDependencyAndOutOfRangeConfig(t *testing.T) {
 		{Name: "mode", Type: "enum", Enum: []string{"dev", "prod"}, Required: true},
 		{Name: "replicas", Type: "integer", Required: true, Minimum: new("2"), Maximum: new("4")},
 	}, nil)
+	// One entry's packaged content no longer matches its digest: C-24 refuses it,
+	// and the refusal must not be reported as a missing extension (C-12).
+	tampered := definition(t, nil, nil)
+	tampered.Template = template + "data:\n  extra: \"x\"\n"
 	installation := cluster.InstallPackageWith(t, "acceptance-source", declaration(
 		extension.CatalogueEntry{ID: absentEntry, Display: extension.CatalogueDisplay{Name: "Needs Absent"}, Definition: missing},
 		extension.CatalogueEntry{ID: offerEntry, Display: extension.CatalogueDisplay{Name: "Wiki"}, Definition: installable},
+		extension.CatalogueEntry{ID: tamperedEntry, Display: extension.CatalogueDisplay{Name: "Tampered"}, Definition: tampered},
 	), artifacts, shell.Retention())
 	shell.Use(installation)
 	shell.SyncCatalogue(t)
@@ -251,6 +261,25 @@ func TestTC57MissingDependencyAndOutOfRangeConfig(t *testing.T) {
 	}
 	assertNoApplications(t, shell, token)
 
+	// A package whose content no longer matches its digest is not a missing
+	// extension: the refusal names the rejected value and keeps the two codes
+	// apart (C-12, C-24).
+	tamperedApp := harness.ApplicationManifest("tampered-app", harness.Namespace, tamperedEntry, harness.Namespace, nil, nil)
+	status, response = shell.Call(t, http.MethodPost, installPath, tamperedApp, token)
+	if status != http.StatusBadRequest {
+		t.Fatalf("install from a digest-mismatched entry = %d %v, want 400", status, response)
+	}
+	if code := harness.String(response, "error", "code"); code != "invalid_field" {
+		t.Fatalf("code = %q, want invalid_field: a broken package is not a missing capability", code)
+	}
+	if stage := harness.String(response, "error", "stage"); stage != "validate" {
+		t.Fatalf("stage = %q, want validate", stage)
+	}
+	if message := harness.String(response, "error", "message"); !strings.Contains(message, "摘要") {
+		t.Fatalf("message = %q, want the package refusal named", message)
+	}
+	assertNoApplications(t, shell, token)
+
 	// A submission that misses a required field and leaves the declared range is
 	// refused with both fields and their constraints named.
 	outOfRange := harness.ApplicationManifest("wiki-bad", harness.Namespace, offerEntry, harness.Namespace,
@@ -304,6 +333,47 @@ func TestTC57MissingDependencyAndOutOfRangeConfig(t *testing.T) {
 	after := cluster.Get(t, "v1beta1", "Application", "wiki")
 	if got, _ := harness.Nested(after.Object, "spec", "config", "mode").(string); got != "dev" {
 		t.Fatalf("stored mode = %q, want the refused upgrade to leave it at dev", got)
+	}
+
+	// Withdrawing the capability makes the entry uninstallable while the
+	// application stays (C-33). An update is not an install: it is accepted,
+	// while a new install from the same entry is still refused.
+	withdrawn := cluster.UpgradePackage(t, "acceptance-source", declaration(
+		extension.CatalogueEntry{ID: absentEntry, Display: extension.CatalogueDisplay{Name: "Needs Absent"}, Definition: missing},
+		extension.CatalogueEntry{ID: offerEntry, Display: extension.CatalogueDisplay{Name: "Wiki"},
+			Definition: definition(t, installable.Config, []v1beta1.CapabilityRequirement{{Name: absentCapability, Version: "v1"}})},
+		extension.CatalogueEntry{ID: tamperedEntry, Display: extension.CatalogueDisplay{Name: "Tampered"}, Definition: tampered},
+	), artifacts)
+	shell.Use(withdrawn)
+
+	stored = cluster.Get(t, "v1beta1", "Application", "wiki")
+	reconfigured := harness.ApplicationManifest("wiki", harness.Namespace, offerEntry, harness.Namespace,
+		map[string]any{"mode": "prod", "replicas": 2}, nil)
+	status, response = shell.Accounts.HTTP.Call(t, http.MethodPut, "/api/v1/resources/Application/wiki"+namespaceParam, reconfigured,
+		map[string]string{"Authorization": "Bearer " + token, "If-Match": stored.GetResourceVersion()})
+	if status != http.StatusAccepted {
+		t.Fatalf("update while the entry is uninstallable = %d %v, want 202: an existing application is not an install", status, response)
+	}
+	updated := cluster.Get(t, "v1beta1", "Application", "wiki")
+	if got, _ := harness.Nested(updated.Object, "spec", "config", "mode").(string); got != "prod" {
+		t.Fatalf("stored mode = %q, want the accepted update to apply", got)
+	}
+
+	another := harness.ApplicationManifest("wiki-two", harness.Namespace, offerEntry, harness.Namespace,
+		map[string]any{"mode": "dev", "replicas": 2}, nil)
+	status, response = shell.Call(t, http.MethodPost, installPath, another, token)
+	if status != http.StatusUnprocessableEntity {
+		t.Fatalf("install after the capability was withdrawn = %d %v, want 422", status, response)
+	}
+	if code := harness.String(response, "error", "code"); code != "capability_missing" {
+		t.Fatalf("code = %q, want capability_missing on the install path", code)
+	}
+	status, body = shell.Call(t, http.MethodGet, "/api/v1/resources/Application?namespace="+harness.Namespace, nil, token)
+	if status != http.StatusOK {
+		t.Fatalf("list applications = %d %v", status, body)
+	}
+	if items := harness.Items(t, body); len(items) != 1 {
+		t.Fatalf("applications = %v, want only the installed application", items)
 	}
 }
 

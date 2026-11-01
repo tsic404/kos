@@ -177,6 +177,12 @@ func (s *Server) buildPlan(ctx context.Context, judge context.Context, verb Verb
 			if failure != nil {
 				return nil, nil, nil, s.refused(ctx, judge, item, object.Ref, verb, string(verb), failure)
 			}
+			// Only a create is an install: the entry judgement is skipped for
+			// objects the plan rewrites, exactly as the single-object update path
+			// does (C-24, C-33).
+			if failure := s.validateApplicationInstall(object.Object); failure != nil {
+				return nil, nil, nil, failure
+			}
 			grants[object.Ref.String()] = item
 			if failure := applyOwner(object.Object, item); failure != nil {
 				return nil, nil, nil, s.auditFailure(ctx, s.actorOfGrant(judge, item), item.Extension, object.Ref, setVerb(verb), failure)

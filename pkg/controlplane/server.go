@@ -473,6 +473,16 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The object does not exist, so this request is an install: an entry the
+	// catalogue judges uninstallable is refused before anything is written
+	// (C-24, C-31). A repeat create of an existing application and every update
+	// stay outside this judgement, so a withdrawn capability does not freeze an
+	// installed object (C-33, C-34).
+	if failure := s.validateApplicationInstall(object.Object); failure != nil {
+		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "create", failure))
+		return
+	}
+
 	// The control plane is the creator here, so this is the one place the
 	// attribution marker is written; an existing object keeps its own (C-02).
 	object = withCreationAttribution(object)

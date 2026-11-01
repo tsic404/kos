@@ -6,6 +6,7 @@ import (
 
 	"github.com/tsic404/kos/api/v1beta1"
 	"github.com/tsic404/kos/pkg/app"
+	"github.com/tsic404/kos/pkg/controlplane"
 	"github.com/tsic404/kos/pkg/extension"
 )
 
@@ -29,34 +30,47 @@ func definition(t *testing.T, requires []v1beta1.CapabilityRequirement) v1beta1.
 	return spec
 }
 
+// tampered builds one definition whose content no longer matches its digest.
+func tampered(t *testing.T) v1beta1.ApplicationDefinitionSpec {
+	t.Helper()
+	spec := definition(t, nil)
+	spec.Template = template + "data:\n  extra: \"x\"\n"
+	return spec
+}
+
 // TestJudgeEntryReportsWhyAnEntryCannotBeInstalled checks the two refusals C-24
-// names: a package that does not match its digest and a missing dependency.
+// names and the cause each one carries: a package that does not match its digest
+// and a missing dependency (C-24, C-12).
 func TestJudgeEntryReportsWhyAnEntryCannotBeInstalled(t *testing.T) {
 	available := []app.Capability{{Name: "storage.volume", Version: "v1"}}
 
 	valid := definition(t, nil)
-	entry := judgeEntry("demo", offer("ok", valid), available)
-	if !entry.Installable || entry.Reason != "" {
-		t.Fatalf("valid entry = %+v, want installable", entry)
+	entry, cause := judgeEntry("demo", offer("ok", valid), available)
+	if !entry.Installable || entry.Reason != "" || cause != "" {
+		t.Fatalf("valid entry = %+v (cause %q), want installable", entry, cause)
 	}
 
-	mismatched := definition(t, nil)
-	mismatched.Template = template + "data:\n  extra: \"x\"\n"
-	entry = judgeEntry("demo", offer("tampered", mismatched), available)
+	entry, cause = judgeEntry("demo", offer("tampered", tampered(t)), available)
 	if entry.Installable || !strings.Contains(entry.Reason, "digest") {
 		t.Fatalf("tampered entry = %+v, want the digest refusal", entry)
 	}
+	if cause != controlplane.CatalogueRefusalPackage {
+		t.Fatalf("cause = %q, want the package refusal", cause)
+	}
 
 	missing := definition(t, []v1beta1.CapabilityRequirement{{Name: "compute.gpu", Version: "v1"}})
-	entry = judgeEntry("demo", offer("needs-gpu", missing), available)
+	entry, cause = judgeEntry("demo", offer("needs-gpu", missing), available)
 	if entry.Installable || !strings.Contains(entry.Reason, "compute.gpu") {
 		t.Fatalf("entry with a missing dependency = %+v, want the dependency named", entry)
 	}
+	if cause != controlplane.CatalogueRefusalCapability {
+		t.Fatalf("cause = %q, want the capability refusal", cause)
+	}
 
 	optional := definition(t, []v1beta1.CapabilityRequirement{{Name: "compute.gpu", Version: "v1", Optional: true}})
-	entry = judgeEntry("demo", offer("optional-gpu", optional), available)
-	if !entry.Installable {
-		t.Fatalf("entry with an optional missing dependency = %+v, want installable", entry)
+	entry, cause = judgeEntry("demo", offer("optional-gpu", optional), available)
+	if !entry.Installable || cause != "" {
+		t.Fatalf("entry with an optional missing dependency = %+v (cause %q), want installable", entry, cause)
 	}
 }
 
@@ -89,13 +103,15 @@ func TestEntriesCarryTheDeclaredStructure(t *testing.T) {
 
 // TestJudgeInstallReportsAnEntryThatCannotBeInstalled checks the judgement the
 // write path reads before anything is written (C-24, C-31): a missing
-// capability is reported with its name, and a definition no source offers is
-// not a catalogue install at all.
+// capability is reported with its name and cause, a package that no longer
+// matches its digest reports the package cause, and a definition no source
+// offers is not a catalogue install at all.
 func TestJudgeInstallReportsAnEntryThatCannotBeInstalled(t *testing.T) {
 	declarations := fixedDeclarations{[]extension.CatalogueSource{{
 		ID: "demo",
 		Entries: []extension.CatalogueEntry{
 			offer("needs-gpu", definition(t, []v1beta1.CapabilityRequirement{{Name: "compute.gpu", Version: "v1"}})),
+			offer("tampered", tampered(t)),
 			offer("ok", definition(t, nil)),
 		},
 	}}}
@@ -111,9 +127,23 @@ func TestJudgeInstallReportsAnEntryThatCannotBeInstalled(t *testing.T) {
 	if !strings.Contains(verdict.Reason, "compute.gpu") {
 		t.Fatalf("reason = %q, want the capability named", verdict.Reason)
 	}
+	if verdict.Cause != controlplane.CatalogueRefusalCapability {
+		t.Fatalf("cause = %q, want the capability refusal", verdict.Cause)
+	}
+
+	verdict, found = service.JudgeInstall("tampered")
+	if !found || verdict.Installable {
+		t.Fatalf("verdict = %+v (found %v), want a refused install", verdict, found)
+	}
+	if verdict.Cause != controlplane.CatalogueRefusalPackage {
+		t.Fatalf("cause = %q, want the package refusal, not a missing capability", verdict.Cause)
+	}
+	if len(verdict.Missing) != 0 {
+		t.Fatalf("missing = %v, want no missing capability for a broken package", verdict.Missing)
+	}
 
 	verdict, found = service.JudgeInstall("ok")
-	if !found || !verdict.Installable || verdict.Reason != "" {
+	if !found || !verdict.Installable || verdict.Reason != "" || verdict.Cause != "" {
 		t.Fatalf("verdict = %+v (found %v), want an installable entry", verdict, found)
 	}
 
