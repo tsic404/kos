@@ -391,6 +391,11 @@ type ApplicationSpec struct {
 	// (C-32, C-38).
 	// +optional
 	Volumes []string `json:"volumes,omitempty"`
+	// EndpointHosts gives the hostname of each declared entry that needs one,
+	// keyed by the declaration name; a package never declares a hostname
+	// (C-32).
+	// +optional
+	EndpointHosts map[string]string `json:"endpointHosts,omitempty"`
 	// DriftPolicy decides what happens when a downstream object is written
 	// outside KOS (C-35); empty reads as reconcile.
 	// +optional
@@ -461,6 +466,36 @@ type ApplicationDefinitionSpec struct {
 	// materialized into an application at installation (C-67).
 	// +optional
 	Resources *ResourceRequirements `json:"resources,omitempty"`
+	// Volumes are the volume names the package declares; the installation
+	// writes them into the application's volume set once (C-32).
+	// +optional
+	Volumes []string `json:"volumes,omitempty"`
+	// Endpoints are the entry forms the package declares; the installation
+	// materializes each into a cascade endpoint (C-32).
+	// +optional
+	Endpoints []EndpointDefault `json:"endpoints,omitempty"`
+}
+
+// EndpointDefault is one entry form a package declares (C-32). It carries the
+// shape fields of C-43 and never a hostname: the user gives the hostname with
+// the application.
+type EndpointDefault struct {
+	// Name is the declaration name the application's endpointHosts refer to
+	// and the materialized endpoint is named after (C-32).
+	Name string `json:"name"`
+	// Kind selects the shape (C-43).
+	Kind EndpointKind `json:"kind"`
+	// Path is the path prefix of an http.path declaration (C-43).
+	// +optional
+	Path string `json:"path,omitempty"`
+	// Port is the port of an l4 or mdns declaration (C-43).
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Port int32 `json:"port,omitempty"`
+	// ServiceName is the advertised name of an mdns declaration (C-43).
+	// +optional
+	ServiceName string `json:"serviceName,omitempty"`
 }
 
 // PackageIdentity is the identity of a packaged artifact (C-32).

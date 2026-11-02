@@ -114,6 +114,9 @@ type Store interface {
 	// CreateRecord creates one immutable record in the KOS namespace: the
 	// abandonment manifest of an orphaned application (C-04, C-33).
 	CreateRecord(ctx context.Context, document *unstructured.Unstructured) (*unstructured.Unstructured, error)
+	// CreateEndpoint creates one cascade endpoint an installation materializes
+	// from the package's entry declarations (C-04, C-32).
+	CreateEndpoint(ctx context.Context, namespace string, document *unstructured.Unstructured) (*unstructured.Unstructured, error)
 	// Delete removes one rendered object (C-04).
 	Delete(ctx context.Context, namespace string, ref write.Ref) error
 	// SetFinalizers writes the finalizer list of one application (C-33).
@@ -1183,6 +1186,12 @@ func permanent(err error) bool {
 	}
 	var unknown *write.UnknownResource
 	if errors.As(err, &unknown) {
+		return true
+	}
+	// An invalid package cannot start working by being retried: the same bytes
+	// produce the same refusal (C-32, C-33).
+	var invalid *InvalidPackage
+	if errors.As(err, &invalid) {
 		return true
 	}
 	// A 404 on an apply means the served resource or namespace is gone; the same

@@ -99,6 +99,49 @@ spec:
                   - type
                   type: object
                 type: array
+              endpoints:
+                description: |-
+                  Endpoints are the entry forms the package declares; the installation
+                  materializes each into a cascade endpoint (C-32).
+                items:
+                  description: |-
+                    EndpointDefault is one entry form a package declares (C-32). It carries the
+                    shape fields of C-43 and never a hostname: the user gives the hostname with
+                    the application.
+                  properties:
+                    kind:
+                      description: Kind selects the shape (C-43).
+                      enum:
+                      - http.host
+                      - http.path
+                      - l4.tcp
+                      - l4.udp
+                      - mdns
+                      type: string
+                    name:
+                      description: |-
+                        Name is the declaration name the application's endpointHosts refer to
+                        and the materialized endpoint is named after (C-32).
+                      type: string
+                    path:
+                      description: Path is the path prefix of an http.path declaration
+                        (C-43).
+                      type: string
+                    port:
+                      description: Port is the port of an l4 or mdns declaration (C-43).
+                      format: int32
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                    serviceName:
+                      description: ServiceName is the advertised name of an mdns declaration
+                        (C-43).
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
               hooks:
                 description: |-
                   Hooks are optional lifecycle hooks; an exit status expresses the result
@@ -228,6 +271,13 @@ spec:
                   Template is the one-way translation template; it is a pure function of
                   the application and its config (C-32).
                 type: string
+              volumes:
+                description: |-
+                  Volumes are the volume names the package declares; the installation
+                  writes them into the application's volume set once (C-32).
+                items:
+                  type: string
+                type: array
             type: object
         type: object
     served: true
@@ -317,6 +367,49 @@ spec:
                   - type
                   type: object
                 type: array
+              endpoints:
+                description: |-
+                  Endpoints are the entry forms the package declares; the installation
+                  materializes each into a cascade endpoint (C-32).
+                items:
+                  description: |-
+                    EndpointDefault is one entry form a package declares (C-32). It carries the
+                    shape fields of C-43 and never a hostname: the user gives the hostname with
+                    the application.
+                  properties:
+                    kind:
+                      description: Kind selects the shape (C-43).
+                      enum:
+                      - http.host
+                      - http.path
+                      - l4.tcp
+                      - l4.udp
+                      - mdns
+                      type: string
+                    name:
+                      description: |-
+                        Name is the declaration name the application's endpointHosts refer to
+                        and the materialized endpoint is named after (C-32).
+                      type: string
+                    path:
+                      description: Path is the path prefix of an http.path declaration
+                        (C-43).
+                      type: string
+                    port:
+                      description: Port is the port of an l4 or mdns declaration (C-43).
+                      format: int32
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                    serviceName:
+                      description: ServiceName is the advertised name of an mdns declaration
+                        (C-43).
+                      type: string
+                  required:
+                  - kind
+                  - name
+                  type: object
+                type: array
               hooks:
                 description: |-
                   Hooks are optional lifecycle hooks; an exit status expresses the result
@@ -446,6 +539,13 @@ spec:
                   Template is the one-way translation template; it is a pure function of
                   the application and its config (C-32).
                 type: string
+              volumes:
+                description: |-
+                  Volumes are the volume names the package declares; the installation
+                  writes them into the application's volume set once (C-32).
+                items:
+                  type: string
+                type: array
             type: object
         type: object
     served: true

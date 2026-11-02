@@ -66,6 +66,13 @@ func (s *WriterStore) CreateRecord(ctx context.Context, document *unstructured.U
 	return s.writer.Create(ctx, write.SubjectApplicationReconciler, write.Session{}, document)
 }
 
+// CreateEndpoint creates one cascade endpoint inside the application's
+// namespace (C-04, C-32). The endpoint belongs to the application, and only the
+// installation creates it; a later round leaves it alone.
+func (s *WriterStore) CreateEndpoint(ctx context.Context, namespace string, document *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	return s.scoped(namespace).Create(ctx, write.SubjectApplicationReconciler, write.Session{}, document)
+}
+
 // Delete removes one rendered object inside its declared namespace (C-04).
 func (s *WriterStore) Delete(ctx context.Context, namespace string, ref write.Ref) error {
 	return s.scoped(namespace).Delete(ctx, write.SubjectApplicationReconciler, write.Session{}, ref)

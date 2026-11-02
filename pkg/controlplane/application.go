@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"sort"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/tsic404/kos/api/v1beta1"
 	"github.com/tsic404/kos/pkg/app"
@@ -19,7 +21,7 @@ import (
 // the field boundary of C-32 forbids, before anything reaches the cluster. A
 // missing definition is not a rejection: the application stays Pending until
 // it appears (C-33).
-func (s *Server) validateApplicationWrite(ctx context.Context, object *unstructured.Unstructured) *Error {
+func (s *Server) validateApplicationWrite(ctx context.Context, object *unstructured.Unstructured, current map[string]any) *Error {
 	if object.GetKind() != "Application" {
 		return nil
 	}
@@ -60,8 +62,61 @@ func (s *Server) validateApplicationWrite(ctx context.Context, object *unstructu
 	if err := app.ValidateDefinition(definition.Spec); err != nil {
 		return invalidField(err.Error())
 	}
+	if failure := validateApplicationEndpointHosts(spec, current, definition); failure != nil {
+		return failure
+	}
 	if _, err := app.Resolve(definition.Spec.Config, config); err != nil {
 		return invalidApplication(err)
+	}
+	return nil
+}
+
+// validateApplicationEndpointHosts refuses a hostname this write introduces or
+// changes for an entry the definition does not declare, and one whose form
+// carries no hostname (C-32, C-43). A key the write keeps at the value the
+// stored application carries is the record of an installed entry: a definition
+// update that drops or renames a declaration neither revokes nor freezes it.
+func validateApplicationEndpointHosts(spec, current map[string]any, definition *v1beta1.ApplicationDefinition) *Error {
+	raw, present := spec["endpointHosts"]
+	if !present || raw == nil {
+		return nil
+	}
+	hosts, ok := raw.(map[string]any)
+	if !ok {
+		return invalidField("spec.endpointHosts 必须是一个对象")
+	}
+	stored := map[string]any{}
+	if current != nil {
+		currentSpec, _, _ := unstructured.NestedMap(current, "spec")
+		stored, _, _ = unstructured.NestedMap(currentSpec, "endpointHosts")
+	}
+	declared := make(map[string]v1beta1.EndpointKind, len(definition.Spec.Endpoints))
+	for _, entry := range definition.Spec.Endpoints {
+		declared[entry.Name] = entry.Kind
+	}
+	names := make([]string, 0, len(hosts))
+	for name := range hosts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if previous, found := stored[name]; found && previous == hosts[name] {
+			continue
+		}
+		host, ok := hosts[name].(string)
+		if !ok || strings.TrimSpace(host) == "" {
+			return invalidField("spec.endpointHosts." + name + " 必须是一个非空字符串")
+		}
+		kind, known := declared[name]
+		if !known {
+			return invalidField("spec.endpointHosts 引用了定义未声明的入口 " + name)
+		}
+		if !app.EntryNeedsHost(kind) {
+			return invalidField("spec.endpointHosts." + name + "：入口形态不接受主机名")
+		}
+		if problems := validation.IsDNS1123Subdomain(host); len(problems) > 0 {
+			return invalidField("spec.endpointHosts." + name + "：" + strings.Join(problems, "; "))
+		}
 	}
 	return nil
 }
@@ -161,11 +216,11 @@ func validateApplicationResources(object *unstructured.Unstructured) *Error {
 	return nil
 }
 
-// materializeApplicationResources fills the resource fields a create leaves
-// empty with the package defaults (C-67). The write happens once: the values
-// belong to the application spec afterwards, so a later definition update does
-// not change them (C-32).
-func (s *Server) materializeApplicationResources(ctx context.Context, object *unstructured.Unstructured) *Error {
+// materializeApplicationDefaults fills the fields a create leaves empty with
+// the package defaults: the resource set (C-67) and the declared volume names
+// (C-32). The write happens once: the values belong to the application spec
+// afterwards, so a later definition update does not change them (C-32).
+func (s *Server) materializeApplicationDefaults(ctx context.Context, object *unstructured.Unstructured) *Error {
 	if object.GetKind() != "Application" {
 		return nil
 	}
@@ -184,29 +239,90 @@ func (s *Server) materializeApplicationResources(ctx context.Context, object *un
 	if err != nil {
 		return s.readFailure(err, kernelRef("ApplicationDefinition", "", definitionRef))
 	}
-	if definition == nil || definition.Spec.Resources == nil {
+	if definition == nil {
 		return nil
 	}
-	submitted, failure := resourcesOfSpec(spec)
+	if failure := materializeVolumeNames(spec, definition.Spec.Volumes); failure != nil {
+		return failure
+	}
+	if definition.Spec.Resources != nil {
+		submitted, failure := resourcesOfSpec(spec)
+		if failure != nil {
+			return failure
+		}
+		merged := app.MergeResources(definition.Spec.Resources, submitted)
+		if merged != nil {
+			if err := app.ValidateResources(merged, "spec.resources"); err != nil {
+				return invalidField(err.Error())
+			}
+			encoded, err := runtime.DefaultUnstructuredConverter.ToUnstructured(merged)
+			if err != nil {
+				return internal(StageValidate, "资源默认值无法编码")
+			}
+			spec["resources"] = encoded
+		}
+	}
+	if err := unstructured.SetNestedMap(object.Object, spec, "spec"); err != nil {
+		return internal(StageValidate, "默认值无法写入 spec")
+	}
+	return nil
+}
+
+// materializeVolumeNames writes the package's declared volume names into the
+// application's volume set (C-32). The user's own names come first and every
+// declared name missing from them is appended, so the installation writes each
+// name once and a definition update no longer reaches the set.
+func materializeVolumeNames(spec map[string]any, declared []string) *Error {
+	if len(declared) == 0 {
+		return nil
+	}
+	names, failure := volumeNamesOf(spec)
 	if failure != nil {
 		return failure
 	}
-	merged := app.MergeResources(definition.Spec.Resources, submitted)
-	if merged == nil {
-		return nil
+	seen := make(map[string]bool, len(names)+len(declared))
+	merged := make([]string, 0, len(names)+len(declared))
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		merged = append(merged, name)
 	}
-	if err := app.ValidateResources(merged, "spec.resources"); err != nil {
-		return invalidField(err.Error())
+	for _, name := range declared {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		merged = append(merged, name)
 	}
-	encoded, err := runtime.DefaultUnstructuredConverter.ToUnstructured(merged)
-	if err != nil {
-		return internal(StageValidate, "资源默认值无法编码")
+	values := make([]any, len(merged))
+	for index, name := range merged {
+		values[index] = name
 	}
-	spec["resources"] = encoded
-	if err := unstructured.SetNestedMap(object.Object, spec, "spec"); err != nil {
-		return internal(StageValidate, "资源默认值无法写入 spec")
-	}
+	spec["volumes"] = values
 	return nil
+}
+
+// volumeNamesOf reads one spec's volume set; a missing value is empty.
+func volumeNamesOf(spec map[string]any) ([]string, *Error) {
+	raw, present := spec["volumes"]
+	if !present || raw == nil {
+		return nil, nil
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, invalidField("spec.volumes 必须是一个字符串数组")
+	}
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		name, ok := item.(string)
+		if !ok {
+			return nil, invalidField("spec.volumes 必须是一个字符串数组")
+		}
+		names = append(names, name)
+	}
+	return names, nil
 }
 
 // mergeStoredApplicationResources keeps every resource field an update leaves

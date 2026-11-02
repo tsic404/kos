@@ -115,6 +115,11 @@ func (s *maintenanceStore) CreateRecord(_ context.Context, document *unstructure
 	return document, nil
 }
 
+// CreateEndpoint accepts one cascade endpoint without keeping it.
+func (s *maintenanceStore) CreateEndpoint(_ context.Context, _ string, document *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	return document, nil
+}
+
 // Delete removes one stored object.
 func (s *maintenanceStore) Delete(_ context.Context, _ string, ref write.Ref) error {
 	delete(s.objects, keyOf(ref))

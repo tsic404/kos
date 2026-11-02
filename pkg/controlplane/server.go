@@ -503,11 +503,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if s.refuseFullStorage(w, ctx, object) {
 		return
 	}
-	if failure := s.validateApplicationWrite(ctx, object.Object); failure != nil {
+	if failure := s.validateApplicationWrite(ctx, object.Object, nil); failure != nil {
 		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "create", failure))
 		return
 	}
-	if failure := s.materializeApplicationResources(ctx, object.Object); failure != nil {
+	if failure := s.materializeApplicationDefaults(ctx, object.Object); failure != nil {
 		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "create", failure))
 		return
 	}
@@ -622,7 +622,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "update", failure))
 		return
 	}
-	if failure := s.validateApplicationWrite(ctx, object.Object); failure != nil {
+	if failure := s.validateApplicationWrite(ctx, object.Object, current.Object); failure != nil {
 		writeError(w, s.auditFailure(ctx, actor, grant.Extension, object.Ref, "update", failure))
 		return
 	}

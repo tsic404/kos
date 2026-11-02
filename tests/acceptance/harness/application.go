@@ -159,6 +159,31 @@ func DefinitionContent(t *testing.T, name, dataFormat, template string, hooks []
 	return definition
 }
 
+// DefinitionWithDefaults builds a definition that declares the given volume
+// names and entry forms, with the digest the catalogue would compute (C-32).
+func DefinitionWithDefaults(t *testing.T, name, template string, volumes []string, endpoints []v1beta1.EndpointDefault) *v1beta1.ApplicationDefinition {
+	t.Helper()
+	definition := &v1beta1.ApplicationDefinition{
+		TypeMeta:   metav1.TypeMeta{APIVersion: api.Group + "/v1beta1", Kind: "ApplicationDefinition"},
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: v1beta1.ApplicationDefinitionSpec{
+			Package:   v1beta1.PackageIdentity{Version: "1.0.0"},
+			Template:  template,
+			Volumes:   volumes,
+			Endpoints: endpoints,
+		},
+	}
+	digest, err := app.DefinitionDigest(definition.Spec)
+	if err != nil {
+		t.Fatalf("digest definition %q: %v", name, err)
+	}
+	definition.Spec.Package.Digest = digest
+	if err := app.ValidateDefinition(definition.Spec); err != nil {
+		t.Fatalf("definition %q is invalid: %v", name, err)
+	}
+	return definition
+}
+
 // Definition builds a definition that renders one ConfigMap and carries the
 // given capability requirements. Its package digest is computed from the
 // content, as the catalogue does (C-32).

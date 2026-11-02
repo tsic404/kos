@@ -1383,3 +1383,61 @@ func TestForcedWritesNeedTheAllocatedSubject(t *testing.T) {
 		t.Fatal("a delete was admitted as a forced write")
 	}
 }
+
+// TestApplicationReconcilerCreatesOnlyCascadeEndpoints covers C-04's cascade
+// entry row: the application reconciler creates the endpoints an installation
+// materializes, never rewrites one, and never writes outside the application's
+// namespace (C-32, C-45).
+func TestApplicationReconcilerCreatesOnlyCascadeEndpoints(t *testing.T) {
+	endpoint := Ref{Group: api.Group, Version: "v1beta1", Kind: "Endpoint", Namespace: "apps", Name: "web"}
+	parent := Ref{Group: api.Group, Version: "v1beta1", Kind: "Application", Namespace: "apps", Name: "web"}
+	cases := []struct {
+		name string
+		req  Request
+		want bool
+	}{
+		{
+			name: "creates a cascade endpoint",
+			req: Request{
+				Subject: SubjectApplicationReconciler, Object: endpoint, Verb: VerbCreate,
+				Parts: []Part{PartSpec, PartMarker}, Scope: namespaces("apps"),
+				Markers: creatorMarkers("uid-application"),
+			},
+			want: true,
+		},
+		{
+			name: "rewrites a cascade endpoint",
+			req: Request{
+				Subject: SubjectApplicationReconciler, Object: endpoint, Verb: VerbApply,
+				Parts: []Part{PartSpec}, Scope: namespaces("apps"),
+				Current: objectStored(api.Group+"/v1beta1", "Endpoint", "apps", "web", managedLabels),
+			},
+		},
+		{
+			name: "creates an endpoint outside the declared namespace",
+			req: Request{
+				Subject: SubjectApplicationReconciler, Object: endpoint, Verb: VerbCreate,
+				Parts: []Part{PartSpec, PartMarker}, Scope: namespaces("elsewhere"),
+				Markers: creatorMarkers("uid-application"),
+			},
+		},
+		{
+			name: "creates another kernel kind",
+			req: Request{
+				Subject: SubjectApplicationReconciler, Object: parent, Verb: VerbCreate,
+				Parts: []Part{PartSpec}, Scope: namespaces("apps"),
+			},
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := Admit(testCase.req)
+			if testCase.want && err != nil {
+				t.Fatalf("write was refused: %v", err)
+			}
+			if !testCase.want && err == nil {
+				t.Fatal("write was admitted")
+			}
+		})
+	}
+}

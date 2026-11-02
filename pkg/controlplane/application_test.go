@@ -795,3 +795,59 @@ func TestPlanJudgesOnlyTheCreatesOfAnUninstallableEntry(t *testing.T) {
 		t.Fatalf("plan of a new application = %v, want %s", failure, CodeCapabilityMissing)
 	}
 }
+
+// TestValidateApplicationEndpointHostsKeepsStoredKeysAsRecords covers the update
+// path: a stored hostname whose declaration the definition no longer carries is
+// the record of an installed entry and stays writable, while a key this write
+// introduces or changes must match a declaration (C-32).
+func TestValidateApplicationEndpointHostsKeepsStoredKeysAsRecords(t *testing.T) {
+	definition := &v1beta1.ApplicationDefinition{Spec: v1beta1.ApplicationDefinitionSpec{
+		Endpoints: []v1beta1.EndpointDefault{{Name: "web", Kind: v1beta1.EndpointKindHTTPHost}},
+	}}
+	current := map[string]any{"spec": map[string]any{"endpointHosts": map[string]any{
+		"web":    "web.example.test",
+		"legacy": "legacy.example.test",
+	}}}
+	cases := []struct {
+		name    string
+		hosts   map[string]any
+		current map[string]any
+		wantErr bool
+	}{
+		{
+			name:    "stored keys keep their values",
+			hosts:   map[string]any{"web": "web.example.test", "legacy": "legacy.example.test"},
+			current: current,
+		},
+		{
+			name:    "a changed undeclared key is refused",
+			hosts:   map[string]any{"web": "web.example.test", "legacy": "other.example.test"},
+			current: current,
+			wantErr: true,
+		},
+		{
+			name:    "a new undeclared key is refused",
+			hosts:   map[string]any{"web": "web.example.test", "extra": "extra.example.test"},
+			current: current,
+			wantErr: true,
+		},
+		{
+			name:    "a create has no stored keys",
+			hosts:   map[string]any{"legacy": "legacy.example.test"},
+			current: nil,
+			wantErr: true,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			spec := map[string]any{"endpointHosts": testCase.hosts}
+			failure := validateApplicationEndpointHosts(spec, testCase.current, definition)
+			if testCase.wantErr && failure == nil {
+				t.Fatal("the write was accepted")
+			}
+			if !testCase.wantErr && failure != nil {
+				t.Fatalf("the write was refused: %s", failure.Message)
+			}
+		})
+	}
+}

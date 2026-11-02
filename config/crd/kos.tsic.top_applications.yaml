@@ -58,6 +58,14 @@ spec:
                 - adopt
                 - ignore
                 type: string
+              endpointHosts:
+                additionalProperties:
+                  type: string
+                description: |-
+                  EndpointHosts gives the hostname of each declared entry that needs one,
+                  keyed by the declaration name; a package never declares a hostname
+                  (C-32).
+                type: object
               namespace:
                 description: |-
                   Namespace is the namespace the application declares for everything it
@@ -721,6 +729,14 @@ spec:
                 - adopt
                 - ignore
                 type: string
+              endpointHosts:
+                additionalProperties:
+                  type: string
+                description: |-
+                  EndpointHosts gives the hostname of each declared entry that needs one,
+                  keyed by the declaration name; a package never declares a hostname
+                  (C-32).
+                type: object
               namespace:
                 description: |-
                   Namespace is the namespace the application declares for everything it

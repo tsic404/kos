@@ -147,11 +147,6 @@ func (s *Server) buildPlan(ctx context.Context, judge context.Context, verb Verb
 			return nil, nil, nil, invalidField("请求重复给出了对象 " + object.Ref.String()).about(object.Ref)
 		}
 		seen[object.Ref.String()] = true
-		// An Application in a desired set meets the same C-32/F3 judgement as a
-		// single-object write; the set path must not be a way around it (C-12).
-		if failure := s.validateApplicationWrite(ctx, object.Object); failure != nil {
-			return nil, nil, nil, failure
-		}
 		desired = append(desired, object)
 	}
 
@@ -171,8 +166,20 @@ func (s *Server) buildPlan(ctx context.Context, judge context.Context, verb Verb
 				s.log.Error("plan read failed", "object", object.Ref.String(), "error", err)
 				return nil, nil, nil, internal(StagePlan, "读取对象 "+object.Ref.String()+" 失败").about(object.Ref)
 			}
+			// An Application in a desired set meets the same C-32/F3 judgement
+			// as a single-object create; the set path must not be a way around
+			// it (C-12). The judge runs here so a create has no stored object to
+			// compare the endpoint hostnames with (C-32).
+			if failure := s.validateApplicationWrite(ctx, object.Object, nil); failure != nil {
+				return nil, nil, nil, failure
+			}
 			// A create under the set path is judged like a single-object create
 			// (C-12, C-59); the API writes the owner the seam returns (C-60).
+			// The install fills the package defaults into the spec the same way
+			// the single-object create does (C-32, C-67).
+			if failure := s.materializeApplicationDefaults(ctx, object.Object); failure != nil {
+				return nil, nil, nil, failure
+			}
 			item, failure := s.decide(judge, verb, object.Ref, object.Object.Object, nil)
 			if failure != nil {
 				return nil, nil, nil, s.refused(ctx, judge, item, object.Ref, verb, string(verb), failure)
@@ -201,6 +208,12 @@ func (s *Server) buildPlan(ctx context.Context, judge context.Context, verb Verb
 				plan.Warnings = append(plan.Warnings, *warning)
 			}
 			continue
+		}
+		// An update keeps the endpoint hostnames the stored object carries as
+		// the record of its installed entries; only a key this write introduces
+		// or changes is judged against the definition (C-32).
+		if failure := s.validateApplicationWrite(ctx, object.Object, current.Object); failure != nil {
+			return nil, nil, nil, failure
 		}
 		item, failure := s.decide(judge, verb, object.Ref, object.Object.Object, current.Object)
 		if failure != nil {

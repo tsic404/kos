@@ -170,6 +170,18 @@ func admitKernelSpec(req Request) error {
 		}
 		return admitAttributed(req)
 	}
+	// C-04 allocates the cascade entries to the application reconciler: it
+	// creates the endpoints an installation materializes from the package's
+	// declarations and never rewrites one (C-32, C-45).
+	if req.Subject == SubjectApplicationReconciler && req.Object.Kind == "Endpoint" {
+		if req.Verb != VerbCreate || req.Current != nil {
+			return denyf(req, "the application reconciler creates its cascade endpoints and never rewrites them")
+		}
+		if !req.Scope.Namespaces[req.Object.Namespace] {
+			return denyf(req, "namespace is not declared by the application")
+		}
+		return nil
+	}
 	if req.Subject != SubjectUser {
 		return denyf(req, "the user spec is written by the user")
 	}

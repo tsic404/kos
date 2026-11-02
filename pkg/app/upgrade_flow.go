@@ -106,6 +106,16 @@ func (c *Controller) recordBaseline(ctx context.Context, application *v1beta1.Ap
 		}
 		return c.recordFailure(ctx, application, now, err.Error())
 	}
+	// The package's entry declarations become cascade endpoints once, at the
+	// first installation: a later round never adds to what is installed (C-32).
+	if application.Status.Applied == nil {
+		if err := c.materializeEndpoints(ctx, application, next.definition); err != nil {
+			if permanent(err) {
+				return c.fail(ctx, application, ConditionInvalidPackage, err.Error())
+			}
+			return c.recordFailure(ctx, application, now, err.Error())
+		}
+	}
 	status := baseStatus(application)
 	status.Phase = PhaseReady
 	status.Rendered = rendered
